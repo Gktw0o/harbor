@@ -1,30 +1,26 @@
-# Progress
+# Project Brief
 
-## Milestones
-- [ ] **M0 Skeleton** — layout, builds for x64+arm64, CI, ping/pong IPC.
-- [ ] **M1 Safety first** — taskbar hide/restore + panic hotkey + crash filter + Shell watchdog,
-      with a manual test checklist (kill -9, logoff, explorer restart, monitor hot-plug).
-- [ ] **M2 Dock window** — AppBar registration, per-monitor DPI, backdrop + rounded island,
-      pinned apps from settings, launch on click.
-- [ ] **M3 Running windows** — event-hook tracking, grouping by AUMID, activate/minimize,
-      running indicators, icons cache, multi-monitor.
-- [ ] **M4 Sensors baseline** — CPU/RAM/storage/GPU/battery backends, stats stream to dock,
-      stats island UI with hover-expand.
-- [ ] **M5 Settings + onboarding** — WinUI 3 settings, first-run explainer, autostart.
-- [ ] **M6 Temperatures** — capability detection per arch, ACPI baseline,
-      optional elevated backend (spike + ADR first).
-- [ ] **M7 Polish + packaging** — animations (magnify, bounce), auto-hide, MSIX, perf budget check.
-- [ ] **v2 Finder** — scoped separately when v1 ships.
+## What
+A native Windows 11 shell enhancement with three parts:
+1. **Dock** — a floating, macOS-style "island" dock that replaces the taskbar: pinned apps,
+   running windows, launch/activate/minimize, magnification-style hover, rounded translucent surface.
+2. **Stats island** — compact live readouts inside/next to the dock: CPU, RAM, storage, GPU,
+   battery, temperatures (where available).
+3. **Finder (v2)** — a Finder-style file manager (column view, previews, tags, fast search).
 
-## What works
-- Nothing yet.
+## Goals
+- Feels as fluid as macOS (60+ fps animations, no jank on hover).
+- Native on **Windows 11 x64 and ARM64** (Snapdragon X class laptops are first-class).
+- Safe: it can never leave a user stuck without a working taskbar.
+- Light: always-on processes cost almost nothing at idle.
 
-## Known issues
-- None yet.
+## Non-goals (v1)
+- Replacing Explorer as the shell process.
+- Kernel drivers, DLL injection, or patching explorer.exe.
+- Windows 10 support.
+- Finder (v2 only; dock + stats ship first).
 
-## Risks / research spikes
-- **Tray icons**: no public API to enumerate other apps' notification icons.
-  Options to evaluate in a spike: keep a minimal system tray visible, or show a "tray" button
-  that reveals the real one. Decide via ADR before M3 ends.
-- **Temps on ARM64**: may be unavailable; UI must handle it.
-- **Explorer re-showing the taskbar**: handle `TaskbarCreated`, display and DPI changes.
+## Success criteria for v1
+- Daily-drivable for a week on both an x64 desktop and an ARM64 laptop with the taskbar hidden.
+- Idle: dock < 0.5 % CPU, < 40 MB; sensors service < 1 % CPU at 1 Hz sampling.
+- Zero "lost taskbar" incidents across crash/kill/logoff tests.

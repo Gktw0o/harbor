@@ -1,25 +1,30 @@
-# Product Context
+# Progress
 
-## Why
-The Windows 11 taskbar is rigid (fixed position, limited customization) and Windows has no
-built-in, glanceable hardware monitor. Mac switchers miss the Dock and Finder.
+## Milestones
+- [ ] **M0 Skeleton** — layout, builds for x64+arm64, CI, ping/pong IPC.
+- [ ] **M1 Safety first** — taskbar hide/restore + panic hotkey + crash filter + Shell watchdog,
+      with a manual test checklist (kill -9, logoff, explorer restart, monitor hot-plug).
+- [ ] **M2 Dock window** — AppBar registration, per-monitor DPI, backdrop + rounded island,
+      pinned apps from settings, launch on click.
+- [ ] **M3 Running windows** — event-hook tracking, grouping by AUMID, activate/minimize,
+      running indicators, icons cache, multi-monitor.
+- [ ] **M4 Sensors baseline** — CPU/RAM/storage/GPU/battery backends, stats stream to dock,
+      stats island UI with hover-expand.
+- [ ] **M5 Settings + onboarding** — WinUI 3 settings, first-run explainer, autostart.
+- [ ] **M6 Temperatures** — capability detection per arch, ACPI baseline,
+      optional elevated backend (spike + ADR first).
+- [ ] **M7 Polish + packaging** — animations (magnify, bounce), auto-hide, MSIX, perf budget check.
+- [ ] **v2 Finder** — scoped separately when v1 ships.
 
-## Users
-- Power users and developers on Windows 11 desktops and laptops.
-- Laptop users (incl. ARM64) who want battery/thermal awareness at a glance.
+## What works
+- Nothing yet.
 
-## Experience principles
-- **Glanceable**: stats readable in < 1 s; detail on hover/click, not by default.
-- **Calm**: no flicker, no layout jumps; values animate, they don't jump.
-- **Familiar**: Dock behaviors match macOS where sensible (pinned left, running dots,
-  bounce on launch, right-click menu, drag to reorder, auto-hide option).
-- **Respectful**: zero admin rights needed for core features; elevated features are opt-in
-  and explained.
+## Known issues
+- None yet.
 
-## Core user flows (v1)
-1. Install → first run explains the taskbar will be hidden + shows the panic hotkey → enable.
-2. Click a pinned app → launches, icon bounces, running indicator appears.
-3. Click a running app's icon → activates; click again → minimizes.
-4. Hover the stats island → expands to detail (per-core CPU, per-drive storage, GPU engines).
-5. Settings: position (bottom/left/right), size, magnification, auto-hide, which stats to show.
-6. Quit or crash → taskbar comes back.
+## Risks / research spikes
+- **Tray icons**: no public API to enumerate other apps' notification icons.
+  Options to evaluate in a spike: keep a minimal system tray visible, or show a "tray" button
+  that reveals the real one. Decide via ADR before M3 ends.
+- **Temps on ARM64**: may be unavailable; UI must handle it.
+- **Explorer re-showing the taskbar**: handle `TaskbarCreated`, display and DPI changes.

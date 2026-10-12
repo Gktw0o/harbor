@@ -426,3 +426,29 @@ FodyWeavers.xsd
 
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache
+
+# CMake / Ninja / vcpkg
+build/
+out/
+CMakeUserPresets.json
+vcpkg_installed/
+
+# VS Code (keep shared settings, ignore personal ones)
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+# Claude Code personal files
+CLAUDE.local.md
+.claude/settings.local.json
+KICKOFF_PROMPT.md
+
+# Signing certificates and secrets (never commit these)
+*.pfx
+*.snk
+.env
+
+# Logs
+*.log

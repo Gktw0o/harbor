@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 
 #include "adapters/composition_renderer.h"
@@ -36,6 +37,8 @@ class DockWindow
         // Test docks: close the window (and so exit) after this long without a control connection, so a test
         // that dies never leaves a dock behind. Zero: never.
         std::chrono::milliseconds orphanTimeout{0};
+        // Where the Shell leaves the items' icon files (<data dir>\icons).
+        std::filesystem::path iconsDir;
     };
 
     enum class CreateResult

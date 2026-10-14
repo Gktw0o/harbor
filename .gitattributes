@@ -5,3 +5,6 @@
 *.bat  text eol=crlf
 *.cmd  text eol=crlf
 *.slnx text eol=crlf
+
+# Icon files (contracts/README.md): raw pixels, never converted.
+*.bgra binary

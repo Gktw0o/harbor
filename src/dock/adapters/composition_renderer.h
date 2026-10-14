@@ -5,8 +5,10 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <span>
 
 #include "core/island/appearance.h"
+#include "core/island/icon_file.h"
 #include "core/island/layout.h"
 #include "ports/logger.h"
 
@@ -38,11 +40,12 @@ class CompositionRenderer
     // gone: Render again. False if there is none to be had.
     bool RecreateDevice() noexcept;
 
-    // Rebuilds the island for layout (screen coordinates; the window covers layout.island) and style. Posts
-    // committedMessage (wParam = tag) to the window once the frame has been committed for the screen. False
-    // if it failed.
+    // Rebuilds the island for layout (screen coordinates; the window covers layout.island) and style, with
+    // icons[i] drawn for item i (a placeholder where there is none). Posts committedMessage (wParam = tag) to
+    // the window once the frame has been committed for the screen. False if it failed.
     bool Render(const island::Layout& layout, const island::IslandStyle& style,
-                std::optional<std::size_t> hovered, UINT committedMessage, WPARAM tag) noexcept;
+                std::span<const std::optional<island::IconView>> icons, std::optional<std::size_t> hovered,
+                UINT committedMessage, WPARAM tag) noexcept;
 
     // Moves the hover highlight; nullopt hides it.
     void SetHovered(std::optional<std::size_t> hovered) noexcept;

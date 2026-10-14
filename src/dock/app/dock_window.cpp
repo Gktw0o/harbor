@@ -1,13 +1,17 @@
 #include "app/dock_window.h"
 
+#include <algorithm>
 #include <format>
 #include <ShellScalingApi.h>
 #include <string>
 #include <utility>
 #include <variant>
+#include <vector>
 
+#include "adapters/icon_files.h"
 #include "adapters/system_appearance.h"
 #include "app/exit_codes.h"
+#include "core/island/icon_file.h"
 
 namespace harbor::dock
 {
@@ -226,11 +230,25 @@ void DockWindow::Refresh(bool force)
     {
         m_hovered.reset();
     }
-    if (m_renderer.Render(*m_layout, m_style, m_hovered, kRenderCommitted, ++m_renderGeneration))
+    // Read again on every redraw rather than kept: decoded, 40 icons would hold 10 MB (rule 4).
+    std::vector<std::vector<std::uint8_t>> files;
+    std::vector<std::optional<island::IconView>> icons;
+    files.reserve(m_layout->items.size());
+    for (std::size_t i = 0; i < m_layout->items.size(); ++i)
     {
-        m_log.Info(std::format("island: {} items, {}x{} at {},{} ({} dpi, {})", m_layout->items.size(),
-                               island.Width(), island.Height(), island.left, island.top, m_dpi,
-                               m_style.backdrop ? "backdrop" : "solid"));
+        const auto& icon = m_items.items[i].icon;
+        files.push_back(icon ? adapters::ReadIconFile(m_options.iconsDir, *icon)
+                             : std::vector<std::uint8_t>{});
+        icons.push_back(island::ParseIconFile(files.back()));
+    }
+    const auto drawn =
+        std::count_if(icons.begin(), icons.end(), [](const auto& icon) { return icon.has_value(); });
+
+    if (m_renderer.Render(*m_layout, m_style, icons, m_hovered, kRenderCommitted, ++m_renderGeneration))
+    {
+        m_log.Info(std::format("island: {} items ({} icons), {}x{} at {},{} ({} dpi, {})",
+                               m_layout->items.size(), drawn, island.Width(), island.Height(), island.left,
+                               island.top, m_dpi, m_style.backdrop ? "backdrop" : "solid"));
     }
     UpdatePresentable();
 }

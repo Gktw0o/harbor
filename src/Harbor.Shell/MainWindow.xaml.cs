@@ -46,7 +46,8 @@ public sealed partial class MainWindow : Window
 
         // Pinned apps: settings.json -> looked up -> dockItems to whichever dock is connected.
         var settings = new SettingsWatcher(new SettingsFile(HarborPaths.DefaultDataDir, log), log);
-        var publisher = new DockItemsPublisher(new ShellPinResolver(), log);
+        var icons = new IconStore(HarborPaths.DefaultDataDir, log);
+        var publisher = new DockItemsPublisher(new ShellPinResolver(icons), log, icons);
         settings.Changed += publisher.Update;
         publisher.Built += _supervisor.SetDockItems;
 

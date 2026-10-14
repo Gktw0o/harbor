@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Harbor.Core.Apps;
 using Harbor.Core.Ipc;
 using Harbor.Core.Supervision;
 using Harbor.Core.Taskbar;
@@ -113,6 +114,32 @@ public sealed class DockE2ETests
             Assert.IsGreaterThan(empty.Width, three.Width);
             Assert.AreEqual(empty.Height, three.Height);
             Assert.AreEqual(empty.Bottom, three.Bottom);
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // The Shell's icon files reach the island; an item whose file is missing gets a placeholder.
+    [TestMethod]
+    public async Task DockDrawsTheIconFilesTheShellLeaves()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var icon = new IconStore(dataDir.Path, new CapturingLog()).Save(new IconImage(2, 2, [0, 0, 255, 255, 0, 128, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255]));
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.App, "A", "A", icon),
+                new DockItem(DockItemKind.App, "B", "B", "0123456789abcdef.bgra"),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 2 items (1 icons)", TimeSpan.FromSeconds(10)),
+                await TestDock.ReadLogAsync(dataDir.Path));
         }
         finally
         {

@@ -1,5 +1,6 @@
 #include "adapters/composition_renderer.h"
 
+#include <algorithm>
 #include <atomic>
 #include <d2d1_1.h>
 #include <d3d11_4.h>
@@ -139,8 +140,9 @@ struct CompositionRenderer::Impl
         removed.reset();
     }
 
-    // An item without an icon: a rounded square in the placeholder color.
-    wuc::CompositionSurfaceBrush PlaceholderBrush(int size, island::Color color)
+    // A size x size surface drawn by draw(context, area): area is the surface's square in the context's
+    // pixels.
+    template <typename Draw> wuc::CompositionSurfaceBrush DrawSurface(int size, Draw&& draw)
     {
         const float extent = static_cast<float>(size);
         auto surface = graphics.CreateDrawingSurface(
@@ -151,17 +153,47 @@ struct CompositionRenderer::Impl
         POINT offset{};
         winrt::check_hresult(interop->BeginDraw(nullptr, IID_PPV_ARGS(context.put()), &offset));
         context->Clear({0, 0, 0, 0});
-        winrt::com_ptr<ID2D1SolidColorBrush> brush;
-        winrt::check_hresult(context->CreateSolidColorBrush(ToD2D(color), brush.put()));
-        const float inset = extent * 0.08f;
-        const float radius = extent * 0.22f;
-        const float left = static_cast<float>(offset.x);
-        const float top = static_cast<float>(offset.y);
-        context->FillRoundedRectangle(
-            {{left + inset, top + inset, left + extent - inset, top + extent - inset}, radius, radius},
-            brush.get());
+        const D2D1_RECT_F area{static_cast<float>(offset.x), static_cast<float>(offset.y),
+                               static_cast<float>(offset.x) + extent, static_cast<float>(offset.y) + extent};
+        draw(*context, area);
         winrt::check_hresult(interop->EndDraw());
         return compositor.CreateSurfaceBrush(surface);
+    }
+
+    // An item without an icon: a rounded square in the placeholder color.
+    wuc::CompositionSurfaceBrush PlaceholderBrush(int size, island::Color color)
+    {
+        return DrawSurface(size, [&](ID2D1DeviceContext& context, const D2D1_RECT_F& area) {
+            winrt::com_ptr<ID2D1SolidColorBrush> brush;
+            winrt::check_hresult(context.CreateSolidColorBrush(ToD2D(color), brush.put()));
+            const float inset = (area.right - area.left) * 0.08f;
+            const float radius = (area.right - area.left) * 0.22f;
+            context.FillRoundedRectangle(
+                {{area.left + inset, area.top + inset, area.right - inset, area.bottom - inset},
+                 radius,
+                 radius},
+                brush.get());
+        });
+    }
+
+    // The Shell's icon, scaled down to size (high-quality cubic), centred if it isn't square.
+    wuc::CompositionSurfaceBrush IconBrush(int size, const island::IconView& icon)
+    {
+        return DrawSurface(size, [&](ID2D1DeviceContext& context, const D2D1_RECT_F& area) {
+            const D2D1_BITMAP_PROPERTIES properties{
+                {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+            winrt::com_ptr<ID2D1Bitmap> bitmap;
+            winrt::check_hresult(context.CreateBitmap({icon.width, icon.height}, icon.pixels.data(),
+                                                      icon.width * 4, properties, bitmap.put()));
+            const float extent = area.right - area.left;
+            const float scale = extent / static_cast<float>(std::max(icon.width, icon.height));
+            const float width = icon.width * scale;
+            const float height = icon.height * scale;
+            const float left = area.left + (extent - width) / 2;
+            const float top = area.top + (extent - height) / 2;
+            context.DrawBitmap(bitmap.get(), D2D1_RECT_F{left, top, left + width, top + height}, 1.0f,
+                               D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        });
     }
 
     log::ILogger& log;
@@ -285,6 +317,7 @@ catch (...)
 }
 
 bool CompositionRenderer::Render(const island::Layout& layout, const island::IslandStyle& style,
+                                 std::span<const std::optional<island::IconView>> icons,
                                  std::optional<std::size_t> hovered, UINT committedMessage,
                                  WPARAM tag) noexcept
 try
@@ -327,21 +360,30 @@ try
     island.Children().InsertAtTop(impl.hover);
 
     impl.items.clear();
-    if (!layout.items.empty())
+    // One surface serves every item without an icon; made only if one needs it.
+    wuc::CompositionSurfaceBrush placeholder{nullptr};
+    for (std::size_t i = 0; i < layout.items.size(); ++i)
     {
-        // One surface serves every placeholder. Icons come with the Shell's icon files.
-        const auto placeholder = impl.PlaceholderBrush(metrics.icon, style.placeholder);
-        for (const auto& item : layout.items)
+        const auto& item = layout.items[i];
+        const geometry::Rect local{item.left - layout.island.left, item.top - layout.island.top,
+                                   item.right - layout.island.left, item.bottom - layout.island.top};
+        impl.items.push_back(local);
+        auto visual = impl.compositor.CreateSpriteVisual();
+        visual.Size(Size(local));
+        visual.Offset({static_cast<float>(local.left), static_cast<float>(local.top), 0});
+        if (i < icons.size() && icons[i])
         {
-            const geometry::Rect local{item.left - layout.island.left, item.top - layout.island.top,
-                                       item.right - layout.island.left, item.bottom - layout.island.top};
-            impl.items.push_back(local);
-            auto visual = impl.compositor.CreateSpriteVisual();
-            visual.Size(Size(local));
-            visual.Offset({static_cast<float>(local.left), static_cast<float>(local.top), 0});
-            visual.Brush(placeholder);
-            island.Children().InsertAtTop(visual);
+            visual.Brush(impl.IconBrush(metrics.icon, *icons[i]));
         }
+        else
+        {
+            if (!placeholder)
+            {
+                placeholder = impl.PlaceholderBrush(metrics.icon, style.placeholder);
+            }
+            visual.Brush(placeholder);
+        }
+        island.Children().InsertAtTop(visual);
     }
 
     // A hairline inside the edge.

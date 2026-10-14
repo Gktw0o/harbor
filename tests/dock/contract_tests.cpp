@@ -6,9 +6,11 @@
 // takes effect without rebuilding.
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <nlohmann/json-schema.hpp>
@@ -17,6 +19,7 @@
 
 #include "core/ipc/codec.h"
 #include "core/ipc/line_framer.h"
+#include "core/island/icon_file.h"
 #include "core/taskbar/restore_record.h"
 
 namespace harbor::ipc
@@ -211,6 +214,47 @@ TEST(StateContracts, FixturesConformAndRoundTrip)
                 EXPECT_FALSE(DecodeAndReencodeState(name, text)) << "decoder accepts: " << text;
             }
         }
+    }
+}
+
+// Icon files (contracts/README.md): Harbor.Core.Tests checks the Shell writes the valid fixtures byte for
+// byte; here the dock's reader takes them and refuses the rest.
+std::vector<std::uint8_t> ReadBytes(const fs::path& path)
+{
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+TEST(IconContracts, ValidFixturesParse)
+{
+    const auto fixtures = ListFiles(ContractsDir() / "icons" / "fixtures" / "valid", ".bgra");
+    ASSERT_FALSE(fixtures.empty());
+    for (const auto& fixture : fixtures)
+    {
+        SCOPED_TRACE(fixture.filename().string());
+        const auto bytes = ReadBytes(fixture);
+        const auto icon = island::ParseIconFile(bytes);
+        ASSERT_TRUE(icon);
+        EXPECT_EQ(icon->pixels.size(), std::size_t{icon->width} * icon->height * 4);
+    }
+
+    const auto square = ReadBytes(ContractsDir() / "icons/fixtures/valid/square-2x2.bgra");
+    const auto icon = island::ParseIconFile(square);
+    ASSERT_TRUE(icon);
+    EXPECT_EQ(icon->width, 2u);
+    EXPECT_EQ(icon->height, 2u);
+    // The second pixel: half-transparent green, premultiplied.
+    EXPECT_EQ(std::vector<std::uint8_t>(icon->pixels.begin() + 4, icon->pixels.begin() + 8),
+              (std::vector<std::uint8_t>{0, 128, 0, 128}));
+}
+
+TEST(IconContracts, InvalidFixturesAreRejected)
+{
+    const auto fixtures = ListFiles(ContractsDir() / "icons" / "fixtures" / "invalid", ".bgra");
+    ASSERT_FALSE(fixtures.empty());
+    for (const auto& fixture : fixtures)
+    {
+        EXPECT_FALSE(island::ParseIconFile(ReadBytes(fixture))) << fixture.filename().string();
     }
 }
 

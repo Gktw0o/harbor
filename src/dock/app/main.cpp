@@ -178,7 +178,9 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     const auto orphanTimeout = testMode
                                    ? std::chrono::milliseconds(options.testOrphanTimeoutMs.value_or(30'000))
                                    : std::chrono::milliseconds::zero();
-    harbor::dock::DockWindow window(controlChannel, guard, renderer, log, {.orphanTimeout = orphanTimeout});
+    harbor::dock::DockWindow window(
+        controlChannel, guard, renderer, log,
+        {.orphanTimeout = orphanTimeout, .iconsDir = dataDir.empty() ? dataDir : dataDir / L"icons"});
     switch (window.Create(instance))
     {
     case harbor::dock::DockWindow::CreateResult::Created:

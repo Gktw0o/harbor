@@ -6,6 +6,7 @@ add_library(harbor_dock_core STATIC
     core/appbar/appbar_state.cpp
     core/ipc/codec.cpp
     core/island/appearance.cpp
+    core/island/icon_file.cpp
     core/island/layout.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
@@ -25,6 +26,7 @@ add_library(harbor_dock_adapters STATIC
     adapters/composition_renderer.cpp
     adapters/data_dir.cpp
     adapters/file_log.cpp
+    adapters/icon_files.cpp
     adapters/named_pipe_client.cpp
     adapters/process_job.cpp
     adapters/system_appearance.cpp

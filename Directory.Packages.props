@@ -1,0 +1,15 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <CentralPackageTransitivePinningEnabled>true</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+  <ItemGroup>
+    <!--
+      WinUI component only: the Microsoft.WindowsAppSDK metapackage also pulls AI, ML, Search and Widgets.
+      Versions match the Microsoft.WindowsAppSDK 2.5.1 metapackage.
+    -->
+    <PackageVersion Include="Microsoft.WindowsAppSDK.WinUI" Version="2.3.9" />
+    <!-- Transitive pin: WinUI 2.3.9 asks for 2.1.8, which was never published on nuget.org. -->
+    <PackageVersion Include="Microsoft.WindowsAppSDK.InteractiveExperiences" Version="2.1.9" />
+  </ItemGroup>
+</Project>

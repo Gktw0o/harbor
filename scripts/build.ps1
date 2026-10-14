@@ -4,8 +4,8 @@
 
 .DESCRIPTION
     Enters the Visual Studio developer environment for the target architecture (the host
-    architecture is detected), then configures, builds and tests the C++ dock with CMake presets.
-    Run it once per architecture. The caller's environment is restored afterwards, so x64 and
+    architecture is detected), then builds and tests the C++ dock with CMake presets and the
+    .NET solution with dotnet. Run it once per architecture. The caller's environment is restored afterwards, so x64 and
     arm64 runs can follow each other in the same shell.
 
 .EXAMPLE
@@ -122,6 +122,15 @@ try {
 
     if (-not $NoTest) {
         Invoke-Native ctest @('--preset', $preset, '--build-config', $Config)
+    }
+
+    # Solution builds can't take a RuntimeIdentifier (NETSDK1134); Harbor.slnx maps each solution
+    # platform to the projects, and Directory.Build.props maps the platform to a RuntimeIdentifier.
+    $platform = if ($Arch -eq 'x64') { 'x64' } else { 'ARM64' }
+    Write-Host "== .NET $platform ($Config) ==" -ForegroundColor Green
+    Invoke-Native dotnet @('build', 'Harbor.slnx', '-c', $Config, "-p:Platform=$platform")
+    if (-not $NoTest) {
+        Invoke-Native dotnet @('test', '--solution', 'Harbor.slnx', '-c', $Config, "-p:Platform=$platform", '--no-build')
     }
 }
 finally {

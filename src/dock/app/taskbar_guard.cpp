@@ -357,6 +357,9 @@ void TaskbarGuard::OnTaskbarShown(HWND window)
     }
     ShowWindowAsync(window, SW_HIDE);
     m_hiddenWindows.Add(window);
+    // Kept in the log to learn what makes Explorer show it (Start, notifications...); the circuit breaker
+    // below bounds how often this can happen.
+    m_log.Info("taskbar: Explorer showed it again; hid it");
     if (m_policy.OnRehide(Now()))
     {
         m_log.Warn(

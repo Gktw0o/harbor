@@ -2,7 +2,7 @@
 
 #include <string_view>
 
-#include "core/log/log_line.h"
+#include "core/logging/log_line.h"
 
 namespace harbor::log
 {

@@ -7,7 +7,7 @@ add_library(harbor_dock_core STATIC
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
     core/json/strict_json.cpp
-    core/log/log_line.cpp
+    core/logging/log_line.cpp
     core/taskbar/guard_policy.cpp
     core/taskbar/restore_record.cpp
 )

@@ -182,6 +182,13 @@ function Test-Restored {
     return [HarborSafety.Native]::PrimaryVisible() -and ([HarborSafety.Native]::AutoHide() -eq $script:runAutoHide)
 }
 
+# Harbor deletes its restore record once the restore is verified (about a second later). Only meaningful
+# when Harbor had turned auto-hide on (-ExerciseAutoHide, or auto-hide off to begin with).
+function Get-RecordNote {
+    $gone = (Wait-Until { -not (Test-Path $recordPath) } 6000) -ge 0
+    return @{ Gone = $gone; Text = "; record cleaned up by Harbor: $gone" }
+}
+
 # Puts the taskbar back exactly as the run started, without Harbor's help.
 function Reset-Taskbar {
     [HarborSafety.Native]::ShowAll()
@@ -222,30 +229,35 @@ try {
                     [HarborSafety.Native]::PressKeys(0x11, 0x12, 0x10, 0x48) # Ctrl, Alt, Shift, H
                     $ms = Wait-Until { Test-Restored } 5000
                     $toggleOff = (Wait-Until { (Get-ToggleIsOn) -eq $false } 3000) -ge 0
-                    Add-Result $name ($ms -ge 0 -and $toggleOff) "restored in $ms ms; Shell turned hiding off: $toggleOff"
+                    $record = Get-RecordNote
+                    Add-Result $name ($ms -ge 0 -and $toggleOff -and $record.Gone) "restored in $ms ms; Shell turned hiding off: $toggleOff$($record.Text)"
                 }
                 'kill-dock' {
                     Stop-Process -Id $dock.Id -Force
                     $ms = Wait-Until { Test-Restored } 8000
-                    Add-Result $name ($ms -ge 0) "restored $ms ms after the kill"
+                    $record = Get-RecordNote
+                    Add-Result $name ($ms -ge 0 -and $record.Gone) "restored $ms ms after the kill$($record.Text)"
                 }
                 'freeze-dock' {
                     [void][HarborSafety.Native]::NtSuspendProcess($dock.Handle)
                     $ms = Wait-Until { Test-Restored } 15000
                     $ended = (Wait-Until { $dock.HasExited } 5000) -ge 0
-                    Add-Result $name ($ms -ge 0 -and $ended) "restored $ms ms after freezing; dock ended: $ended"
+                    $record = Get-RecordNote
+                    Add-Result $name ($ms -ge 0 -and $ended -and $record.Gone) "restored $ms ms after freezing; dock ended: $ended$($record.Text)"
                 }
                 'close-shell' {
                     $window = Get-ShellWindow
                     $window.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close()
                     $ms = Wait-Until { Test-Restored } 5000
                     $dockAlive = -not $dock.HasExited
-                    Add-Result $name ($ms -ge 0) "restored by the dock in $ms ms; dock still running: $dockAlive"
+                    $record = Get-RecordNote
+                    Add-Result $name ($ms -ge 0 -and $record.Gone) "restored by the dock in $ms ms; dock still running: $dockAlive$($record.Text)"
                 }
                 'kill-shell' {
                     Get-Process Harbor.Shell | Stop-Process -Force
                     $ms = Wait-Until { Test-Restored } 5000
-                    Add-Result $name ($ms -ge 0) "restored by the dock in $ms ms"
+                    $record = Get-RecordNote
+                    Add-Result $name ($ms -ge 0 -and $record.Gone) "restored by the dock in $ms ms$($record.Text)"
                 }
                 'kill-both' {
                     Stop-Harbor
@@ -253,7 +265,8 @@ try {
                     $stillHidden = [HarborSafety.Native]::PrimaryHidden()
                     Start-Process -FilePath $shellExe | Out-Null
                     $ms = Wait-Until { Test-Restored } 15000
-                    Add-Result $name ($ms -ge 0) "hidden with nothing left to restore: $stillHidden; Harbor Shell's start restored it in $ms ms"
+                    $record = Get-RecordNote
+                    Add-Result $name ($ms -ge 0 -and $record.Gone) "hidden with nothing left to restore: $stillHidden; Harbor Shell's start restored it in $ms ms$($record.Text)"
                 }
                 'start-menu' {
                     $before = @(Get-DockLogLines | Where-Object { $_ -match 'Explorer showed it again' }).Count

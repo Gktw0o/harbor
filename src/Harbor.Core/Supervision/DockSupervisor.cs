@@ -157,6 +157,21 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         return done.Task;
     }
 
+    /// <summary>The apps the dock shows. Sent now if a dock is connected, and to every dock that connects.</summary>
+    public void SetDockItems(DockItems items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        Post(session =>
+        {
+            session.DockItems = items;
+            if (server.IsConnected)
+            {
+                server.TrySend(items);
+            }
+            return Task.CompletedTask;
+        });
+    }
+
     private void Post(Func<Session, Task> command) => _commands.Writer.TryWrite(command);
 
     private void OnLinkStatus(ControlLinkStatus status)
@@ -252,6 +267,10 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             }
             // Every connection hears the current request (the dock forgets it when a connection drops).
             SendHideRequest(session);
+            if (session.DockItems is { } items)
+            {
+                server.TrySend(items);
+            }
         }
         return Task.CompletedTask;
     }
@@ -434,6 +453,8 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         public uint? ConnectedProcessId { get; set; }
 
         public string? KillReason { get; set; }
+
+        public DockItems? DockItems { get; set; }
 
         public void Dispose() => Dock?.Dispose();
     }

@@ -1,7 +1,9 @@
 using System.Diagnostics;
 using Harbor.Core;
+using Harbor.Core.Apps;
 using Harbor.Core.Ipc;
 using Harbor.Core.Logging;
+using Harbor.Core.Settings;
 using Harbor.Core.Supervision;
 using Harbor.Core.Taskbar;
 using Microsoft.UI.Xaml;
@@ -42,11 +44,35 @@ public sealed partial class MainWindow : Window
             _updatingToggle = false;
         });
 
+        // Pinned apps: settings.json -> looked up -> dockItems to whichever dock is connected.
+        var settings = new SettingsWatcher(new SettingsFile(HarborPaths.DefaultDataDir, log), log);
+        var publisher = new DockItemsPublisher(new ShellPinResolver(), log);
+        settings.Changed += publisher.Update;
+        publisher.Built += _supervisor.SetDockItems;
+
         // Never disposed on purpose: it uses no timer or wait handle, and the supervisor may still observe the
         // token after the window closes.
         var shutdown = new CancellationTokenSource();
         Closed += (_, _) => shutdown.Cancel();
         _ = RunSupervisorAsync(shutdown.Token);
+        _ = RunQuietlyAsync("settings", settings.RunAsync, shutdown.Token);
+        _ = RunQuietlyAsync("dock items", publisher.RunAsync, shutdown.Token);
+    }
+
+    // A background loop that ends with the window; a failure is logged, not thrown at the UI.
+    private async Task RunQuietlyAsync(string name, Func<CancellationToken, Task> run, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Run(() => run(cancellationToken), cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception)
+        {
+            _log.Error($"{name}: stopped: {exception}");
+        }
     }
 
     private async Task RunSupervisorAsync(CancellationToken cancellationToken)

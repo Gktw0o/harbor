@@ -109,6 +109,23 @@ public sealed partial class DockSupervisorTests
         StringAssert.Contains(waiting.Reason, "wasn't found");
     }
 
+    // The list is set before any dock runs: the dock gets it when it connects, then each change.
+    [TestMethod]
+    public async Task SendsTheAppsToTheDockOnConnectAndOnChange()
+    {
+        await using var harness = new Harness(launch: true);
+        harness.Supervisor.SetDockItems(new DockItems([new DockItem(DockItemKind.App, "MSEdge", "Microsoft Edge", null)]));
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "dock items: 1 received", Timeout));
+
+        harness.Supervisor.SetDockItems(new DockItems(
+        [
+            new DockItem(DockItemKind.App, "MSEdge", "Microsoft Edge", null),
+            new DockItem(DockItemKind.Path, @"C:\Tools\app.exe", "app", "0123456789abcdef.bgra"),
+        ]));
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "dock items: 2 received", Timeout));
+    }
+
     // The hide path end to end: Shell toggle, setTaskbar, the dock's guard, taskbarState back.
     [TestMethod]
     public async Task HidesTheTaskbarWhenAskedAndShowsItAgain()
@@ -289,6 +306,8 @@ public sealed partial class DockSupervisorTests
         public string PipeName { get; }
 
         public FakeTaskbar Taskbar { get; }
+
+        public string DataDir => _dir.Path;
 
         public CapturingLog Log { get; } = new();
 

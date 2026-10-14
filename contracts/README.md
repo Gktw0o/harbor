@@ -13,6 +13,8 @@ Every message is one compact UTF-8 JSON object followed by `\n`, at most 64 KiB 
 - **Any change to a message bumps its `v`** and updates both the C++ and C# sides and their
   contract tests in the same change.
 - Receivers validate, log and drop anything that doesn't match. Bad input never crashes a process.
+- Duplicate keys are rejected by both decoders. JSON Schema can't express that rule, so it is covered by
+  unit tests on each side (`RejectsDuplicateKeys`) rather than by fixtures.
 
 ## Fixtures
 

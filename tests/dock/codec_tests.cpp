@@ -58,6 +58,19 @@ TEST(Codec, ReportsSpecificErrors)
     EXPECT_EQ(DecodeErrorOf(R"({"v":2,"type":"pong","payload":{"seq":1}})"), DecodeError::UnsupportedVersion);
 }
 
+// JSON Schema can't express "no duplicate keys", so this lives in unit tests on both sides
+// (see MessageCodecTests.RejectsDuplicateKeys in Harbor.Core.Tests) instead of contract fixtures.
+TEST(Codec, RejectsDuplicateKeys)
+{
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"v":1,"type":"ping","payload":{"seq":1}})"),
+              DecodeError::UnexpectedField);
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"type":"ping","payload":{"seq":1,"seq":2}})"),
+              DecodeError::UnexpectedField);
+    // Keys are tracked per object: "v" inside payload is not a duplicate of the top-level "v", so the
+    // error is the missing seq, not a duplicate.
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"type":"ping","payload":{"v":1}})"), DecodeError::MissingField);
+}
+
 TEST(Codec, RejectsInvalidUtf8)
 {
     EXPECT_EQ(DecodeErrorOf("{\"v\":1,\"type\":\"p\xff\",\"payload\":{\"seq\":1}}"),

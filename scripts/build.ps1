@@ -95,6 +95,10 @@ function Get-PeArch {
     }
 }
 
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    throw 'dotnet was not found on PATH. Install the .NET SDK pinned in global.json (see README.md), then open a new terminal.'
+}
+
 $hostArch = Get-HostArch
 if (-not $NoTest -and $hostArch -eq 'x64' -and $Arch -eq 'arm64') {
     throw 'ARM64 binaries cannot run on an x64 machine. Re-run with -NoTest to build only; ARM64 tests run on ARM64 hardware.'

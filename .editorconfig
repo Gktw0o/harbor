@@ -12,3 +12,7 @@ indent_size = 2
 
 [*.md]
 trim_trailing_whitespace = false
+
+# Tests: constant arrays in assertions are clearer than static fields, and they are not hot paths.
+[tests/**.cs]
+dotnet_diagnostic.CA1861.severity = none

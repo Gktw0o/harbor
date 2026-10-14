@@ -61,3 +61,4 @@ Repeat sections 1 and 4 on the x64 machine (x64 build). ARM64-only differences g
 | Date | PC (arch, Windows build) | Section | Result | Notes |
 |---|---|---|---|---|
 | 2026-10-14 | ARM64 (Snapdragon), 26H1 build 28000.3086, one display | 1 (`-ExerciseAutoHide`) | 8/8 pass | Restores: panic 0.2 s, dock killed 0.2 s, Shell closed or killed 0.2 s, dock frozen 7.2 s, both killed then Shell started 3.6 s. Start menu: no re-show. Idle: 0.014 % CPU, 18.7 MB. Explorer shows the taskbar ~3 times right after auto-hide turns on (re-hidden). Run before the record-cleanup check was added. |
+| 2026-10-14 | ARM64 (Snapdragon), 26H1 build 28000.3086, one display | 1 (`-ExerciseAutoHide`), after M1 merged | 8/8 pass | Restores: panic, dock killed, Shell closed or killed about 0.2 s; dock frozen 7.1 s; both killed then Shell started 3.8 s. Harbor deleted its restore record in every scenario. Idle: 0.014 % CPU, 18.7 MB. |

@@ -25,6 +25,21 @@ internal static partial class TestDock
         }
     }
 
+    // A windowless GUI app that writes "<its path>.launched" when started (tests/dock/marker_app.cpp). Copied to
+    // a path with spaces and non-ASCII characters, so launching handles both.
+    public static string CopyMarkerApp(string dir)
+    {
+        var marker = Environment.GetEnvironmentVariable("HARBOR_MARKER_EXE");
+        if (string.IsNullOrEmpty(marker))
+        {
+            Assert.Inconclusive("Set HARBOR_MARKER_EXE to a built harbor_test_marker.exe; scripts/build.ps1 does.");
+        }
+        var folder = Directory.CreateDirectory(Path.Combine(dir, "Ünïcødé ğ apps")).FullName;
+        var copy = Path.Combine(folder, "marker app.exe");
+        File.Copy(marker, copy);
+        return copy;
+    }
+
     // A short ping timeout (the real one is 5 s) keeps the tests that wait for it quick.
     public static string[] Arguments(string pipeName, string dataDir, FakeTaskbar taskbar) =>
         ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];

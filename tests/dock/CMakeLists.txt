@@ -7,7 +7,13 @@ include(GoogleTest)
 add_executable(harbor_dock_crash_helper crash_helper.cpp)
 target_link_libraries(harbor_dock_crash_helper PRIVATE harbor_dock_app wer)
 
+# A windowless GUI app that leaves a file when started: the app the launch tests pin (scripts/build.ps1 passes
+# its path to Harbor.Core.Tests as HARBOR_MARKER_EXE).
+add_executable(harbor_test_marker WIN32 marker_app.cpp)
+target_link_libraries(harbor_test_marker PRIVATE harbor_compiler_options)
+
 add_executable(harbor_dock_tests
+    app_launcher_tests.cpp
     appbar_state_tests.cpp
     appearance_tests.cpp
     codec_tests.cpp
@@ -38,8 +44,9 @@ target_link_libraries(harbor_dock_tests PRIVATE
 target_compile_definitions(harbor_dock_tests PRIVATE
     HARBOR_CONTRACTS_DIR="${PROJECT_SOURCE_DIR}/contracts"
     HARBOR_CRASH_HELPER=L"$<TARGET_FILE:harbor_dock_crash_helper>"
+    HARBOR_MARKER_APP=L"$<TARGET_FILE:harbor_test_marker>"
 )
-add_dependencies(harbor_dock_tests harbor_dock_crash_helper)
+add_dependencies(harbor_dock_tests harbor_dock_crash_helper harbor_test_marker)
 
 # PRE_TEST discovers tests when ctest runs, not at build time, so cross-compiled builds
 # (e.g. arm64 on an x64 machine) never try to execute a binary the host can't run.

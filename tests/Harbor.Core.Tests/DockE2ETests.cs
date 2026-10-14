@@ -147,6 +147,46 @@ public sealed class DockE2ETests
         }
     }
 
+    // A click on an item starts its app: through Explorer where it can, else with ShellExecuteEx (as on the ARM
+    // CI runner). Either way the route is logged.
+    [TestMethod]
+    public async Task AClickStartsThePinnedApp()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var app = TestDock.CopyMarkerApp(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems([new DockItem(DockItemKind.Path, app, "Marker", null)])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", TimeSpan.FromSeconds(10)));
+            var island = IslandWindow.Find(dock.Id);
+
+            // The only item's middle: the island is as tall as one item plus its padding.
+            var size = IslandWindow.Bounds(island).Height;
+            IslandWindow.Click(island, size / 2, size / 2);
+
+            var marker = app + ".launched";
+            var deadline = Stopwatch.StartNew();
+            while (!File.Exists(marker) && deadline.Elapsed < TimeSpan.FromSeconds(20))
+            {
+                await Task.Delay(50);
+            }
+            Assert.IsTrue(File.Exists(marker), await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "launch: item 0 started via", TimeSpan.FromSeconds(5)));
+            Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains("marker app", StringComparison.OrdinalIgnoreCase),
+                "the log names the user's app");
+        }
+        finally
+        {
+            await StopAsync(dock);
+            // The marker app may hold its file for a moment.
+            await Task.Delay(200);
+        }
+    }
+
     // A test dock whose test went away without ending it exits by itself, normally (taskbar restored).
     [TestMethod]
     public async Task TestDockExitsWhenNoShellConnects()

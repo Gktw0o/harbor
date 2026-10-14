@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <format>
+#include <memory>
 #include <ShellScalingApi.h>
 #include <string>
 #include <utility>
@@ -78,6 +79,9 @@ DockWindow::~DockWindow()
 {
     // Normally stopped by WM_DESTROY already; its callbacks use this object.
     m_controlChannel.Stop();
+    // Here rather than at WM_DESTROY: by now the taskbar is back (main stops the guard first), so a launch
+    // stuck in Explorer can't delay that.
+    m_launcher.reset();
 }
 
 DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
@@ -109,6 +113,7 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     m_powerNotification =
         RegisterPowerSettingNotification(m_hwnd, &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
     Refresh(/*force=*/true);
+    m_launcher.emplace(m_hwnd);
 
     // The guard's state reports go out through this thread, like pongs.
     m_guard.SetStateWindow(m_hwnd);
@@ -354,10 +359,36 @@ void DockWindow::OnMouseMove(LPARAM position)
 
 void DockWindow::OnClick(LPARAM position)
 {
-    if (const auto item = ItemAt(position))
+    const auto item = ItemAt(position);
+    if (!item || *item >= m_items.items.size() || !m_launcher)
     {
-        // Launching comes with the shell threads.
-        m_log.Info(std::format("island: item {} clicked", *item));
+        return;
+    }
+    // The click was the user's: whatever starts may take the foreground (Explorer starts it, not the dock).
+    AllowSetForegroundWindow(ASFW_ANY);
+    // Which item, not which app: the pinned list is the user's business.
+    m_log.Info(std::format("launch: item {}", *item));
+    m_launcher->Launch(*item, m_items.items[*item]);
+}
+
+void DockWindow::OnLaunched(LaunchReport* report)
+{
+    const std::unique_ptr<LaunchReport> owned(report);
+    const auto& result = owned->result;
+    if (FAILED(result.result))
+    {
+        m_log.Warn(std::format("launch: item {} failed: 0x{:08X} (Explorer: 0x{:08X})", owned->index,
+                               static_cast<std::uint32_t>(result.result),
+                               static_cast<std::uint32_t>(result.explorerResult)));
+    }
+    else if (result.route == adapters::LaunchRoute::Explorer)
+    {
+        m_log.Info(std::format("launch: item {} started via Explorer", owned->index));
+    }
+    else
+    {
+        m_log.Info(std::format("launch: item {} started via ShellExecuteEx (Explorer: 0x{:08X})",
+                               owned->index, static_cast<std::uint32_t>(result.explorerResult)));
     }
 }
 
@@ -419,6 +450,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case TaskbarGuard::kStateMessage:
         m_controlChannel.Send(ipc::TaskbarState{wParam != 0, static_cast<ipc::TaskbarBlock>(lParam)});
+        return 0;
+    case Launcher::kLaunchedMessage:
+        OnLaunched(reinterpret_cast<LaunchReport*>(lParam));
         return 0;
     case TaskbarGuard::kShowIslandMessage:
         // The panic hotkey hid the island; hiding the taskbar was turned on again.

@@ -10,6 +10,7 @@
 
 #include "adapters/composition_renderer.h"
 #include "app/latest_value.h"
+#include "app/launcher.h"
 #include "app/taskbar_guard.h"
 #include "core/island/appearance.h"
 #include "core/island/layout.h"
@@ -87,6 +88,8 @@ class DockWindow
     void OnDeviceLost();
     void OnMouseMove(LPARAM position);
     void OnClick(LPARAM position);
+    // Takes ownership of report.
+    void OnLaunched(LaunchReport* report);
     void SetHovered(std::optional<std::size_t> hovered);
     std::optional<std::size_t> ItemAt(LPARAM position) const;
     void UpdatePresentable();
@@ -101,6 +104,7 @@ class DockWindow
     // What the dock shows. Kept while the Shell is away.
     ipc::DockItems m_items;
     HWND m_hwnd = nullptr;
+    std::optional<Launcher> m_launcher;
     HPOWERNOTIFY m_powerNotification = nullptr;
     UINT m_taskbarCreatedMessage = 0;
     bool m_connected = false;

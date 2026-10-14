@@ -134,8 +134,9 @@ try {
     Write-Host "== .NET $platform ($Config) ==" -ForegroundColor Green
     Invoke-Native dotnet @('build', 'Harbor.slnx', '-c', $Config, "-p:Platform=$platform")
     if (-not $NoTest) {
-        # The end-to-end test launches the dock built above, for the same architecture.
+        # The end-to-end tests launch the dock built above, for the same architecture, and pin the marker app.
         $env:HARBOR_DOCK_EXE = $dockExe
+        $env:HARBOR_MARKER_EXE = Join-Path $repoRoot "build\$preset\tests\dock\$Config\harbor_test_marker.exe"
         Invoke-Native dotnet @('test', '--solution', 'Harbor.slnx', '-c', $Config, "-p:Platform=$platform", '--no-build')
     }
 }

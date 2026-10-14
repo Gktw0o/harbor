@@ -23,6 +23,7 @@ target_link_libraries(harbor_dock_core
 
 # Win32 implementations of the ports.
 add_library(harbor_dock_adapters STATIC
+    adapters/app_launcher.cpp
     adapters/composition_renderer.cpp
     adapters/data_dir.cpp
     adapters/file_log.cpp
@@ -32,10 +33,11 @@ add_library(harbor_dock_adapters STATIC
     adapters/system_appearance.cpp
     adapters/win32_taskbar.cpp
 )
-# Composition and Direct2D come with the Windows SDK and the OS (C++/WinRT headers included): no packages.
+# Composition, Direct2D and the shell come with the Windows SDK and the OS (C++/WinRT headers included):
+# no packages.
 target_link_libraries(harbor_dock_adapters
     PUBLIC harbor_dock_core WIL::WIL
-    PRIVATE windowsapp d3d11 d2d1 dxgi dwmapi CoreMessaging
+    PRIVATE windowsapp d3d11 d2d1 dxgi dwmapi CoreMessaging ole32 oleaut32 shell32
 )
 
 # Application layer (windows, threads, wiring). A library so the tests can link it; main.cpp stays out.
@@ -44,6 +46,7 @@ add_library(harbor_dock_app STATIC
     app/crash_guard.cpp
     app/dock_window.cpp
     app/explorer_worker.cpp
+    app/launcher.cpp
     app/taskbar_guard.cpp
 )
 target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore)

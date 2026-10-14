@@ -2,10 +2,10 @@
 
 #include <windows.h>
 
-// Before WIL, which enables its COM helpers (unique_couninitialize_call) only when objbase.h is in.
+#include <objbase.h>
+
 #include <chrono>
 #include <format>
-#include <objbase.h>
 #include <optional>
 #include <shellapi.h>
 #include <string>

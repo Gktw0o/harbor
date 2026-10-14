@@ -65,6 +65,17 @@ internal static partial class IslandWindow
         return (info.Monitor, info.Work);
     }
 
+    /// <summary>A left click at a point of the window's client area, as the window receives it (no real input).</summary>
+    public static void Click(nint window, int x, int y)
+    {
+        const uint ButtonUp = 0x0202;
+        Assert.IsTrue(PostMessage(window, ButtonUp, 0, (y << 16) | (x & 0xFFFF)));
+    }
+
+    [LibraryImport("user32.dll", EntryPoint = "PostMessageW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool PostMessage(nint window, uint message, nuint wParam, nint lParam);
+
     [LibraryImport("user32.dll", EntryPoint = "FindWindowExW", StringMarshalling = StringMarshalling.Utf16)]
     private static partial nint FindWindowEx(nint parent, nint childAfter, string className, string? windowName);
 

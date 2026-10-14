@@ -31,6 +31,8 @@ Both suites list the files when they run, so a new schema or fixture is picked u
 |---|---|---|
 | [`ping`](ping.schema.json) v1 | Shell → dock | `control` |
 | [`pong`](pong.schema.json) v1 | dock → Shell | `control` |
+| [`setTaskbar`](setTaskbar.schema.json) v1 | Shell → dock | `control` |
+| [`taskbarState`](taskbarState.schema.json) v1 | dock → Shell | `control` |
 
 ## State files
 

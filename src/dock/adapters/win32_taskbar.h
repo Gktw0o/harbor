@@ -97,13 +97,26 @@ class Win32Taskbar
     std::uint32_t GetAutoHideState() const;
     bool SetAutoHideState(std::uint32_t state) const;
 
-    // Shows the primary taskbar and any secondary one on a connected monitor that is hidden. Never blocks
-    // (ShowWindowAsync), so it is safe to call while Explorer or the dock is unresponsive.
+    // Shows the primary taskbar and every secondary one on a connected monitor, and returns how many were
+    // hidden. Never blocks (ShowWindowAsync), so it is safe to call while Explorer or the dock is
+    // unresponsive.
     int ShowHiddenWindows() const;
 
     // ShowHiddenWindows, then: if a restore record exists, puts auto-hide back as recorded (off if the record
     // is unreadable) and deletes the record once that is verified. Can block on Explorer for a while.
     RestoreResult Restore(const RestoreOptions& options);
+
+    // The hide side, for the dock only. Turns on auto-hide (so Explorer gives the screen space back) after
+    // writing the restore record, unless auto-hide is already on, in which case there is nothing to undo
+    // later. Returns false if auto-hide is off afterwards: either the record couldn't be written (then the
+    // setting is left alone) or Explorer didn't take the change. Can block on Explorer.
+    bool TurnOnAutoHide();
+
+    // Hides every taskbar window (ShowWindowAsync, never blocks) and returns them.
+    std::vector<HWND> HideWindows() const;
+
+    // Whether `window` has one of the target's taskbar classes.
+    bool IsTaskbarWindow(HWND window) const;
 
   private:
     bool AutoHideIs(std::uint32_t state) const;

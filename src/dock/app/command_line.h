@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -21,6 +22,9 @@ struct DockOptions
     // --test-taskbar <id>: treat the test windows "Harbor.Test.<id>.*" as the taskbar (see
     // adapters/win32_taskbar.h). <id> is 1-64 characters from [a-z0-9-].
     std::optional<std::wstring> testTaskbarId;
+    // --test-ping-timeout-ms <100-60000>: how long without a ping before the dock restores the taskbar
+    // (normally 5 s), so tests don't wait. Only together with the three above.
+    std::optional<std::uint32_t> testPingTimeoutMs;
 };
 
 // Parses the arguments that follow the program name. Anything unknown, repeated, missing its value or

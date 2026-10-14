@@ -21,6 +21,52 @@ public sealed class MessageCodecTests
         Assert.AreEqual("""{"v":1,"type":"pong","payload":{"seq":7}}""", Encoding.UTF8.GetString(MessageCodec.Encode(new Pong(7))));
 
     [TestMethod]
+    public void EncodesTheTaskbarMessages()
+    {
+        Assert.AreEqual("""{"v":1,"type":"setTaskbar","payload":{"hidden":true}}""",
+            Encoding.UTF8.GetString(MessageCodec.Encode(new SetTaskbar(Hidden: true))));
+        Assert.AreEqual("""{"v":1,"type":"taskbarState","payload":{"hidden":false,"blocked":"hotkeyUnavailable"}}""",
+            Encoding.UTF8.GetString(MessageCodec.Encode(new TaskbarState(Hidden: false, TaskbarBlock.HotkeyUnavailable))));
+    }
+
+    [TestMethod]
+    public void RoundTripsTheTaskbarMessages()
+    {
+        foreach (Message message in new Message[]
+        {
+            new SetTaskbar(true), new SetTaskbar(false), new TaskbarState(true, TaskbarBlock.None),
+            new TaskbarState(false, TaskbarBlock.KillOnCloseJob),
+        })
+        {
+            Assert.IsTrue(MessageCodec.TryDecode(MessageCodec.Encode(message), out var decoded, out _));
+            Assert.AreEqual(message, decoded);
+        }
+    }
+
+    // Same as tests/dock/codec_tests.cpp: every value has a wire name that maps back.
+    [TestMethod]
+    public void EveryTaskbarBlockHasAWireName()
+    {
+        foreach (var block in Enum.GetValues<TaskbarBlock>())
+        {
+            Assert.IsTrue(MessageCodec.TryParseWireName(MessageCodec.WireName(block), out var parsed));
+            Assert.AreEqual(block, parsed);
+        }
+        Assert.IsFalse(MessageCodec.TryParseWireName("PanicHotkey", out _));
+    }
+
+    [TestMethod]
+    public void ReportsSpecificErrorsForTheTaskbarMessages()
+    {
+        Assert.AreEqual(DecodeError.MissingField, DecodeErrorOf("""{"v":1,"type":"setTaskbar","payload":{}}"""));
+        Assert.AreEqual(DecodeError.InvalidField, DecodeErrorOf("""{"v":1,"type":"setTaskbar","payload":{"hidden":1}}"""));
+        Assert.AreEqual(DecodeError.UnexpectedField, DecodeErrorOf("""{"v":1,"type":"setTaskbar","payload":{"hidden":true,"x":1}}"""));
+        Assert.AreEqual(DecodeError.UnsupportedVersion, DecodeErrorOf("""{"v":2,"type":"setTaskbar","payload":{"hidden":true}}"""));
+        Assert.AreEqual(DecodeError.InvalidField, DecodeErrorOf("""{"v":1,"type":"taskbarState","payload":{"hidden":false,"blocked":"x"}}"""));
+        Assert.AreEqual(DecodeError.MissingField, DecodeErrorOf("""{"v":1,"type":"taskbarState","payload":{"hidden":false}}"""));
+    }
+
+    [TestMethod]
     public void RoundTripsBothMessages()
     {
         foreach (Message message in new Message[] { new Ping(0), new Ping(uint.MaxValue), new Pong(123) })
@@ -69,6 +115,10 @@ public sealed class MessageCodecTests
     {
         byte[] line = [.. "{\"v\":1,\"type\":\"p"u8, 0xFF, .. "\",\"payload\":{\"seq\":1}}"u8];
         Assert.IsFalse(MessageCodec.TryDecode(line, out _, out _));
+        byte[] inAKey = [.. "{\"v\":1,\"type\":\"setTaskbar\",\"payload\":{\"hid"u8, 0xFF, .. "\":true}}"u8];
+        Assert.IsFalse(MessageCodec.TryDecode(inAKey, out _, out _));
+        byte[] inAnEnum = [.. "{\"v\":1,\"type\":\"taskbarState\",\"payload\":{\"hidden\":true,\"blocked\":\"n"u8, 0xFF, .. "\"}}"u8];
+        Assert.IsFalse(MessageCodec.TryDecode(inAnEnum, out _, out _));
     }
 
     [TestMethod]

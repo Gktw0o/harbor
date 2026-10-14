@@ -137,12 +137,14 @@ int Win32Taskbar::ShowHiddenWindows() const
     for (const auto& window : FindWindows())
     {
         // A secondary taskbar whose monitor is gone stays as Explorer left it.
-        if (IsWindowVisible(window.hwnd) ||
-            (!window.primary && MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONULL) == nullptr))
+        if (!window.primary && MonitorFromWindow(window.hwnd, MONITOR_DEFAULTTONULL) == nullptr)
         {
             continue;
         }
-        if (ShowWindowAsync(window.hwnd, SW_SHOWNA))
+        // Sent even to windows that look visible: a hide may still be queued for one (ShowWindowAsync), and
+        // this show must land after it. Showing a visible window changes nothing.
+        const bool wasHidden = !IsWindowVisible(window.hwnd);
+        if (ShowWindowAsync(window.hwnd, SW_SHOWNA) && wasHidden)
         {
             ++shown;
         }
@@ -214,6 +216,76 @@ RestoreResult Win32Taskbar::Restore(const RestoreOptions& options)
     }
     m_log.Info(std::format("taskbar: auto-hide restored to {}{}", AutoHideName(state), recorded));
     return result;
+}
+
+bool Win32Taskbar::TurnOnAutoHide()
+{
+    const std::uint32_t before = GetAutoHideState();
+    if ((before & ABS_AUTOHIDE) != 0)
+    {
+        return true;
+    }
+    if (m_recordPath.empty())
+    {
+        m_log.Error("taskbar: no place for the restore record; leaving auto-hide off");
+        return false;
+    }
+
+    // Write the record first, atomically: if the dock dies right after the setting changes, the record is
+    // already there for whoever restores.
+    SYSTEMTIME now{};
+    GetSystemTime(&now);
+    const auto text = taskbar::EncodeRestoreRecord(
+        {before, std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", now.wYear, now.wMonth, now.wDay,
+                             now.wHour, now.wMinute, now.wSecond)});
+    auto temporary = m_recordPath;
+    temporary += L".tmp";
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        file << text;
+        file.flush();
+        if (!file)
+        {
+            m_log.Error("taskbar: can't write the restore record; leaving auto-hide off");
+            return false;
+        }
+    }
+    if (!MoveFileExW(temporary.c_str(), m_recordPath.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        m_log.Error(std::format("taskbar: can't save the restore record (error {}); leaving auto-hide off",
+                                GetLastError()));
+        return false;
+    }
+
+    SetAutoHideState(before | ABS_AUTOHIDE);
+    if (!AutoHideIs(ABS_AUTOHIDE))
+    {
+        // Seen on some builds (the setting reverts). The taskbar still gets hidden; its space stays reserved.
+        m_log.Warn("taskbar: Explorer didn't turn auto-hide on; maximized windows will leave a gap");
+        return false;
+    }
+    m_log.Info("taskbar: auto-hide turned on (it was off; the restore record has the original setting)");
+    return true;
+}
+
+bool Win32Taskbar::IsTaskbarWindow(HWND window) const
+{
+    wchar_t name[256]{};
+    const int length = GetClassNameW(window, name, 256);
+    const std::wstring_view windowClass(name, static_cast<size_t>(length > 0 ? length : 0));
+    return windowClass == m_target.PrimaryClass() || windowClass == m_target.SecondaryClass();
+}
+
+std::vector<HWND> Win32Taskbar::HideWindows() const
+{
+    std::vector<HWND> hidden;
+    for (const auto& window : FindWindows())
+    {
+        ShowWindowAsync(window.hwnd, SW_HIDE);
+        hidden.push_back(window.hwnd);
+    }
+    return hidden;
 }
 
 } // namespace harbor::adapters

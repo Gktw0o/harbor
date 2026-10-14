@@ -13,6 +13,7 @@ public sealed partial class MainWindow : Window
     private readonly string _pipeName;
     private readonly FileLog _log;
     private readonly DockSupervisor _supervisor;
+    private bool _updatingToggle;
 
     public MainWindow(FileLog log)
     {
@@ -32,6 +33,14 @@ public sealed partial class MainWindow : Window
         _supervisor.LinkStatusChanged += status => DispatcherQueue.TryEnqueue(() => StatusText.Text = Describe(status));
         _supervisor.DockStatusChanged += status => DispatcherQueue.TryEnqueue(() => ShowDockStatus(status));
         _supervisor.TaskbarRestored += restore => DispatcherQueue.TryEnqueue(() => TaskbarText.Text = Describe(restore));
+        _supervisor.TaskbarStateChanged += state => DispatcherQueue.TryEnqueue(() => TaskbarText.Text = Describe(state, HideToggle.IsOn));
+        _supervisor.HideRequestChanged += hidden => DispatcherQueue.TryEnqueue(() =>
+        {
+            // Turned off by the watchdog (panic hotkey, dock ended...): show that without echoing it back.
+            _updatingToggle = true;
+            HideToggle.IsOn = hidden;
+            _updatingToggle = false;
+        });
 
         // Never disposed on purpose: it uses no timer or wait handle, and the supervisor may still observe the
         // token after the window closes.
@@ -87,6 +96,28 @@ public sealed partial class MainWindow : Window
         StartDockButton.IsEnabled = false;
         _supervisor.StartDock();
     }
+
+    private void OnHideToggled(object sender, RoutedEventArgs e)
+    {
+        if (!_updatingToggle)
+        {
+            _supervisor.SetTaskbarHidden(HideToggle.IsOn);
+        }
+    }
+
+    private static string Describe(TaskbarState state, bool requested) => state switch
+    {
+        { Hidden: true } => "The taskbar is hidden. Ctrl+Alt+Shift+H brings it back at any time.",
+        { Blocked: TaskbarBlock.PanicHotkey } => "The panic hotkey restored the taskbar. Turn hiding on again when you want.",
+        { Blocked: TaskbarBlock.ExplorerFighting } => "Windows kept showing the taskbar again, so Harbor stopped hiding it.",
+        { Blocked: TaskbarBlock.HotkeyUnavailable } =>
+            "Not hidden: another app uses Ctrl+Alt+Shift+H, and Harbor never hides the taskbar without its panic hotkey.",
+        { Blocked: TaskbarBlock.TaskbarNotFound } => "Not hidden: no taskbar was found. Is Windows Explorer running?",
+        { Blocked: TaskbarBlock.KillOnCloseJob } =>
+            "Not hidden: the dock was started in a way that could end it without warning (a kill-on-close job), so it couldn't restore the taskbar.",
+        _ when requested => "Waiting for the dock before hiding the taskbar…",
+        _ => "The taskbar is visible.",
+    };
 
     private static string Describe(TaskbarRestore restore) => restore.Result switch
     {

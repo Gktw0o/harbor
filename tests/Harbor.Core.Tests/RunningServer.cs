@@ -12,13 +12,16 @@ internal sealed class RunningServer : IAsyncDisposable
 
     private readonly CancellationTokenSource _stop = new();
     private readonly Channel<ControlLinkStatus> _statuses = Channel.CreateUnbounded<ControlLinkStatus>();
+    private readonly Channel<Message> _messages = Channel.CreateUnbounded<Message>();
     private readonly Task _pinging;
+    private volatile bool _pingingPaused;
 
     public RunningServer(string pipeName, TimeSpan pingInterval)
     {
         PipeName = pipeName;
         Server = new ControlPipeServer(pipeName, Log);
         Server.StatusChanged += status => _statuses.Writer.TryWrite(status);
+        Server.MessageReceived += message => _messages.Writer.TryWrite(message);
         // The pipe exists once this returns: RunAsync creates it before its first await.
         Run = Server.RunAsync(_stop.Token);
         _pinging = PingAsync(pingInterval, _stop.Token);
@@ -47,6 +50,24 @@ internal sealed class RunningServer : IAsyncDisposable
         throw new UnreachableException();
     }
 
+    // The next message from the dock (other than a pong) that matches.
+    public async Task<T> WaitForMessageAsync<T>(Func<T, bool> predicate)
+        where T : Message
+    {
+        using var timeout = new CancellationTokenSource(Timeout);
+        await foreach (var message in _messages.Reader.ReadAllAsync(timeout.Token))
+        {
+            if (message is T typed && predicate(typed))
+            {
+                return typed;
+            }
+        }
+        throw new UnreachableException();
+    }
+
+    // Stops pinging while staying connected, like a watchdog that got stuck.
+    public void PausePinging() => _pingingPaused = true;
+
     public async ValueTask DisposeAsync()
     {
         await _stop.CancelAsync();
@@ -68,7 +89,10 @@ internal sealed class RunningServer : IAsyncDisposable
         using var timer = new PeriodicTimer(interval);
         while (await timer.WaitForNextTickAsync(cancellationToken))
         {
-            Server.TryPing();
+            if (!_pingingPaused)
+            {
+                Server.TryPing();
+            }
         }
     }
 }

@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <vector>
 
 #include "core/ipc/codec.h"
 
@@ -33,6 +34,56 @@ TEST(Codec, RoundTripsBothMessages)
         ASSERT_TRUE(std::holds_alternative<Message>(decoded));
         EXPECT_EQ(std::get<Message>(decoded), message);
     }
+}
+
+TEST(Codec, EncodesTheTaskbarMessages)
+{
+    EXPECT_EQ(Encode(SetTaskbar{true}), R"({"v":1,"type":"setTaskbar","payload":{"hidden":true}})");
+    EXPECT_EQ(Encode(TaskbarState{false, TaskbarBlock::HotkeyUnavailable}),
+              R"({"v":1,"type":"taskbarState","payload":{"hidden":false,"blocked":"hotkeyUnavailable"}})");
+}
+
+TEST(Codec, RoundTripsTheTaskbarMessages)
+{
+    const std::vector<Message> messages = {
+        SetTaskbar{true},
+        SetTaskbar{false},
+        TaskbarState{true, TaskbarBlock::None},
+        TaskbarState{false, TaskbarBlock::KillOnCloseJob},
+    };
+    for (const auto& message : messages)
+    {
+        const auto decoded = Decode(Encode(message));
+        ASSERT_TRUE(std::holds_alternative<Message>(decoded));
+        EXPECT_EQ(std::get<Message>(decoded), message);
+    }
+}
+
+// Same list as MessageCodecTests in Harbor.Core.Tests: every value has a wire name that maps back.
+TEST(Codec, EveryTaskbarBlockHasAWireName)
+{
+    for (const auto block :
+         {TaskbarBlock::None, TaskbarBlock::HotkeyUnavailable, TaskbarBlock::PanicHotkey,
+          TaskbarBlock::ExplorerFighting, TaskbarBlock::TaskbarNotFound, TaskbarBlock::KillOnCloseJob})
+    {
+        EXPECT_EQ(TaskbarBlockFromWireName(ToWireName(block)), block) << ToWireName(block);
+    }
+    EXPECT_FALSE(TaskbarBlockFromWireName("PanicHotkey"));
+}
+
+TEST(Codec, ReportsSpecificErrorsForTheTaskbarMessages)
+{
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"type":"setTaskbar","payload":{}})"), DecodeError::MissingField);
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"type":"setTaskbar","payload":{"hidden":1}})"),
+              DecodeError::InvalidField);
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"type":"setTaskbar","payload":{"hidden":true,"x":1}})"),
+              DecodeError::UnexpectedField);
+    EXPECT_EQ(DecodeErrorOf(R"({"v":2,"type":"setTaskbar","payload":{"hidden":true}})"),
+              DecodeError::UnsupportedVersion);
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"type":"taskbarState","payload":{"hidden":false,"blocked":"x"}})"),
+              DecodeError::InvalidField);
+    EXPECT_EQ(DecodeErrorOf(R"({"v":1,"type":"taskbarState","payload":{"hidden":false}})"),
+              DecodeError::MissingField);
 }
 
 TEST(Codec, AcceptsFieldsInAnyOrderAndWhitespace)

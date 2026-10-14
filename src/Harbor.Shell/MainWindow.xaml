@@ -6,6 +6,9 @@
   <StackPanel Padding="24" Spacing="12">
     <TextBlock x:Name="DockText" Text="Starting…" TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" />
     <TextBlock x:Name="StatusText" Text="Not connected" Style="{StaticResource CaptionTextBlockStyle}" />
+    <ToggleSwitch x:Name="HideToggle" Header="Hide the Windows taskbar" Toggled="OnHideToggled" />
+    <TextBlock Text="Ctrl+Alt+Shift+H brings the taskbar back at any time." TextWrapping="Wrap"
+               Style="{StaticResource CaptionTextBlockStyle}" />
     <TextBlock x:Name="TaskbarText" TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" />
     <StackPanel Orientation="Horizontal" Spacing="8">
       <Button x:Name="RestoreButton" Content="Restore taskbar now" Click="OnRestoreClicked" />

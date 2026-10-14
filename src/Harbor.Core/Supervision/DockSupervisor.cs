@@ -66,6 +66,15 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
 
     public event Action<TaskbarRestore>? TaskbarRestored;
 
+    /// <summary>The dock's latest <see cref="TaskbarState"/>.</summary>
+    public event Action<TaskbarState>? TaskbarStateChanged;
+
+    /// <summary>
+    /// Whether hiding the taskbar is requested. It turns off by itself after the panic hotkey, when Explorer
+    /// keeps showing the taskbar, and when the dock ends or hangs: the user turns it back on.
+    /// </summary>
+    public event Action<bool>? HideRequestChanged;
+
     /// <summary>
     /// Serves the control pipe and supervises until cancelled. Throws what <see cref="ControlPipeServer.RunAsync"/>
     /// throws if the pipe is taken (another Harbor Shell runs); then nothing was touched.
@@ -73,6 +82,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         server.StatusChanged += OnLinkStatus;
+        server.MessageReceived += OnDockMessage;
         try
         {
             // The pipe exists, or creating it failed, by the time RunAsync returns.
@@ -103,6 +113,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         finally
         {
             server.StatusChanged -= OnLinkStatus;
+            server.MessageReceived -= OnDockMessage;
         }
     }
 
@@ -110,8 +121,19 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     public void StartDock() => Post(session => session.Dock is null ? LaunchAsync(session) : Task.CompletedTask);
 
     /// <summary>
-    /// Restores the taskbar now (the "Restore taskbar now" button): only its windows while a dock is alive,
-    /// auto-hide too when none is. Null if Explorer didn't answer in time.
+    /// Asks the dock to hide the taskbar or show it (the toggle). The dock is only asked to hide while the
+    /// watchdog holds its process, so it can always restore the taskbar if the dock fails.
+    /// </summary>
+    public void SetTaskbarHidden(bool hidden) => Post(session =>
+    {
+        SetHideRequest(session, hidden, hidden ? "you turned hiding on" : "you turned hiding off");
+        return Task.CompletedTask;
+    });
+
+    /// <summary>
+    /// Restores the taskbar now (the "Restore taskbar now" button): tells the dock to stop hiding it and shows
+    /// its windows while a dock is alive, restores auto-hide too when none is. Null if Explorer didn't answer
+    /// in time.
     /// </summary>
     public Task<RestoreResult?> RestoreTaskbarAsync()
     {
@@ -120,6 +142,8 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         {
             try
             {
+                // First the request, so the dock's re-hiding doesn't fight the windows being shown.
+                SetHideRequest(session, false, "you asked to restore the taskbar");
                 done.SetResult(session.Dock is not null
                     ? new RestoreResult(restorer.ShowHiddenWindows(), null, RecordKept: false, null)
                     : await FullRestoreAsync().ConfigureAwait(false));
@@ -139,6 +163,40 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     {
         LinkStatusChanged?.Invoke(status);
         Post(session => HandleLinkStatusAsync(session, status));
+    }
+
+    private void OnDockMessage(Message message) => Post(session =>
+    {
+        if (message is TaskbarState state)
+        {
+            TaskbarStateChanged?.Invoke(state);
+            // The dock blocks hiding until it hears "show" (see GuardPolicy); turning the request off sends that.
+            if (state.Blocked is TaskbarBlock.PanicHotkey or TaskbarBlock.ExplorerFighting)
+            {
+                SetHideRequest(session, false, state.Blocked == TaskbarBlock.PanicHotkey
+                    ? "the panic hotkey was pressed"
+                    : "Explorer kept showing the taskbar");
+            }
+        }
+        return Task.CompletedTask;
+    });
+
+    private void SetHideRequest(Session session, bool hidden, string reason)
+    {
+        if (session.HideRequested != hidden)
+        {
+            session.HideRequested = hidden;
+            log.Info($"watchdog: hiding the taskbar turned {(hidden ? "on" : "off")}: {reason}");
+            HideRequestChanged?.Invoke(hidden);
+        }
+        SendHideRequest(session);
+    }
+
+    // Only a dock whose process the watchdog holds, and that is the one connected, may be asked to hide.
+    private void SendHideRequest(Session session)
+    {
+        var supervised = session.Dock is not null && session.ConnectedProcessId == session.Dock.Id;
+        server.TrySend(new SetTaskbar(session.HideRequested && supervised));
     }
 
     private async Task TickAsync(CancellationToken cancellationToken)
@@ -171,6 +229,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         if (!status.Connected)
         {
             session.Heartbeat.Reset();
+            session.ConnectedProcessId = null;
         }
         else if (status.LastPongSeq is { } seq)
         {
@@ -181,6 +240,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         {
             // A new connection.
             session.Heartbeat.Reset();
+            session.ConnectedProcessId = status.ClientProcessId;
             if (session.Dock is null && status.ClientProcessId is { } processId && DockProcess.Adopt(processId, log) is { } dock)
             {
                 log.Info($"watchdog: supervising dock process {processId}, which was already running");
@@ -190,6 +250,8 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             {
                 log.Warn($"watchdog: process {status.ClientProcessId} connected, not the supervised dock {session.Dock.Id}");
             }
+            // Every connection hears the current request (the dock forgets it when a connection drops).
+            SendHideRequest(session);
         }
         return Task.CompletedTask;
     }
@@ -279,12 +341,15 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             {
                 session.DebuggerReported = true;
                 log.Warn("watchdog: the dock stopped answering with a debugger attached; showing the taskbar, not ending the dock");
+                SetHideRequest(session, false, "the dock stopped answering (debugger attached)");
                 restorer.ShowHiddenWindows();
             }
             return false;
         }
 
         log.Error($"watchdog: the dock stopped answering ({session.Heartbeat.Missed} pings in a row); showing the taskbar and ending it");
+        // The dock's guard thread may still be working (only its UI thread may hang): tell it first.
+        SetHideRequest(session, false, "the dock stopped responding");
         // The dock is alive, so only the windows; auto-hide follows once the process is gone.
         var shown = restorer.ShowHiddenWindows();
         TaskbarRestored?.Invoke(new TaskbarRestore("the dock stopped responding", new RestoreResult(shown, null, RecordKept: false, null)));
@@ -312,15 +377,33 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             return;
         }
         var reason = session.KillReason ?? (exitCode == 0 ? "it exited" : $"it stopped unexpectedly (exit code 0x{exitCode:X8})");
+        // After any end, hiding stays off until the user turns it back on.
+        SetHideRequest(session, false, $"the dock ended ({reason})");
         log.Warn($"watchdog: dock process {dock.Id} ended: {reason}; restoring the taskbar");
         var result = await FullRestoreAsync().ConfigureAwait(false);
         TaskbarRestored?.Invoke(new TaskbarRestore($"the dock ended: {reason}", result));
         DockStatusChanged?.Invoke(new DockStatus(DockState.Stopped, dock.Id, exitCode, reason));
     }
 
-    private Task<RestoreResult?> FullRestoreAsync() => restorer.RestoreAsync(
-        new RestoreOptions { SessionEnding = TaskbarRestorer.IsSessionEnding, VerifyDelay = options.RestoreVerifyDelay },
-        options.RestoreTimeout);
+    // Explorer has been seen to ignore or revert the change: an unverified restore is tried again a few times
+    // (as the dock does). Not while the session ends: there the record stays on purpose.
+    private async Task<RestoreResult?> FullRestoreAsync()
+    {
+        const int Attempts = 3;
+        for (var attempt = 1; ; attempt++)
+        {
+            var sessionEnding = TaskbarRestorer.IsSessionEnding;
+            var result = await restorer.RestoreAsync(
+                new RestoreOptions { SessionEnding = sessionEnding, VerifyDelay = options.RestoreVerifyDelay },
+                options.RestoreTimeout).ConfigureAwait(false);
+            var unverified = result is { RecordKept: true, AutoHideRestoredTo: null };
+            if (sessionEnding || !unverified || attempt == Attempts)
+            {
+                return result;
+            }
+            await Task.Delay(TimeSpan.FromSeconds(1)).ConfigureAwait(false);
+        }
+    }
 
     private static async Task IgnoreCancellationAsync(Task task)
     {
@@ -345,6 +428,10 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         public bool StartupDone { get; set; }
 
         public bool DebuggerReported { get; set; }
+
+        public bool HideRequested { get; set; }
+
+        public uint? ConnectedProcessId { get; set; }
 
         public string? KillReason { get; set; }
 

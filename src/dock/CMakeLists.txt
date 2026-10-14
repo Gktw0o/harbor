@@ -8,6 +8,7 @@ add_library(harbor_dock_core STATIC
     core/ipc/pipe_name.cpp
     core/json/strict_json.cpp
     core/log/log_line.cpp
+    core/taskbar/guard_policy.cpp
     core/taskbar/restore_record.cpp
 )
 target_include_directories(harbor_dock_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

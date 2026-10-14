@@ -46,6 +46,27 @@ TEST(CommandLine, RejectsTestOptionsOnTheirOwn)
     EXPECT_TRUE(IsError(Parse({L"--pipe-name", L"harbor.test.1", L"--test-taskbar", L"ab"})));
 }
 
+TEST(CommandLine, AcceptsATestPingTimeoutInTestMode)
+{
+    const auto options =
+        std::get<DockOptions>(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t",
+                                     L"--test-taskbar", L"ab", L"--test-ping-timeout-ms", L"500"}));
+    EXPECT_EQ(options.testPingTimeoutMs, 500u);
+}
+
+TEST(CommandLine, RejectsATestPingTimeoutOutsideTestModeOrRange)
+{
+    EXPECT_TRUE(IsError(Parse({L"--test-ping-timeout-ms", L"500"})));
+    const auto withTestMode = [](std::wstring_view value) {
+        return Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t", L"--test-taskbar", L"ab",
+                      L"--test-ping-timeout-ms", value});
+    };
+    EXPECT_TRUE(IsError(withTestMode(L"99")));
+    EXPECT_TRUE(IsError(withTestMode(L"60001")));
+    EXPECT_TRUE(IsError(withTestMode(L"5s")));
+    EXPECT_TRUE(IsError(withTestMode(L"")));
+}
+
 TEST(CommandLine, RejectsInvalidTestIds)
 {
     EXPECT_TRUE(IsError(Parse({L"--test-taskbar", L"AB"})));

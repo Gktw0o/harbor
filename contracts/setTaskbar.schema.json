@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:contract:setTaskbar",
+  "title": "setTaskbar v1",
+  "description": "Harbor.Shell to dock, on the control channel: hide the Windows taskbar, or stop hiding it. Sent on every connect and whenever the user changes it. The dock hides only while its safety rules hold (see docs/adr/0007) and answers with taskbarState. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "setTaskbar" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hidden"],
+      "properties": {
+        "hidden": {
+          "description": "true: hide the taskbar. false: show it and clear a panic or explorerFighting block.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

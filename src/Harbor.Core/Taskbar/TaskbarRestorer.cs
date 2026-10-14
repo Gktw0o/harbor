@@ -74,7 +74,10 @@ public sealed class TaskbarRestorer(TaskbarTarget target, string? recordPath, IL
         }
         try
         {
-            return uint.TryParse(File.ReadAllText(target.TestAutoHideFile!), NumberStyles.None, CultureInfo.InvariantCulture, out var state) ? state : 0;
+            // Shared, so reading it never makes the dock's write fail.
+            using var reader = new StreamReader(new FileStream(
+                target.TestAutoHideFile!, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+            return uint.TryParse(reader.ReadToEnd(), NumberStyles.None, CultureInfo.InvariantCulture, out var state) ? state : 0;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -109,8 +112,8 @@ public sealed class TaskbarRestorer(TaskbarTarget target, string? recordPath, IL
     }
 
     /// <summary>
-    /// Shows the primary taskbar and any secondary one on a connected monitor that is hidden. Never blocks
-    /// (<c>ShowWindowAsync</c>), so it is safe while Explorer or the dock is unresponsive.
+    /// Shows the primary taskbar and every secondary one on a connected monitor, and returns how many were
+    /// hidden. Never blocks (<c>ShowWindowAsync</c>), so it is safe while Explorer or the dock is unresponsive.
     /// </summary>
     public int ShowHiddenWindows()
     {
@@ -118,12 +121,14 @@ public sealed class TaskbarRestorer(TaskbarTarget target, string? recordPath, IL
         foreach (var window in FindWindows())
         {
             // A secondary taskbar whose monitor is gone stays as Explorer left it.
-            if (IsWindowVisible(window.Handle) ||
-                (!window.IsPrimary && MonitorFromWindow(window.Handle, MonitorDefaultToNull) == 0))
+            if (!window.IsPrimary && MonitorFromWindow(window.Handle, MonitorDefaultToNull) == 0)
             {
                 continue;
             }
-            if (ShowWindowAsync(window.Handle, SwShowNa))
+            // Sent even to windows that look visible: a hide may still be queued for one (ShowWindowAsync),
+            // and this show must land after it. Showing a visible window changes nothing.
+            var wasHidden = !IsWindowVisible(window.Handle);
+            if (ShowWindowAsync(window.Handle, SwShowNa) && wasHidden)
             {
                 shown++;
             }

@@ -1,5 +1,7 @@
 #include "app/command_line.h"
 
+#include <charconv>
+
 #include "core/ipc/pipe_name.h"
 
 namespace harbor::dock
@@ -10,6 +12,7 @@ namespace
 constexpr std::wstring_view kPipeName = L"--pipe-name";
 constexpr std::wstring_view kDataDir = L"--data-dir";
 constexpr std::wstring_view kTestTaskbar = L"--test-taskbar";
+constexpr std::wstring_view kTestPingTimeout = L"--test-ping-timeout-ms";
 
 // Arguments echoed into error messages; anything outside printable ASCII becomes '?'.
 std::string Printable(std::wstring_view text)
@@ -60,7 +63,7 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
     for (size_t i = 0; i < args.size(); ++i)
     {
         const std::wstring_view name = args[i];
-        if (name != kPipeName && name != kDataDir && name != kTestTaskbar)
+        if (name != kPipeName && name != kDataDir && name != kTestTaskbar && name != kTestPingTimeout)
         {
             return "unknown argument: " + Printable(name);
         }
@@ -96,7 +99,7 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
             }
             options.dataDir = dataDir.lexically_normal();
         }
-        else
+        else if (name == kTestTaskbar)
         {
             if (options.testTaskbarId)
             {
@@ -108,6 +111,23 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
             }
             options.testTaskbarId = std::wstring(value);
         }
+        else
+        {
+            if (options.testPingTimeoutMs)
+            {
+                return "--test-ping-timeout-ms is given more than once";
+            }
+            const auto ascii = ToAscii(value).value_or("");
+            std::uint32_t milliseconds = 0;
+            const auto [end, error] =
+                std::from_chars(ascii.data(), ascii.data() + ascii.size(), milliseconds);
+            if (ascii.empty() || error != std::errc{} || end != ascii.data() + ascii.size() ||
+                milliseconds < 100 || milliseconds > 60'000)
+            {
+                return "--test-ping-timeout-ms must be a number from 100 to 60000";
+            }
+            options.testPingTimeoutMs = milliseconds;
+        }
     }
 
     // All or nothing: an override can never point a dock at the real taskbar, and a test dock can never
@@ -117,6 +137,10 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
     if (overrides != 0 && overrides != 3)
     {
         return "--pipe-name, --data-dir and --test-taskbar must be given together";
+    }
+    if (options.testPingTimeoutMs && overrides == 0)
+    {
+        return "--test-ping-timeout-ms needs --pipe-name, --data-dir and --test-taskbar";
     }
     return options;
 }

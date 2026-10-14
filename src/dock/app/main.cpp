@@ -102,11 +102,17 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     // Startup recovery: an earlier dock may have died with the taskbar hidden or auto-hide changed.
     taskbar.Restore({.sessionEnding = GetSystemMetrics(SM_SHUTTINGDOWN) != 0});
 
+    harbor::taskbar::GuardPolicyConfig policy;
+    if (options.testPingTimeoutMs)
+    {
+        policy.pingTimeout = std::chrono::milliseconds(*options.testPingTimeoutMs);
+    }
     harbor::dock::TaskbarGuard guard(taskbar, hiddenWindows, log,
                                      {
                                          .hotkey = testMode ? harbor::dock::TaskbarGuard::kTestHotkey
                                                             : harbor::dock::TaskbarGuard::kPanicHotkey,
                                          .windowTitle = std::wstring(pipeName.begin(), pipeName.end()),
+                                         .policy = policy,
                                      });
     if (!guard.Start())
     {
@@ -115,7 +121,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     }
 
     harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
-    harbor::dock::DockWindow window(controlChannel, log);
+    harbor::dock::DockWindow window(controlChannel, guard, log);
     if (!window.Create(instance, showCommand))
     {
         const DWORD error = GetLastError();

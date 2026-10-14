@@ -107,4 +107,30 @@ public sealed class ContractTests
         Assert.IsTrue(JsonNode.DeepEquals(
             JsonNode.Parse(MessageCodec.Encode(new Pong(42))),
             JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "pong.json")))));
+
+    [TestMethod]
+    public void EncodedSetTaskbarMatchesFixture() =>
+        Assert.IsTrue(JsonNode.DeepEquals(
+            JsonNode.Parse(MessageCodec.Encode(new SetTaskbar(Hidden: true))),
+            JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "set-taskbar-hidden.json")))));
+
+    [TestMethod]
+    public void EncodedTaskbarStateMatchesFixture() =>
+        Assert.IsTrue(JsonNode.DeepEquals(
+            JsonNode.Parse(MessageCodec.Encode(new TaskbarState(Hidden: false, TaskbarBlock.PanicHotkey))),
+            JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "taskbar-state-blocked-panic-hotkey.json")))));
+
+    // Every TaskbarBlock has a wire name, and a valid fixture uses it: an enum value added on one side
+    // without the other fails here or in the fixtures.
+    [TestMethod]
+    public void EveryTaskbarBlockHasAWireNameAndAFixture()
+    {
+        var fixtures = string.Join("\n", ListFixtures("valid").Select(File.ReadAllText));
+        foreach (var block in Enum.GetValues<TaskbarBlock>())
+        {
+            var name = MessageCodec.WireName(block);
+            Assert.IsTrue(MessageCodec.TryParseWireName(name, out var parsed) && parsed == block, $"{block}: {name}");
+            StringAssert.Contains(fixtures, $"\"blocked\":\"{name}\"", $"no valid fixture uses {name}");
+        }
+    }
 }

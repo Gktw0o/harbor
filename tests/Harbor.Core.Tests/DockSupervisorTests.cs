@@ -109,6 +109,111 @@ public sealed partial class DockSupervisorTests
         StringAssert.Contains(waiting.Reason, "wasn't found");
     }
 
+    // The hide path end to end: Shell toggle, setTaskbar, the dock's guard, taskbarState back.
+    [TestMethod]
+    public async Task HidesTheTaskbarWhenAskedAndShowsItAgain()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+
+        harness.Supervisor.SetTaskbarHidden(false);
+        await harness.WaitForStateAsync(s => !s.Hidden);
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    public async Task WhenTheShellGoesAwayTheDockRestoresTheTaskbar()
+    {
+        await using var harness = new Harness(launch: true);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+
+        await harness.StopSupervisorAsync();
+
+        // Nothing restores here but the dock itself, which keeps running.
+        harness.AssertFullyRestored();
+        using var dock = Process.GetProcessById((int)running.ProcessId!);
+        Assert.IsFalse(dock.HasExited);
+    }
+
+    [TestMethod]
+    public async Task ThePanicHotkeyRestoresTheTaskbarAndTurnsHidingOff()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+
+        TestDock.PressPanicHotkey(harness.PipeName);
+
+        await harness.WaitForStateAsync(s => s.Blocked == TaskbarBlock.PanicHotkey);
+        await harness.WaitForHideRequestAsync(false);
+        harness.AssertFullyRestored();
+
+        // Turning it back on works: the Shell's "off" cleared the dock's panic block.
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+    }
+
+    [TestMethod]
+    public async Task AHungDockIsToldToStopHidingThenEnded()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+
+        TestDock.HangUi(harness.Taskbar);
+
+        await harness.WaitForHideRequestAsync(false);
+        var stopped = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        Assert.AreEqual(DockExitCodes.KilledByWatchdog, stopped.ExitCode);
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task AHotkeyHeldElsewhereBlocksHiding()
+    {
+        // Take the test docks' panic hotkey first.
+        Assert.IsTrue(RegisterHotKey(0, 7, ModControl | ModAlt | ModShift | ModNoRepeat, VkF24));
+        try
+        {
+            await using var harness = new Harness(launch: true);
+            await harness.WaitForDockAsync(s => s.State == DockState.Running);
+            await harness.WaitForPongAsync();
+
+            harness.Supervisor.SetTaskbarHidden(true);
+            await harness.WaitForStateAsync(s => s.Blocked == TaskbarBlock.HotkeyUnavailable);
+            Assert.IsTrue(FakeTaskbar.IsVisible(harness.Taskbar.Primary));
+        }
+        finally
+        {
+            UnregisterHotKey(0, 7);
+        }
+    }
+
+    private const uint ModAlt = 0x1, ModControl = 0x2, ModShift = 0x4, ModNoRepeat = 0x4000, VkF24 = 0x87;
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool RegisterHotKey(nint window, int id, uint modifiers, uint key);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool UnregisterHotKey(nint window, int id);
+
     [LibraryImport("ntdll.dll")]
     private static partial int NtSuspendProcess(SafeProcessHandle process);
 
@@ -121,6 +226,8 @@ public sealed partial class DockSupervisorTests
         private readonly Channel<DockStatus> _dockStatuses = Channel.CreateUnbounded<DockStatus>();
         private readonly Channel<TaskbarRestore> _restores = Channel.CreateUnbounded<TaskbarRestore>();
         private readonly Channel<ControlLinkStatus> _links = Channel.CreateUnbounded<ControlLinkStatus>();
+        private readonly Channel<TaskbarState> _states = Channel.CreateUnbounded<TaskbarState>();
+        private readonly Channel<bool> _hideRequests = Channel.CreateUnbounded<bool>();
         private readonly List<int> _docks = [];
         private readonly Task _run;
 
@@ -128,6 +235,7 @@ public sealed partial class DockSupervisorTests
         {
             Taskbar = new FakeTaskbar(_dir.Path);
             var pipeName = $"harbor.test.{Guid.NewGuid():N}";
+            PipeName = pipeName;
             if (simulateHiddenFirst)
             {
                 SimulateHidden();
@@ -170,8 +278,15 @@ public sealed partial class DockSupervisorTests
                 _restores.Writer.TryWrite(restore);
             };
             supervisor.LinkStatusChanged += status => _links.Writer.TryWrite(status);
+            supervisor.TaskbarStateChanged += state => _states.Writer.TryWrite(state);
+            supervisor.HideRequestChanged += hidden => _hideRequests.Writer.TryWrite(hidden);
+            Supervisor = supervisor;
             _run = supervisor.RunAsync(_stop.Token);
         }
+
+        public DockSupervisor Supervisor { get; }
+
+        public string PipeName { get; }
 
         public FakeTaskbar Taskbar { get; }
 
@@ -211,7 +326,22 @@ public sealed partial class DockSupervisorTests
 
         public Task<ControlLinkStatus> WaitForPongAsync() => WaitAsync(_links, s => s.LastPongSeq is not null);
 
-        public async ValueTask DisposeAsync()
+        public Task<TaskbarState> WaitForStateAsync(Func<TaskbarState, bool> predicate) => WaitAsync(_states, predicate);
+
+        public Task<bool> WaitForHideRequestAsync(bool hidden) => WaitAsync(_hideRequests, h => h == hidden);
+
+        // The windows hidden and auto-hide on, as the dock does it (auto-hide was off: the record has that).
+        public void AssertHidden()
+        {
+            Assert.IsTrue(FakeTaskbar.WaitUntilVisible(Taskbar.Primary, visible: false, Timeout), "primary taskbar still visible");
+            Assert.IsTrue(FakeTaskbar.WaitUntilVisible(Taskbar.Secondaries[0], visible: false, Timeout), "secondary taskbar still visible");
+            Assert.AreEqual(1u, Taskbar.AutoHide);
+            Assert.IsTrue(RestoreRecord.TryDecode(File.ReadAllBytes(RecordPath), out var record));
+            Assert.AreEqual(0u, record.StateBefore);
+        }
+
+        // Harbor Shell going away (closed, crashed): its pipe closes.
+        public async Task StopSupervisorAsync()
         {
             await _stop.CancelAsync();
             try
@@ -221,6 +351,11 @@ public sealed partial class DockSupervisorTests
             catch (OperationCanceledException)
             {
             }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            await StopSupervisorAsync();
             List<int> docks;
             lock (_docks)
             {

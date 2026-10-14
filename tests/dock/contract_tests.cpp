@@ -212,5 +212,18 @@ TEST(Contracts, EncodedPongMatchesFixture)
               json::parse(ReadLine(ContractsDir() / "fixtures/valid/pong.json")));
 }
 
+TEST(Contracts, EncodedSetTaskbarMatchesFixture)
+{
+    EXPECT_EQ(json::parse(Encode(SetTaskbar{true})),
+              json::parse(ReadLine(ContractsDir() / "fixtures/valid/set-taskbar-hidden.json")));
+}
+
+TEST(Contracts, EncodedTaskbarStateMatchesFixture)
+{
+    EXPECT_EQ(
+        json::parse(Encode(TaskbarState{false, TaskbarBlock::PanicHotkey})),
+        json::parse(ReadLine(ContractsDir() / "fixtures/valid/taskbar-state-blocked-panic-hotkey.json")));
+}
+
 } // namespace
 } // namespace harbor::ipc

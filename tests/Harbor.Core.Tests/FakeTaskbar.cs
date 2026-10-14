@@ -51,7 +51,17 @@ internal sealed partial class FakeTaskbar : IDisposable
 
     public uint AutoHide
     {
-        get => File.Exists(AutoHideFile) ? uint.Parse(File.ReadAllText(AutoHideFile), CultureInfo.InvariantCulture) : 0;
+        get
+        {
+            if (!File.Exists(AutoHideFile))
+            {
+                return 0;
+            }
+            // Shared, so polling it never makes the dock's write fail.
+            using var reader = new StreamReader(new FileStream(
+                AutoHideFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+            return uint.TryParse(reader.ReadToEnd(), NumberStyles.None, CultureInfo.InvariantCulture, out var state) ? state : 0;
+        }
         set => File.WriteAllText(AutoHideFile, value.ToString(CultureInfo.InvariantCulture));
     }
 

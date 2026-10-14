@@ -4,23 +4,25 @@
 
 #include <cstdint>
 
+#include "app/taskbar_guard.h"
 #include "ports/ipc_channel.h"
 #include "ports/logger.h"
 
 namespace harbor::dock
 {
 
-// M0 placeholder: a normal top-level window. It is not an AppBar and does not touch the taskbar.
-// Per-monitor-v2 DPI awareness comes from the application manifest.
+// M1 placeholder: a normal top-level window, not yet an AppBar. The taskbar itself is the TaskbarGuard's
+// business. Per-monitor-v2 DPI awareness comes from the application manifest.
 //
 // Owns the control channel's lifetime: starts it once the window exists and stops it when the window is
 // destroyed. Pings are answered from this window's (UI) thread, so a pong also proves the UI thread is
-// responsive.
+// responsive. Everything that affects the taskbar (connection, pings, setTaskbar) goes straight from the
+// channel's thread to the guard, never through this thread.
 class DockWindow
 {
   public:
-    // Both must outlive the window.
-    DockWindow(ipc::IIpcChannel& controlChannel, log::ILogger& log);
+    // All three must outlive the window.
+    DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard, log::ILogger& log);
     DockWindow(const DockWindow&) = delete;
     DockWindow& operator=(const DockWindow&) = delete;
 
@@ -44,11 +46,13 @@ class DockWindow
     void UpdateTitle();
 
     ipc::IIpcChannel& m_controlChannel;
+    TaskbarGuard& m_guard;
     log::ILogger& m_log;
     HWND m_hwnd = nullptr;
     bool m_connected = false;
     bool m_hasPing = false;
     std::uint32_t m_lastPingSeq = 0;
+    bool m_taskbarHidden = false;
 };
 
 } // namespace harbor::dock

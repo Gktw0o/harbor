@@ -8,6 +8,7 @@ add_executable(harbor_dock_crash_helper crash_helper.cpp)
 target_link_libraries(harbor_dock_crash_helper PRIVATE harbor_dock_app wer)
 
 add_executable(harbor_dock_tests
+    appbar_state_tests.cpp
     codec_tests.cpp
     command_line_tests.cpp
     contract_tests.cpp
@@ -17,6 +18,7 @@ add_executable(harbor_dock_tests
     file_log_tests.cpp
     guard_policy_tests.cpp
     latest_value_tests.cpp
+    layout_tests.cpp
     line_framer_tests.cpp
     log_line_tests.cpp
     named_pipe_client_tests.cpp

@@ -3,7 +3,9 @@ find_package(wil CONFIG REQUIRED)
 
 # Pure domain logic: no Win32 headers, so it is testable on any machine.
 add_library(harbor_dock_core STATIC
+    core/appbar/appbar_state.cpp
     core/ipc/codec.cpp
+    core/island/layout.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
     core/json/strict_json.cpp

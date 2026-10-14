@@ -114,6 +114,10 @@ public sealed class DockE2ETests
             Assert.IsGreaterThan(empty.Width, three.Width);
             Assert.AreEqual(empty.Height, three.Height);
             Assert.AreEqual(empty.Bottom, three.Bottom);
+
+            // Its strip came from the AppBar worker (a test AppBar, which reserves nothing).
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), $"appbar: strip {monitor.Left},");
+            Assert.AreEqual(work.Bottom, IslandWindow.PrimaryMonitor().Work.Bottom, "a test dock changed the work area");
         }
         finally
         {
@@ -184,6 +188,32 @@ public sealed class DockE2ETests
             await StopAsync(dock);
             // The marker app may hold its file for a moment.
             await Task.Delay(200);
+        }
+    }
+
+    // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
+    [TestMethod]
+    public async Task TheDockExitsNormallyWhenItsWindowIsClosed()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", TimeSpan.FromSeconds(15)));
+            IslandWindow.Close(IslandWindow.Find(dock.Id));
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await dock.WaitForExitAsync(timeout.Token);
+            Assert.AreEqual(0, dock.ExitCode);
+            var log = await TestDock.ReadLogAsync(dataDir.Path);
+            StringAssert.Contains(log, "asked to close; exiting");
+            StringAssert.Contains(log, "harbor-dock exiting with code 0");
+        }
+        finally
+        {
+            await StopAsync(dock);
         }
     }
 

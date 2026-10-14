@@ -4,6 +4,7 @@ namespace Harbor.Core.Interop;
 
 internal static partial class NativeMethods
 {
+    public const uint AbmRemove = 1;
     public const uint AbmGetState = 4;
     public const uint AbmSetState = 10;
     public const uint AbsAutoHide = 1;

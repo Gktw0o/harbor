@@ -265,6 +265,11 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             {
                 log.Warn($"watchdog: process {status.ClientProcessId} connected, not the supervised dock {session.Dock.Id}");
             }
+            // The dock creates its island before it connects: remembered, to release its screen strip if it dies.
+            if (session.Dock is not null && status.ClientProcessId == session.Dock.Id)
+            {
+                session.Island = DockWindows.FindIsland(session.Dock.Id);
+            }
             // Every connection hears the current request (the dock forgets it when a connection drops).
             SendHideRequest(session);
             if (session.DockItems is { } items)
@@ -401,7 +406,26 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         log.Warn($"watchdog: dock process {dock.Id} ended: {reason}; restoring the taskbar");
         var result = await FullRestoreAsync().ConfigureAwait(false);
         TaskbarRestored?.Invoke(new TaskbarRestore($"the dock ended: {reason}", result));
+        await ReleaseAppBarAsync(session).ConfigureAwait(false);
         DockStatusChanged?.Invoke(new DockStatus(DockState.Stopped, dock.Id, exitCode, reason));
+    }
+
+    // The taskbar first, then the strip: Explorer frees a dead window's strip by itself, so this is only a backup.
+    private async Task ReleaseAppBarAsync(Session session)
+    {
+        var island = session.Island;
+        session.Island = 0;
+        try
+        {
+            if (await Task.Run(() => restorer.ReleaseAppBar(island)).WaitAsync(options.RestoreTimeout).ConfigureAwait(false))
+            {
+                log.Info("watchdog: released the dock's screen strip");
+            }
+        }
+        catch (TimeoutException)
+        {
+            log.Warn("watchdog: Explorer didn't answer while releasing the dock's screen strip");
+        }
     }
 
     // Explorer has been seen to ignore or revert the change: an unverified restore is tried again a few times
@@ -455,6 +479,9 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         public string? KillReason { get; set; }
 
         public DockItems? DockItems { get; set; }
+
+        /// <summary>The supervised dock's island window, once it connected.</summary>
+        public nint Island { get; set; }
 
         public void Dispose() => Dock?.Dispose();
     }

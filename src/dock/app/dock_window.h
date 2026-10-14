@@ -9,6 +9,7 @@
 #include <optional>
 
 #include "adapters/composition_renderer.h"
+#include "app/appbar_worker.h"
 #include "app/latest_value.h"
 #include "app/launcher.h"
 #include "app/taskbar_guard.h"
@@ -40,6 +41,8 @@ class DockWindow
         std::chrono::milliseconds orphanTimeout{0};
         // Where the Shell leaves the items' icon files (<data dir>\icons).
         std::filesystem::path iconsDir;
+        // Test docks: an AppBar that reserves nothing (adapters::TestAppBar).
+        bool testAppBar = false;
     };
 
     enum class CreateResult
@@ -59,6 +62,10 @@ class DockWindow
     DockWindow& operator=(const DockWindow&) = delete;
 
     CreateResult Create(HINSTANCE instance);
+
+    // After the message loop ended (and the guard put the taskbar back): removes the AppBar, ends the threads
+    // and destroys the window. Safe to call more than once.
+    void Shutdown() noexcept;
 
     HWND Hwnd() const noexcept
     {
@@ -88,6 +95,9 @@ class DockWindow
     void OnDeviceLost();
     void OnMouseMove(LPARAM position);
     void OnClick(LPARAM position);
+    void OnAppBarNotification(WPARAM notification, LPARAM lParam);
+    // Ends the message loop with exitCode; the window stays until Shutdown.
+    void RequestExit(int exitCode);
     // Takes ownership of report.
     void OnLaunched(LaunchReport* report);
     void SetHovered(std::optional<std::size_t> hovered);
@@ -104,6 +114,11 @@ class DockWindow
     // What the dock shows. Kept while the Shell is away.
     ipc::DockItems m_items;
     HWND m_hwnd = nullptr;
+    std::optional<AppBarWorker> m_appBar;
+    // The strip Explorer granted; until then the island sits at the bottom of the work area.
+    std::optional<geometry::Rect> m_strip;
+    // A full-screen app covers the monitor: the island is behind it.
+    bool m_fullScreen = false;
     std::optional<Launcher> m_launcher;
     HPOWERNOTIFY m_powerNotification = nullptr;
     UINT m_taskbarCreatedMessage = 0;

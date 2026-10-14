@@ -72,6 +72,8 @@ internal static partial class IslandWindow
         Assert.IsTrue(PostMessage(window, ButtonUp, 0, (y << 16) | (x & 0xFFFF)));
     }
 
+    public static void Close(nint window) => Assert.IsTrue(PostMessage(window, 0x0010 /* WM_CLOSE */, 0, 0));
+
     [LibraryImport("user32.dll", EntryPoint = "PostMessageW")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool PostMessage(nint window, uint message, nuint wParam, nint lParam);

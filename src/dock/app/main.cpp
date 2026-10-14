@@ -178,9 +178,10 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     const auto orphanTimeout = testMode
                                    ? std::chrono::milliseconds(options.testOrphanTimeoutMs.value_or(30'000))
                                    : std::chrono::milliseconds::zero();
-    harbor::dock::DockWindow window(
-        controlChannel, guard, renderer, log,
-        {.orphanTimeout = orphanTimeout, .iconsDir = dataDir.empty() ? dataDir : dataDir / L"icons"});
+    harbor::dock::DockWindow window(controlChannel, guard, renderer, log,
+                                    {.orphanTimeout = orphanTimeout,
+                                     .iconsDir = dataDir.empty() ? dataDir : dataDir / L"icons",
+                                     .testAppBar = testMode});
     switch (window.Create(instance))
     {
     case harbor::dock::DockWindow::CreateResult::Created:
@@ -211,8 +212,10 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
-    // Normal exit: put the taskbar back before the process ends.
+    // Normal exit, in order: the taskbar back first (nothing may delay that), then the AppBar and the window,
+    // then composition (the renderer goes with this scope).
     guard.Stop();
+    window.Shutdown();
     log.Info(std::format("harbor-dock exiting with code {}", message.wParam));
     return static_cast<int>(message.wParam);
 }

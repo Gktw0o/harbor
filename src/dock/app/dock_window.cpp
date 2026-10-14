@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <format>
 #include <memory>
+#include <shellapi.h>
 #include <ShellScalingApi.h>
 #include <string>
 #include <utility>
@@ -11,6 +12,7 @@
 
 #include "adapters/icon_files.h"
 #include "adapters/system_appearance.h"
+#include "adapters/win32_app_bar.h"
 #include "app/exit_codes.h"
 #include "core/island/icon_file.h"
 
@@ -29,6 +31,24 @@ constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
 constexpr UINT kControlDockItems = WM_APP + 4;         // the list is in m_receivedItems
 // Posted by the renderer once a frame is on its way to the screen.
 constexpr UINT kRenderCommitted = WM_APP + 5;
+// Posted by the AppBar worker with the strip Explorer granted: wParam = left, top; lParam = right, bottom.
+constexpr UINT kAppBarStrip = WM_APP + 8;
+// Explorer's AppBar notifications (ABN_*): wParam = notification.
+constexpr UINT kAppBarCallback = WM_APP + 9;
+
+static_assert(sizeof(WPARAM) == 8 && sizeof(LPARAM) == 8, "two 32-bit coordinates go in each");
+
+std::uint64_t PackPair(int high, int low) noexcept
+{
+    return static_cast<std::uint64_t>(static_cast<std::uint32_t>(high)) << 32 |
+           static_cast<std::uint32_t>(low);
+}
+
+std::pair<int, int> UnpackPair(std::uint64_t packed) noexcept
+{
+    return {static_cast<int>(static_cast<std::uint32_t>(packed >> 32)),
+            static_cast<int>(static_cast<std::uint32_t>(packed))};
+}
 
 constexpr UINT_PTR kOrphanTimer = 1;
 constexpr UINT_PTR kDeviceRetryTimer = 2;
@@ -77,11 +97,32 @@ DockWindow::DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard,
 
 DockWindow::~DockWindow()
 {
-    // Normally stopped by WM_DESTROY already; its callbacks use this object.
+    Shutdown();
+}
+
+void DockWindow::RequestExit(int exitCode)
+{
+    // The window stays until Shutdown: the AppBar is removed while it still exists.
+    m_exitCode = exitCode;
+    PostQuitMessage(exitCode);
+}
+
+void DockWindow::Shutdown() noexcept
+{
+    // Its callbacks use this object.
     m_controlChannel.Stop();
-    // Here rather than at WM_DESTROY: by now the taskbar is back (main stops the guard first), so a launch
-    // stuck in Explorer can't delay that.
+    // The AppBar goes before the window does, waiting for Explorer a moment at most.
+    if (m_appBar)
+    {
+        m_appBar->Stop();
+        m_appBar.reset();
+    }
+    // A launch stuck in Explorer is left behind.
     m_launcher.reset();
+    if (m_hwnd != nullptr)
+    {
+        DestroyWindow(m_hwnd);
+    }
 }
 
 DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
@@ -112,6 +153,22 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     // Energy saver turning on or off changes the island's look.
     m_powerNotification =
         RegisterPowerSettingNotification(m_hwnd, &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
+
+    // Test docks reserve nothing: tests never change the user's work area.
+    std::unique_ptr<appbar::IAppBar> appBar;
+    if (m_options.testAppBar)
+    {
+        appBar = std::make_unique<adapters::TestAppBar>();
+    }
+    else
+    {
+        appBar = std::make_unique<adapters::Win32AppBar>(m_hwnd, kAppBarCallback);
+    }
+    const HWND hwnd = m_hwnd;
+    m_appBar.emplace(std::move(appBar), [hwnd](const geometry::Rect& strip) {
+        PostMessageW(hwnd, kAppBarStrip, PackPair(strip.left, strip.top),
+                     static_cast<LPARAM>(PackPair(strip.right, strip.bottom)));
+    });
     Refresh(/*force=*/true);
     m_launcher.emplace(m_hwnd);
 
@@ -204,9 +261,16 @@ void DockWindow::Refresh(bool force)
     const auto primary = ReadPrimaryMonitor();
     const auto style = island::StyleFor(adapters::ReadSystemAppearance());
     const auto metrics = island::MeasureFor(primary.monitor.Width(), primary.dpi, m_items.items.size());
-    // Until the AppBar reserves a strip: the bottom of the work area, above a visible taskbar.
-    const geometry::Rect strip{primary.monitor.left, primary.workArea.bottom - metrics.StripHeight(),
-                               primary.monitor.right, primary.workArea.bottom};
+    // The AppBar asks Explorer for the strip (and it answers on kAppBarStrip); same request, nothing happens.
+    if (m_appBar)
+    {
+        m_appBar->SetWant({primary.monitor, metrics.StripHeight()});
+    }
+    // Until Explorer answers (or if it never does): the bottom of the work area, above a visible taskbar.
+    // That is usually where the strip goes too.
+    const geometry::Rect strip =
+        m_strip.value_or(geometry::Rect{primary.monitor.left, primary.workArea.bottom - metrics.StripHeight(),
+                                        primary.monitor.right, primary.workArea.bottom});
     auto layout = island::Arrange(strip, metrics);
 
     if (!force && m_layout && layout.island == m_layout->island && layout.items == m_layout->items &&
@@ -221,8 +285,9 @@ void DockWindow::Refresh(bool force)
     }
 
     const auto& island = layout.island;
-    SetWindowPos(m_hwnd, HWND_TOPMOST, island.left, island.top, island.Width(), island.Height(),
-                 SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    // Behind a full-screen app, above everything else.
+    SetWindowPos(m_hwnd, m_fullScreen ? HWND_BOTTOM : HWND_TOPMOST, island.left, island.top, island.Width(),
+                 island.Height(), SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     // Clicks on the transparent corners go to the window below.
     const int diameter = 2 * metrics.cornerRadius;
     SetWindowRgn(m_hwnd,
@@ -291,8 +356,7 @@ void DockWindow::OnDeviceLost()
         if (++m_deviceFailures >= kDeviceAttempts)
         {
             m_log.Error("island: no graphics device to draw with; exiting");
-            m_exitCode = exit_code::kGraphicsUnavailable;
-            DestroyWindow(m_hwnd);
+            RequestExit(exit_code::kGraphicsUnavailable);
             return;
         }
         SetTimer(m_hwnd, kDeviceRetryTimer, kDeviceRetryMs, nullptr);
@@ -371,6 +435,39 @@ void DockWindow::OnClick(LPARAM position)
     m_launcher->Launch(*item, m_items.items[*item]);
 }
 
+void DockWindow::OnAppBarNotification(WPARAM notification, LPARAM lParam)
+{
+    switch (notification)
+    {
+    case ABN_POSCHANGED:
+        // Explorer sends these in bursts; the worker coalesces them.
+        if (m_appBar)
+        {
+            m_appBar->PositionMayHaveChanged();
+        }
+        break;
+    case ABN_FULLSCREENAPP:
+        // A full-screen app opened (or closed) on this monitor: step behind it, like the taskbar does. The
+        // island stays on screen in GuardPolicy's sense, as the hidden taskbar would have been covered too.
+        if (m_fullScreen != (lParam != 0))
+        {
+            m_fullScreen = lParam != 0;
+            m_log.Info(m_fullScreen ? "appbar: a full-screen app opened; the island steps behind it"
+                                    : "appbar: the full-screen app closed; the island is on top again");
+            SetWindowPos(m_hwnd, m_fullScreen ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        break;
+    case ABN_STATECHANGE:
+        // The taskbar's auto-hide or always-on-top changed. Harbor sets auto-hide itself while it hides the
+        // taskbar, so this can't tell the user's change from its own (revisited with onboarding, M5).
+        m_log.Info("appbar: the taskbar's state changed");
+        break;
+    default:
+        break;
+    }
+}
+
 void DockWindow::OnLaunched(LaunchReport* report)
 {
     const std::unique_ptr<LaunchReport> owned(report);
@@ -422,7 +519,11 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 {
     if (message == m_taskbarCreatedMessage && message != 0)
     {
-        // Explorer restarted, or the primary monitor's DPI changed.
+        // Explorer restarted (forgetting every AppBar), or the primary monitor's DPI changed.
+        if (m_appBar)
+        {
+            m_appBar->TaskbarCreated();
+        }
         Refresh(/*force=*/false);
         return 0;
     }
@@ -467,7 +568,8 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
             m_log.Warn(std::format("test dock: no connection to Harbor Shell for {} ms; exiting",
                                    m_options.orphanTimeout.count()));
-            DestroyWindow(m_hwnd);
+            KillTimer(m_hwnd, kOrphanTimer);
+            RequestExit(0);
             return 0;
         }
         if (wParam == kDeviceRetryTimer)
@@ -493,8 +595,31 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         // Not Windows' suggested rectangle: the layout follows the primary monitor, wherever this window is.
         Refresh(/*force=*/false);
         return 0;
+    case kAppBarStrip: {
+        const auto [left, top] = UnpackPair(wParam);
+        const auto [right, bottom] = UnpackPair(static_cast<std::uint64_t>(lParam));
+        m_strip = geometry::Rect{left, top, right, bottom};
+        m_log.Info(std::format("appbar: strip {},{} to {},{}", left, top, right, bottom));
+        Refresh(/*force=*/false);
+        return 0;
+    }
+    case kAppBarCallback:
+        OnAppBarNotification(wParam, lParam);
+        return 0;
+    case WM_CLOSE:
+        // Harbor Shell's "Stop dock", or anyone else: a normal exit.
+        m_log.Info("asked to close; exiting");
+        RequestExit(0);
+        return 0;
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
+        // Monitors or the work area changed: so may the strip.
+        if (m_appBar && (message == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA))
+        {
+            m_appBar->PositionMayHaveChanged();
+        }
+        Refresh(/*force=*/false);
+        return DefWindowProcW(m_hwnd, message, wParam, lParam);
     case WM_THEMECHANGED:
     case WM_SYSCOLORCHANGE:
         Refresh(/*force=*/false);

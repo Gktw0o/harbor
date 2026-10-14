@@ -15,6 +15,7 @@ target_link_libraries(harbor_test_marker PRIVATE harbor_compiler_options)
 add_executable(harbor_dock_tests
     app_launcher_tests.cpp
     appbar_state_tests.cpp
+    appbar_worker_tests.cpp
     appearance_tests.cpp
     codec_tests.cpp
     command_line_tests.cpp

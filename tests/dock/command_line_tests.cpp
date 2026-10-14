@@ -67,6 +67,24 @@ TEST(CommandLine, RejectsATestPingTimeoutOutsideTestModeOrRange)
     EXPECT_TRUE(IsError(withTestMode(L"")));
 }
 
+TEST(CommandLine, AcceptsATestOrphanTimeoutInTestModeOnly)
+{
+    const auto withTestMode = [](std::wstring_view value) {
+        return Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t", L"--test-taskbar", L"ab",
+                      L"--test-orphan-timeout-ms", value});
+    };
+    EXPECT_EQ(std::get<DockOptions>(withTestMode(L"600000")).testOrphanTimeoutMs, 600'000u);
+    EXPECT_EQ(std::get<DockOptions>(withTestMode(L"100")).testOrphanTimeoutMs, 100u);
+    EXPECT_FALSE(std::get<DockOptions>(withTestMode(L"100")).testPingTimeoutMs);
+    EXPECT_TRUE(IsError(withTestMode(L"99")));
+    EXPECT_TRUE(IsError(withTestMode(L"600001")));
+    EXPECT_TRUE(IsError(withTestMode(L"-1")));
+    EXPECT_TRUE(IsError(Parse({L"--test-orphan-timeout-ms", L"500"})));
+    EXPECT_TRUE(
+        IsError(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t", L"--test-taskbar", L"ab",
+                       L"--test-orphan-timeout-ms", L"500", L"--test-orphan-timeout-ms", L"500"})));
+}
+
 TEST(CommandLine, RejectsInvalidTestIds)
 {
     EXPECT_TRUE(IsError(Parse({L"--test-taskbar", L"AB"})));

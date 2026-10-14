@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <format>
 #include <shellapi.h>
 #include <string>
@@ -121,7 +122,11 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     }
 
     harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
-    harbor::dock::DockWindow window(controlChannel, guard, log);
+    // A test dock whose test died without ending it goes away by itself.
+    const auto orphanTimeout = testMode
+                                   ? std::chrono::milliseconds(options.testOrphanTimeoutMs.value_or(30'000))
+                                   : std::chrono::milliseconds::zero();
+    harbor::dock::DockWindow window(controlChannel, guard, log, {.orphanTimeout = orphanTimeout});
     if (!window.Create(instance, showCommand))
     {
         const DWORD error = GetLastError();

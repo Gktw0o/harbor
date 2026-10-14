@@ -1,6 +1,8 @@
 #include "app/dock_window.h"
 
+#include <format>
 #include <string>
+#include <utility>
 #include <variant>
 
 namespace harbor::dock
@@ -16,12 +18,22 @@ constexpr int kHeightDip = 120;
 // Posted by the control channel's thread; handled on the UI thread.
 constexpr UINT kControlConnectionChanged = WM_APP + 1; // wParam: connected (0/1)
 constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
+constexpr UINT kControlDockItems = WM_APP + 4;         // the list is in m_receivedItems
+
+constexpr UINT_PTR kOrphanTimer = 1;
 
 } // namespace
 
-DockWindow::DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard, log::ILogger& log)
-    : m_controlChannel(controlChannel), m_guard(guard), m_log(log)
+DockWindow::DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard, log::ILogger& log,
+                       Options options)
+    : m_controlChannel(controlChannel), m_guard(guard), m_log(log), m_options(options)
 {
+}
+
+DockWindow::~DockWindow()
+{
+    // Normally stopped by WM_DESTROY already; its callbacks use this object.
+    m_controlChannel.Stop();
 }
 
 bool DockWindow::Create(HINSTANCE instance, int showCommand)
@@ -56,6 +68,7 @@ bool DockWindow::Create(HINSTANCE instance, int showCommand)
     ShowWindow(m_hwnd, showCommand);
     // The guard's state reports go out through this thread, like pongs.
     m_guard.SetStateWindow(m_hwnd);
+    OnConnectionChanged(false);
     StartControlChannel();
     return true;
 }
@@ -67,9 +80,10 @@ void DockWindow::StartControlChannel()
     const HWND hwnd = m_hwnd;
     TaskbarGuard& guard = m_guard;
     log::ILogger& log = m_log;
+    LatestValue<ipc::DockItems>& receivedItems = m_receivedItems;
     m_controlChannel.Start({
         .onMessage =
-            [hwnd, &guard](const ipc::Message& message) {
+            [hwnd, &guard, &receivedItems](const ipc::Message& message) {
                 if (const auto* ping = std::get_if<ipc::Ping>(&message))
                 {
                     PostMessageW(hwnd, kControlPing, ping->seq, 0);
@@ -78,6 +92,11 @@ void DockWindow::StartControlChannel()
                 else if (const auto* setTaskbar = std::get_if<ipc::SetTaskbar>(&message))
                 {
                     guard.PostRequest(setTaskbar->hidden);
+                }
+                else if (const auto* dockItems = std::get_if<ipc::DockItems>(&message))
+                {
+                    receivedItems.Put(*dockItems);
+                    PostMessageW(hwnd, kControlDockItems, 0, 0);
                 }
             },
         .onConnectionChanged =
@@ -104,6 +123,37 @@ void DockWindow::OnPing(std::uint32_t seq)
     UpdateTitle();
 }
 
+void DockWindow::OnConnectionChanged(bool connected)
+{
+    m_connected = connected;
+    m_hasPing = false;
+    if (m_options.orphanTimeout.count() > 0)
+    {
+        if (connected)
+        {
+            KillTimer(m_hwnd, kOrphanTimer);
+        }
+        else
+        {
+            // (Re)starts the countdown.
+            SetTimer(m_hwnd, kOrphanTimer, static_cast<UINT>(m_options.orphanTimeout.count()), nullptr);
+        }
+    }
+    UpdateTitle();
+}
+
+void DockWindow::OnDockItems()
+{
+    // Several lists may have arrived for one wake-up; the newest wins.
+    if (auto items = m_receivedItems.Take(); items && *items != m_items)
+    {
+        m_items = std::move(*items);
+        // Only the count: the names are the user's business.
+        m_log.Info(std::format("dock items: {} received", m_items.items.size()));
+        UpdateTitle();
+    }
+}
+
 void DockWindow::UpdateTitle()
 {
     std::wstring title = L"Harbor Dock - ";
@@ -119,6 +169,7 @@ void DockWindow::UpdateTitle()
     {
         title += L"connected, ping " + std::to_wstring(m_lastPingSeq);
     }
+    title += L" - " + std::to_wstring(m_items.items.size()) + L" apps";
     if (m_taskbarHidden)
     {
         title += L" - taskbar hidden (Ctrl+Alt+Shift+H restores it)";
@@ -157,13 +208,23 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case kControlConnectionChanged:
-        m_connected = wParam != 0;
-        m_hasPing = false;
-        UpdateTitle();
+        OnConnectionChanged(wParam != 0);
         return 0;
     case kControlPing:
         OnPing(static_cast<std::uint32_t>(wParam));
         return 0;
+    case kControlDockItems:
+        OnDockItems();
+        return 0;
+    case WM_TIMER:
+        if (wParam == kOrphanTimer)
+        {
+            m_log.Warn(std::format("test dock: no connection to Harbor Shell for {} ms; exiting",
+                                   m_options.orphanTimeout.count()));
+            DestroyWindow(m_hwnd);
+            return 0;
+        }
+        return DefWindowProcW(m_hwnd, message, wParam, lParam);
     case kTestHangMessage:
         m_log.Warn("test hook: hanging the UI thread");
         Sleep(INFINITE);

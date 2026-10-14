@@ -33,6 +33,24 @@ Both suites list the files when they run, so a new schema or fixture is picked u
 | [`pong`](pong.schema.json) v1 | dock → Shell | `control` |
 | [`setTaskbar`](setTaskbar.schema.json) v1 | Shell → dock | `control` |
 | [`taskbarState`](taskbarState.schema.json) v1 | dock → Shell | `control` |
+| [`dockItems`](dockItems.schema.json) v1 | Shell → dock | `control` |
+
+Text goes on the wire as UTF-8; only `"`, `\` and control characters are escaped. `dockItems` is bounded so its
+largest form ([`dock-items-largest.json`](fixtures/valid/dock-items-largest.json), 64,888 bytes) fits one
+line; both test suites check that, and that their encoders write it byte for byte.
+
+## Icon files
+
+`dockItems` names each item's icon by a file in `%LOCALAPPDATA%\Harbor\icons\` (`<data dir>\icons`). The
+Shell makes them; the dock only reads them. Raw pixels rather than PNG, so the dock needs no image decoder.
+
+- **Name:** the first 16 lowercase hex digits of the SHA-256 of the file's bytes, then `.bgra`. A file never
+  changes once written; a changed icon gets a new name.
+- **Layout:** the 4 ASCII bytes `HIC1`, the width and the height (each a little-endian uint32, 1 to 256),
+  then width × height pixels, rows top to bottom with no padding, 4 bytes each: blue, green, red, alpha, with
+  the colors premultiplied by alpha (each ≤ alpha). The file is exactly 12 + 4 × width × height bytes.
+- **Writing:** the Shell writes a temporary file in the same folder and renames it, so a reader never sees
+  half a file. A file that doesn't match the layout is treated as no icon.
 
 ## State files
 

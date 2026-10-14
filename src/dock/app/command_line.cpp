@@ -1,6 +1,7 @@
 #include "app/command_line.h"
 
 #include <charconv>
+#include <optional>
 
 #include "core/ipc/pipe_name.h"
 
@@ -13,6 +14,7 @@ constexpr std::wstring_view kPipeName = L"--pipe-name";
 constexpr std::wstring_view kDataDir = L"--data-dir";
 constexpr std::wstring_view kTestTaskbar = L"--test-taskbar";
 constexpr std::wstring_view kTestPingTimeout = L"--test-ping-timeout-ms";
+constexpr std::wstring_view kTestOrphanTimeout = L"--test-orphan-timeout-ms";
 
 // Arguments echoed into error messages; anything outside printable ASCII becomes '?'.
 std::string Printable(std::wstring_view text)
@@ -39,6 +41,20 @@ std::optional<std::string> ToAscii(std::wstring_view text)
     return result;
 }
 
+// A plain decimal number from min to max.
+std::optional<std::uint32_t> ParseMilliseconds(std::wstring_view value, std::uint32_t min, std::uint32_t max)
+{
+    const auto ascii = ToAscii(value).value_or("");
+    std::uint32_t milliseconds = 0;
+    const auto [end, error] = std::from_chars(ascii.data(), ascii.data() + ascii.size(), milliseconds);
+    if (ascii.empty() || error != std::errc{} || end != ascii.data() + ascii.size() || milliseconds < min ||
+        milliseconds > max)
+    {
+        return std::nullopt;
+    }
+    return milliseconds;
+}
+
 bool IsValidTestId(std::wstring_view id) noexcept
 {
     if (id.empty() || id.size() > 64)
@@ -63,7 +79,8 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
     for (size_t i = 0; i < args.size(); ++i)
     {
         const std::wstring_view name = args[i];
-        if (name != kPipeName && name != kDataDir && name != kTestTaskbar && name != kTestPingTimeout)
+        if (name != kPipeName && name != kDataDir && name != kTestTaskbar && name != kTestPingTimeout &&
+            name != kTestOrphanTimeout)
         {
             return "unknown argument: " + Printable(name);
         }
@@ -113,20 +130,18 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
         }
         else
         {
-            if (options.testPingTimeoutMs)
+            const bool ping = name == kTestPingTimeout;
+            auto& target = ping ? options.testPingTimeoutMs : options.testOrphanTimeoutMs;
+            const std::uint32_t max = ping ? 60'000 : 600'000;
+            if (target)
             {
-                return "--test-ping-timeout-ms is given more than once";
+                return Printable(name) + " is given more than once";
             }
-            const auto ascii = ToAscii(value).value_or("");
-            std::uint32_t milliseconds = 0;
-            const auto [end, error] =
-                std::from_chars(ascii.data(), ascii.data() + ascii.size(), milliseconds);
-            if (ascii.empty() || error != std::errc{} || end != ascii.data() + ascii.size() ||
-                milliseconds < 100 || milliseconds > 60'000)
+            target = ParseMilliseconds(value, 100, max);
+            if (!target)
             {
-                return "--test-ping-timeout-ms must be a number from 100 to 60000";
+                return Printable(name) + " must be a number from 100 to " + std::to_string(max);
             }
-            options.testPingTimeoutMs = milliseconds;
         }
     }
 
@@ -141,6 +156,10 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
     if (options.testPingTimeoutMs && overrides == 0)
     {
         return "--test-ping-timeout-ms needs --pipe-name, --data-dir and --test-taskbar";
+    }
+    if (options.testOrphanTimeoutMs && overrides == 0)
+    {
+        return "--test-orphan-timeout-ms needs --pipe-name, --data-dir and --test-taskbar";
     }
     return options;
 }

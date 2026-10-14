@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Harbor.Core.Ipc;
 using Harbor.Core.Supervision;
 using Harbor.Core.Taskbar;
 
@@ -39,6 +40,50 @@ public sealed class DockE2ETests
             var log = await TestDock.ReadLogAsync(dataDir.Path);
             StringAssert.Contains(log, "harbor-dock starting");
             StringAssert.Contains(log, "control channel: connected to Harbor Shell");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    [TestMethod]
+    public async Task DockReceivesItsAppsOverTheControlPipe()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.App, "Microsoft.Windows.Explorer", "File Explorer", null),
+                new DockItem(DockItemKind.Path, @"C:\Ünïcødé\app.exe", "Ünïcødé \U0001D538", "0123456789abcdef.bgra"),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "dock items: 2 received", TimeSpan.FromSeconds(10)),
+                await TestDock.ReadLogAsync(dataDir.Path));
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // A test dock whose test went away without ending it exits by itself, normally (taskbar restored).
+    [TestMethod]
+    public async Task TestDockExitsWhenNoShellConnects()
+    {
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start($"harbor.e2e.{Guid.NewGuid():N}", dataDir.Path, taskbar, "--test-orphan-timeout-ms", "500");
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await dock.WaitForExitAsync(timeout.Token);
+            Assert.AreEqual(0, dock.ExitCode);
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), "test dock: no connection to Harbor Shell for 500 ms; exiting");
         }
         finally
         {

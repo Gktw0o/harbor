@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using System.Text.Json;
 
 namespace Harbor.Core.Ipc;
@@ -23,6 +24,8 @@ public static class MessageCodec
 {
     private const ulong Version = 1;
 
+    private static readonly SearchValues<char> LowercaseHexDigits = SearchValues.Create("0123456789abcdef");
+
     private static readonly (TaskbarBlock Value, string Name)[] BlockNames =
     [
         (TaskbarBlock.None, "none"),
@@ -38,7 +41,7 @@ public static class MessageCodec
     {
         ArgumentNullException.ThrowIfNull(message);
         var buffer = new ArrayBufferWriter<byte>();
-        using (var writer = new Utf8JsonWriter(buffer))
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Encoder = MinimalJsonEncoder.Instance }))
         {
             writer.WriteStartObject();
             // Every message is at version 1 today; a message that moves on gets its own constant.
@@ -59,6 +62,9 @@ public static class MessageCodec
                 case TaskbarState state:
                     writer.WriteBoolean("hidden", state.Hidden);
                     writer.WriteString("blocked", WireName(state.Blocked));
+                    break;
+                case DockItems dockItems:
+                    WriteDockItems(writer, dockItems);
                     break;
             }
             writer.WriteEndObject();
@@ -126,8 +132,31 @@ public static class MessageCodec
         Pong => "pong",
         SetTaskbar => "setTaskbar",
         TaskbarState => "taskbarState",
+        DockItems => "dockItems",
         _ => throw new ArgumentException($"Unknown message type {message.GetType().Name}.", nameof(message)),
     };
+
+    private static void WriteDockItems(Utf8JsonWriter writer, DockItems message)
+    {
+        writer.WriteStartArray("items");
+        foreach (var item in message.Items)
+        {
+            writer.WriteStartObject();
+            writer.WriteString("kind", item.Kind == DockItemKind.Path ? "path" : "app");
+            writer.WriteString("target", item.Target);
+            writer.WriteString("name", item.Name);
+            if (item.Icon is null)
+            {
+                writer.WriteNull("icon");
+            }
+            else
+            {
+                writer.WriteString("icon", item.Icon);
+            }
+            writer.WriteEndObject();
+        }
+        writer.WriteEndArray();
+    }
 
     // Returns null on success.
     private static DecodeError? DecodeDocument(JsonElement root, out Message? message)
@@ -173,6 +202,7 @@ public static class MessageCodec
             "pong" => fields => DecodeSeq(fields, seq => new Pong(seq)),
             "setTaskbar" => DecodeSetTaskbar,
             "taskbarState" => DecodeTaskbarState,
+            "dockItems" => DecodeDockItems,
             _ => null,
         };
         if (decodePayload is null)
@@ -183,21 +213,30 @@ public static class MessageCodec
         {
             return DecodeError.UnsupportedVersion;
         }
-        if (payload.Value.ValueKind != JsonValueKind.Object)
+        if (ReadFields(payload.Value, out var fields) is { } fieldError)
+        {
+            return fieldError;
+        }
+        (message, var failure) = decodePayload(fields);
+        return failure;
+    }
+
+    // An object's properties by name; a repeated name is an unexpected field.
+    private static DecodeError? ReadFields(JsonElement element, out Dictionary<string, JsonElement> fields)
+    {
+        fields = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (element.ValueKind != JsonValueKind.Object)
         {
             return DecodeError.InvalidField;
         }
-
-        var fields = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        foreach (var property in payload.Value.EnumerateObject())
+        foreach (var property in element.EnumerateObject())
         {
             if (!fields.TryAdd(property.Name, property.Value))
             {
                 return DecodeError.UnexpectedField;
             }
         }
-        (message, var failure) = decodePayload(fields);
-        return failure;
+        return null;
     }
 
     // The payload must have exactly these keys.
@@ -244,6 +283,76 @@ public static class MessageCodec
                TryParseWireName(blocked.GetString()!, out var block)
             ? (new TaskbarState(hidden, block), null)
             : (null, DecodeError.InvalidField);
+    }
+
+    private static (Message?, DecodeError?) DecodeDockItems(Dictionary<string, JsonElement> fields)
+    {
+        if (CheckKeys(fields, "items") is { } error)
+        {
+            return (null, error);
+        }
+        var items = fields["items"];
+        if (items.ValueKind != JsonValueKind.Array || items.GetArrayLength() > DockItems.MaxItems)
+        {
+            return (null, DecodeError.InvalidField);
+        }
+
+        var list = new List<DockItem>(items.GetArrayLength());
+        foreach (var element in items.EnumerateArray())
+        {
+            if ((ReadFields(element, out var item) ?? CheckKeys(item, "kind", "target", "name", "icon")) is { } itemError)
+            {
+                return (null, itemError);
+            }
+            var kind = item["kind"].ValueKind == JsonValueKind.String ? item["kind"].GetString() : null;
+            var icon = item["icon"];
+            if (kind is not ("app" or "path") ||
+                !TryGetText(item["target"], DockItems.MaxTargetLength, out var target) ||
+                !TryGetText(item["name"], DockItems.MaxNameLength, out var name) ||
+                !(icon.ValueKind == JsonValueKind.Null ||
+                  (icon.ValueKind == JsonValueKind.String && IsIconFileName(icon.GetString()!))))
+            {
+                return (null, DecodeError.InvalidField);
+            }
+            list.Add(new DockItem(kind == "path" ? DockItemKind.Path : DockItemKind.App, target, name,
+                icon.ValueKind == JsonValueKind.Null ? null : icon.GetString()));
+        }
+        return (new DockItems(list), null);
+    }
+
+    /// <summary>
+    /// Whether text fits a dockItems field: 1 to <paramref name="maxLength"/> characters (runes, like JSON
+    /// Schema's maxLength), no control characters (U+0000-U+001F) and no lone surrogates.
+    /// </summary>
+    public static bool IsValidDockItemText(string text, int maxLength)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        var rest = text.AsSpan();
+        var length = 0;
+        while (!rest.IsEmpty)
+        {
+            if (Rune.DecodeFromUtf16(rest, out var rune, out var used) != OperationStatus.Done || rune.Value < 0x20 ||
+                ++length > maxLength)
+            {
+                return false;
+            }
+            rest = rest[used..];
+        }
+        return length > 0;
+    }
+
+    /// <summary>Whether a name is "&lt;16 lowercase hex digits&gt;.bgra": a plain file name in the icons folder.</summary>
+    public static bool IsIconFileName(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        return name.Length == 21 && name.EndsWith(".bgra", StringComparison.Ordinal) &&
+               name.AsSpan(0, 16).IndexOfAnyExcept(LowercaseHexDigits) < 0;
+    }
+
+    private static bool TryGetText(JsonElement element, int maxLength, [NotNullWhen(true)] out string? text)
+    {
+        text = element.ValueKind == JsonValueKind.String ? element.GetString() : null;
+        return text is not null && IsValidDockItemText(text, maxLength);
     }
 
     private static bool IsBoolean(JsonElement element, out bool value)

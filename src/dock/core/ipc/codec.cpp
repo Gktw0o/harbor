@@ -1,5 +1,6 @@
 #include "core/ipc/codec.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -24,6 +25,75 @@ constexpr std::pair<TaskbarBlock, std::string_view> kTaskbarBlockNames[] = {
     {TaskbarBlock::TaskbarNotFound, "taskbarNotFound"},
     {TaskbarBlock::KillOnCloseJob, "killOnCloseJob"},
 };
+
+constexpr std::pair<DockItemKind, std::string_view> kDockItemKindNames[] = {
+    {DockItemKind::App, "app"},
+    {DockItemKind::Path, "path"},
+};
+
+std::string_view WireName(DockItemKind kind) noexcept
+{
+    for (const auto& [value, name] : kDockItemKindNames)
+    {
+        if (value == kind)
+        {
+            return name;
+        }
+    }
+    return "app";
+}
+
+std::optional<DockItemKind> DockItemKindFrom(const json& value)
+{
+    if (value.is_string())
+    {
+        for (const auto& [kind, name] : kDockItemKindNames)
+        {
+            if (name == value.get_ref<const std::string&>())
+            {
+                return kind;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+// Unicode characters in text the JSON parser has already checked to be UTF-8: every byte that doesn't
+// continue a sequence (10xxxxxx) starts a character.
+std::size_t CountCharacters(std::string_view utf8) noexcept
+{
+    std::size_t count = 0;
+    for (const char c : utf8)
+    {
+        count += (static_cast<unsigned char>(c) & 0xC0) != 0x80;
+    }
+    return count;
+}
+
+// A string of 1 to maxLength characters with no control characters (U+0000-U+001F). No byte of a multi-byte
+// UTF-8 sequence is below 0x80, so checking bytes is enough.
+bool IsBoundedText(const json& value, std::size_t maxLength) noexcept
+{
+    if (!value.is_string())
+    {
+        return false;
+    }
+    const auto& text = value.get_ref<const std::string&>();
+    const auto length = CountCharacters(text);
+    return length >= 1 && length <= maxLength && std::none_of(text.begin(), text.end(), [](char c) {
+               return static_cast<unsigned char>(c) < 0x20;
+           });
+}
+
+// "<16 lowercase hex digits>.bgra": a plain file name, so it can never point outside the icons folder.
+bool IsIconFileName(std::string_view name) noexcept
+{
+    constexpr std::string_view kExtension = ".bgra";
+    constexpr std::size_t kDigits = 16;
+    return name.size() == kDigits + kExtension.size() && name.ends_with(kExtension) &&
+           std::all_of(name.begin(), name.begin() + kDigits,
+                       [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+}
 
 // The payload must be an object with exactly these keys. Returns nullopt if it is.
 template <size_t N> std::optional<DecodeError> CheckKeys(const json& payload, const char* const (&keys)[N])
@@ -145,6 +215,62 @@ template <> struct MessageTraits<TaskbarState>
     }
 };
 
+template <> struct MessageTraits<DockItems>
+{
+    static constexpr std::string_view kType = "dockItems";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const DockItems& message)
+    {
+        auto items = ordered_json::array();
+        for (const auto& item : message.items)
+        {
+            items.push_back({
+                {"kind", WireName(item.kind)},
+                {"target", item.target},
+                {"name", item.name},
+                {"icon", item.icon ? ordered_json(*item.icon) : ordered_json(nullptr)},
+            });
+        }
+        return {{"items", std::move(items)}};
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"items"}))
+        {
+            return *error;
+        }
+        const auto& items = payload.at("items");
+        if (!items.is_array() || items.size() > DockItems::kMaxItems)
+        {
+            return DecodeError::InvalidField;
+        }
+        DockItems message;
+        message.items.reserve(items.size());
+        for (const auto& item : items)
+        {
+            if (const auto error = CheckKeys(item, {"kind", "target", "name", "icon"}))
+            {
+                return *error;
+            }
+            const auto kind = DockItemKindFrom(item.at("kind"));
+            const auto& icon = item.at("icon");
+            if (!kind || !IsBoundedText(item.at("target"), DockItems::kMaxTargetLength) ||
+                !IsBoundedText(item.at("name"), DockItems::kMaxNameLength) ||
+                !(icon.is_null() || (icon.is_string() && IsIconFileName(icon.get_ref<const std::string&>()))))
+            {
+                return DecodeError::InvalidField;
+            }
+            message.items.push_back({
+                .kind = *kind,
+                .target = item.at("target").get<std::string>(),
+                .name = item.at("name").get<std::string>(),
+                .icon = icon.is_null() ? std::nullopt : std::optional(icon.get<std::string>()),
+            });
+        }
+        return Message{std::move(message)};
+    }
+};
+
 template <typename T>
 std::optional<DecodeResult> DecodeIf(std::string_view type, std::uint64_t version, const json& payload)
 {
@@ -183,8 +309,8 @@ DecodeResult DecodeDocument(const json& document)
 
     const auto& typeName = type->get_ref<const std::string&>();
     const auto versionNumber = version->get<std::uint64_t>();
-    for (const auto decode :
-         {&DecodeIf<Ping>, &DecodeIf<Pong>, &DecodeIf<SetTaskbar>, &DecodeIf<TaskbarState>})
+    for (const auto decode : {&DecodeIf<Ping>, &DecodeIf<Pong>, &DecodeIf<SetTaskbar>,
+                              &DecodeIf<TaskbarState>, &DecodeIf<DockItems>})
     {
         if (auto result = decode(typeName, versionNumber, *payload))
         {

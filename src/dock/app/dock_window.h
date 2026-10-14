@@ -2,8 +2,10 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <cstdint>
 
+#include "app/latest_value.h"
 #include "app/taskbar_guard.h"
 #include "ports/ipc_channel.h"
 #include "ports/logger.h"
@@ -17,12 +19,21 @@ namespace harbor::dock
 // Owns the control channel's lifetime: starts it once the window exists and stops it when the window is
 // destroyed. Pings are answered from this window's (UI) thread, so a pong also proves the UI thread is
 // responsive. Everything that affects the taskbar (connection, pings, setTaskbar) goes straight from the
-// channel's thread to the guard, never through this thread.
+// channel's thread to the guard, never through this thread. dockItems comes here.
 class DockWindow
 {
   public:
+    struct Options
+    {
+        // Test docks: close the window (and so exit) after this long without a control connection, so a test
+        // that dies never leaves a dock behind. Zero: never.
+        std::chrono::milliseconds orphanTimeout{0};
+    };
+
     // All three must outlive the window.
-    DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard, log::ILogger& log);
+    DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard, log::ILogger& log,
+               Options options = {});
+    ~DockWindow();
     DockWindow(const DockWindow&) = delete;
     DockWindow& operator=(const DockWindow&) = delete;
 
@@ -43,11 +54,18 @@ class DockWindow
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void StartControlChannel();
     void OnPing(std::uint32_t seq);
+    void OnConnectionChanged(bool connected);
+    void OnDockItems();
     void UpdateTitle();
 
     ipc::IIpcChannel& m_controlChannel;
     TaskbarGuard& m_guard;
     log::ILogger& m_log;
+    Options m_options;
+    // From the channel's thread to this one.
+    LatestValue<ipc::DockItems> m_receivedItems;
+    // What the dock shows. Kept while the Shell is away.
+    ipc::DockItems m_items;
     HWND m_hwnd = nullptr;
     bool m_connected = false;
     bool m_hasPing = false;

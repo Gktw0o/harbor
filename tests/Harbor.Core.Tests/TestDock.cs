@@ -29,10 +29,10 @@ internal static partial class TestDock
     public static string[] Arguments(string pipeName, string dataDir, FakeTaskbar taskbar) =>
         ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];
 
-    public static Process Start(string pipeName, string dataDir, FakeTaskbar taskbar)
+    public static Process Start(string pipeName, string dataDir, FakeTaskbar taskbar, params string[] extraArguments)
     {
         var startInfo = new ProcessStartInfo(ExePath);
-        foreach (var argument in Arguments(pipeName, dataDir, taskbar))
+        foreach (var argument in Arguments(pipeName, dataDir, taskbar).Concat(extraArguments))
         {
             startInfo.ArgumentList.Add(argument);
         }
@@ -71,6 +71,23 @@ internal static partial class TestDock
         using var reader = new StreamReader(new FileStream(
             Path.Combine(dataDir, "logs", "dock.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
         return await reader.ReadToEndAsync();
+    }
+
+    // Waits until the dock's log contains the text; false after the timeout.
+    public static async Task<bool> WaitForLogAsync(string dataDir, string text, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        do
+        {
+            if (File.Exists(Path.Combine(dataDir, "logs", "dock.log")) &&
+                (await ReadLogAsync(dataDir)).Contains(text, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            await Task.Delay(50);
+        }
+        while (deadline.Elapsed < timeout);
+        return false;
     }
 
     public static void KillQuietly(int processId)

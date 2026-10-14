@@ -16,6 +16,7 @@
 #include <sstream>
 
 #include "core/ipc/codec.h"
+#include "core/ipc/line_framer.h"
 #include "core/taskbar/restore_record.h"
 
 namespace harbor::ipc
@@ -223,6 +224,30 @@ TEST(Contracts, EncodedTaskbarStateMatchesFixture)
     EXPECT_EQ(
         json::parse(Encode(TaskbarState{false, TaskbarBlock::PanicHotkey})),
         json::parse(ReadLine(ContractsDir() / "fixtures/valid/taskbar-state-blocked-panic-hotkey.json")));
+}
+
+TEST(Contracts, EncodedDockItemsMatchesFixture)
+{
+    const DockItems message{{
+        {DockItemKind::App, "Microsoft.Windows.Explorer", "File Explorer", "0123456789abcdef.bgra"},
+        {DockItemKind::Path, R"(C:\Tools\Ünïcødé ğ\app.exe)", "Ünïcødé \"app\" 𝔸", std::nullopt},
+    }};
+    EXPECT_EQ(json::parse(Encode(message)),
+              json::parse(ReadLine(ContractsDir() / "fixtures/valid/dock-items.json")));
+}
+
+// The largest dockItems the schema allows (40 items, every character four bytes) must fit one line, and the
+// encoder must write it byte for byte: an encoder that escaped non-ASCII text would need far more room.
+TEST(Contracts, LargestDockItemsFitsTheLineLimit)
+{
+    const auto line = ReadLine(ContractsDir() / "fixtures/valid/dock-items-largest.json");
+    EXPECT_LE(line.size(), LineFramer::kMaxLineBytes);
+
+    const auto decoded = Decode(line);
+    ASSERT_TRUE(std::holds_alternative<Message>(decoded));
+    const auto& items = std::get<DockItems>(std::get<Message>(decoded)).items;
+    EXPECT_EQ(items.size(), DockItems::kMaxItems);
+    EXPECT_EQ(Encode(std::get<Message>(decoded)), line);
 }
 
 } // namespace

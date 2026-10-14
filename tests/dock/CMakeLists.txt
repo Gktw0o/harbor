@@ -16,6 +16,7 @@ add_executable(harbor_dock_tests
     explorer_worker_tests.cpp
     file_log_tests.cpp
     guard_policy_tests.cpp
+    latest_value_tests.cpp
     line_framer_tests.cpp
     log_line_tests.cpp
     named_pipe_client_tests.cpp

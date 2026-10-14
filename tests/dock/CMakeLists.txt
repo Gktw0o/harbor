@@ -9,6 +9,7 @@ target_link_libraries(harbor_dock_crash_helper PRIVATE harbor_dock_app wer)
 
 add_executable(harbor_dock_tests
     appbar_state_tests.cpp
+    appearance_tests.cpp
     codec_tests.cpp
     command_line_tests.cpp
     contract_tests.cpp

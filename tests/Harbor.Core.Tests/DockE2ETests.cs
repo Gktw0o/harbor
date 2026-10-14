@@ -71,6 +71,55 @@ public sealed class DockE2ETests
         }
     }
 
+    // The island: a small topmost tool window that never takes focus, at the bottom of the primary monitor's
+    // work area (until the AppBar reserves its own strip), as wide as its items.
+    [TestMethod]
+    public async Task DockShowsItsIslandAtTheBottomOfThePrimaryMonitor()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", TimeSpan.FromSeconds(15)),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var window = IslandWindow.Find(dock.Id);
+            Assert.AreNotEqual((nint)0, window, "no island window");
+            Assert.IsTrue(IslandWindow.IsWindowVisible(window));
+            var style = IslandWindow.ExStyle(window);
+            foreach (var flag in new[] { IslandWindow.ExToolWindow, IslandWindow.ExTopmost, IslandWindow.ExNoActivate, IslandWindow.ExNoRedirectionBitmap })
+            {
+                Assert.AreEqual(flag, style & flag, $"extended style 0x{style:X} lacks 0x{flag:X}");
+            }
+            Assert.AreNotEqual(window, IslandWindow.GetForegroundWindow(), "the island took the focus");
+
+            var (monitor, work) = IslandWindow.PrimaryMonitor();
+            var empty = IslandWindow.Bounds(window);
+            Assert.IsTrue(empty.Left >= monitor.Left && empty.Right <= monitor.Right && empty.Bottom < work.Bottom &&
+                          empty.Bottom > work.Bottom - empty.Height, $"island {empty} in work area {work}");
+            // Centred.
+            Assert.IsLessThanOrEqualTo(1, Math.Abs((empty.Left - monitor.Left) - (monitor.Right - empty.Right)));
+
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.App, "A", "A", null),
+                new DockItem(DockItemKind.App, "B", "B", null),
+                new DockItem(DockItemKind.App, "C", "C", null),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 3 items", TimeSpan.FromSeconds(10)));
+            var three = IslandWindow.Bounds(window);
+            Assert.IsGreaterThan(empty.Width, three.Width);
+            Assert.AreEqual(empty.Height, three.Height);
+            Assert.AreEqual(empty.Bottom, three.Bottom);
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // A test dock whose test went away without ending it exits by itself, normally (taskbar restored).
     [TestMethod]
     public async Task TestDockExitsWhenNoShellConnects()

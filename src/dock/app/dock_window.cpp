@@ -1,32 +1,67 @@
 #include "app/dock_window.h"
 
 #include <format>
+#include <ShellScalingApi.h>
 #include <string>
 #include <utility>
 #include <variant>
+
+#include "adapters/system_appearance.h"
 
 namespace harbor::dock
 {
 namespace
 {
 
-constexpr wchar_t kWindowClass[] = L"Harbor.Dock.Window";
-constexpr DWORD kWindowStyle = WS_OVERLAPPEDWINDOW;
-constexpr int kWidthDip = 480;
-constexpr int kHeightDip = 120;
+constexpr DWORD kStyle = WS_POPUP;
+// Never activated, no taskbar button, above normal windows, drawn only by composition.
+constexpr DWORD kExStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_NOREDIRECTIONBITMAP;
 
 // Posted by the control channel's thread; handled on the UI thread.
 constexpr UINT kControlConnectionChanged = WM_APP + 1; // wParam: connected (0/1)
 constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
 constexpr UINT kControlDockItems = WM_APP + 4;         // the list is in m_receivedItems
+// Posted by the renderer once a frame is on its way to the screen.
+constexpr UINT kRenderCommitted = WM_APP + 5;
 
 constexpr UINT_PTR kOrphanTimer = 1;
 
+struct PrimaryMonitor
+{
+    geometry::Rect monitor;
+    geometry::Rect workArea;
+    unsigned dpi = USER_DEFAULT_SCREEN_DPI;
+};
+
+geometry::Rect FromRect(const RECT& rect) noexcept
+{
+    return {rect.left, rect.top, rect.right, rect.bottom};
+}
+
+PrimaryMonitor ReadPrimaryMonitor() noexcept
+{
+    PrimaryMonitor result;
+    const HMONITOR monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO info{sizeof(info)};
+    if (GetMonitorInfoW(monitor, &info))
+    {
+        result.monitor = FromRect(info.rcMonitor);
+        result.workArea = FromRect(info.rcWork);
+    }
+    UINT dpiX = 0;
+    UINT dpiY = 0;
+    if (SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)) && dpiX != 0)
+    {
+        result.dpi = dpiX;
+    }
+    return result;
+}
+
 } // namespace
 
-DockWindow::DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard, log::ILogger& log,
-                       Options options)
-    : m_controlChannel(controlChannel), m_guard(guard), m_log(log), m_options(options)
+DockWindow::DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard,
+                       adapters::CompositionRenderer& renderer, log::ILogger& log, Options options)
+    : m_controlChannel(controlChannel), m_guard(guard), m_renderer(renderer), m_log(log), m_options(options)
 {
 }
 
@@ -36,41 +71,41 @@ DockWindow::~DockWindow()
     m_controlChannel.Stop();
 }
 
-bool DockWindow::Create(HINSTANCE instance, int showCommand)
+DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
 {
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = &DockWindow::WndProc;
     windowClass.hInstance = instance;
     windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     windowClass.lpszClassName = kWindowClass;
     if (RegisterClassExW(&windowClass) == 0)
     {
-        return false;
+        return CreateResult::WindowFailed;
     }
 
-    // Size is unknown until the window lands on a monitor, so create it empty and size it for that DPI.
-    if (CreateWindowExW(0, kWindowClass, L"", kWindowStyle, CW_USEDEFAULT, CW_USEDEFAULT, 0, 0, nullptr,
-                        nullptr, instance, this) == nullptr)
+    // Placed and sized by the first Refresh; shown once its first frame is committed.
+    if (CreateWindowExW(kExStyle, kWindowClass, L"Harbor Dock", kStyle, 0, 0, 0, 0, nullptr, nullptr,
+                        instance, this) == nullptr)
     {
-        return false;
+        return CreateResult::WindowFailed;
+    }
+    if (!m_renderer.Attach(m_hwnd))
+    {
+        return CreateResult::GraphicsFailed;
     }
 
-    const UINT dpi = GetDpiForWindow(m_hwnd);
-    RECT bounds{0, 0, MulDiv(kWidthDip, dpi, USER_DEFAULT_SCREEN_DPI),
-                MulDiv(kHeightDip, dpi, USER_DEFAULT_SCREEN_DPI)};
-    AdjustWindowRectExForDpi(&bounds, kWindowStyle, FALSE, 0, dpi);
-    SetWindowPos(m_hwnd, nullptr, 0, 0, bounds.right - bounds.left, bounds.bottom - bounds.top,
-                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    m_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
+    // Energy saver turning on or off changes the island's look.
+    m_powerNotification =
+        RegisterPowerSettingNotification(m_hwnd, &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    Refresh(/*force=*/true);
 
-    UpdateTitle();
-    ShowWindow(m_hwnd, showCommand);
     // The guard's state reports go out through this thread, like pongs.
     m_guard.SetStateWindow(m_hwnd);
     OnConnectionChanged(false);
     StartControlChannel();
-    return true;
+    return CreateResult::Created;
 }
 
 void DockWindow::StartControlChannel()
@@ -115,18 +150,9 @@ void DockWindow::StartControlChannel()
     });
 }
 
-void DockWindow::OnPing(std::uint32_t seq)
-{
-    m_controlChannel.Send(ipc::Pong{seq});
-    m_hasPing = true;
-    m_lastPingSeq = seq;
-    UpdateTitle();
-}
-
 void DockWindow::OnConnectionChanged(bool connected)
 {
     m_connected = connected;
-    m_hasPing = false;
     if (m_options.orphanTimeout.count() > 0)
     {
         if (connected)
@@ -139,7 +165,6 @@ void DockWindow::OnConnectionChanged(bool connected)
             SetTimer(m_hwnd, kOrphanTimer, static_cast<UINT>(m_options.orphanTimeout.count()), nullptr);
         }
     }
-    UpdateTitle();
 }
 
 void DockWindow::OnDockItems()
@@ -150,31 +175,126 @@ void DockWindow::OnDockItems()
         m_items = std::move(*items);
         // Only the count: the names are the user's business.
         m_log.Info(std::format("dock items: {} received", m_items.items.size()));
-        UpdateTitle();
+        m_hovered.reset();
+        Refresh(/*force=*/true);
     }
 }
 
-void DockWindow::UpdateTitle()
+void DockWindow::Refresh(bool force)
 {
-    std::wstring title = L"Harbor Dock - ";
-    if (!m_connected)
+    const auto primary = ReadPrimaryMonitor();
+    const auto style = island::StyleFor(adapters::ReadSystemAppearance());
+    const auto metrics = island::MeasureFor(primary.monitor.Width(), primary.dpi, m_items.items.size());
+    // Until the AppBar reserves a strip: the bottom of the work area, above a visible taskbar.
+    const geometry::Rect strip{primary.monitor.left, primary.workArea.bottom - metrics.StripHeight(),
+                               primary.monitor.right, primary.workArea.bottom};
+    auto layout = island::Arrange(strip, metrics);
+
+    if (!force && m_layout && layout.island == m_layout->island && layout.items == m_layout->items &&
+        style == m_style && primary.dpi == m_dpi)
     {
-        title += L"waiting for Harbor Shell";
+        return;
     }
-    else if (!m_hasPing)
+    if (metrics.visibleCount < m_items.items.size())
     {
-        title += L"connected";
+        m_log.Warn(std::format("island: {} of {} items fit on the primary monitor", metrics.visibleCount,
+                               m_items.items.size()));
     }
-    else
+
+    const auto& island = layout.island;
+    SetWindowPos(m_hwnd, HWND_TOPMOST, island.left, island.top, island.Width(), island.Height(),
+                 SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    // Clicks on the transparent corners go to the window below.
+    const int diameter = 2 * metrics.cornerRadius;
+    SetWindowRgn(m_hwnd,
+                 CreateRoundRectRgn(0, 0, island.Width() + 1, island.Height() + 1, diameter, diameter), TRUE);
+
+    m_style = style;
+    m_dpi = primary.dpi;
+    m_layout = std::move(layout);
+    if (m_hovered && *m_hovered >= m_layout->items.size())
     {
-        title += L"connected, ping " + std::to_wstring(m_lastPingSeq);
+        m_hovered.reset();
     }
-    title += L" - " + std::to_wstring(m_items.items.size()) + L" apps";
-    if (m_taskbarHidden)
+    if (m_renderer.Render(*m_layout, m_style, m_hovered, kRenderCommitted))
     {
-        title += L" - taskbar hidden (Ctrl+Alt+Shift+H restores it)";
+        m_log.Info(std::format("island: {} items, {}x{} at {},{} ({} dpi, {})", m_layout->items.size(),
+                               island.Width(), island.Height(), island.left, island.top, m_dpi,
+                               m_style.backdrop ? "backdrop" : "solid"));
     }
-    SetWindowTextW(m_hwnd, title.c_str());
+    UpdatePresentable();
+}
+
+void DockWindow::OnCommitted()
+{
+    if (!m_committed)
+    {
+        m_committed = true;
+        // Nothing was visible before the first frame: no flash of an empty window.
+        ShowWindow(m_hwnd, SW_SHOWNA);
+    }
+    UpdatePresentable();
+}
+
+void DockWindow::UpdatePresentable()
+{
+    // On screen: drawn, visible, and on the primary monitor.
+    bool presentable = m_committed && m_layout && IsWindowVisible(m_hwnd);
+    if (presentable)
+    {
+        RECT window{};
+        RECT visible{};
+        const auto primary = ReadPrimaryMonitor();
+        const RECT monitor{primary.monitor.left, primary.monitor.top, primary.monitor.right,
+                           primary.monitor.bottom};
+        presentable = GetWindowRect(m_hwnd, &window) && IntersectRect(&visible, &window, &monitor) &&
+                      EqualRect(&visible, &window);
+    }
+    if (presentable != m_presentable)
+    {
+        m_presentable = presentable;
+        m_log.Info(presentable ? "island: shown" : "island: not shown");
+    }
+}
+
+std::optional<std::size_t> DockWindow::ItemAt(LPARAM position) const
+{
+    if (!m_layout)
+    {
+        return std::nullopt;
+    }
+    // Client coordinates; the layout is in screen coordinates.
+    const geometry::Point point{m_layout->island.left + static_cast<short>(LOWORD(position)),
+                                m_layout->island.top + static_cast<short>(HIWORD(position))};
+    return island::HitTest(*m_layout, point);
+}
+
+void DockWindow::SetHovered(std::optional<std::size_t> hovered)
+{
+    if (hovered != m_hovered)
+    {
+        m_hovered = hovered;
+        m_renderer.SetHovered(hovered);
+    }
+}
+
+void DockWindow::OnMouseMove(LPARAM position)
+{
+    if (!m_trackingMouse)
+    {
+        TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, m_hwnd, 0};
+        m_trackingMouse = TrackMouseEvent(&track) != FALSE;
+    }
+    SetHovered(ItemAt(position));
+}
+
+void DockWindow::OnClick(LPARAM position)
+{
+    if (const auto item = ItemAt(position))
+    {
+        // Launching comes with the shell threads.
+        m_log.Info(std::format("island: item {} clicked", *item));
+    }
 }
 
 LRESULT CALLBACK DockWindow::WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -205,16 +325,33 @@ LRESULT CALLBACK DockWindow::WndProc(HWND hwnd, UINT message, WPARAM wParam, LPA
 
 LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (message == m_taskbarCreatedMessage && message != 0)
+    {
+        // Explorer restarted, or the primary monitor's DPI changed.
+        Refresh(/*force=*/false);
+        return 0;
+    }
+
     switch (message)
     {
     case kControlConnectionChanged:
         OnConnectionChanged(wParam != 0);
         return 0;
     case kControlPing:
-        OnPing(static_cast<std::uint32_t>(wParam));
+        m_controlChannel.Send(ipc::Pong{static_cast<std::uint32_t>(wParam)});
         return 0;
     case kControlDockItems:
         OnDockItems();
+        return 0;
+    case kRenderCommitted:
+        OnCommitted();
+        return 0;
+    case kTestHangMessage:
+        m_log.Warn("test hook: hanging the UI thread");
+        Sleep(INFINITE);
+        return 0;
+    case TaskbarGuard::kStateMessage:
+        m_controlChannel.Send(ipc::TaskbarState{wParam != 0, static_cast<ipc::TaskbarBlock>(lParam)});
         return 0;
     case WM_TIMER:
         if (wParam == kOrphanTimer)
@@ -225,24 +362,44 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             return 0;
         }
         return DefWindowProcW(m_hwnd, message, wParam, lParam);
-    case kTestHangMessage:
-        m_log.Warn("test hook: hanging the UI thread");
-        Sleep(INFINITE);
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_MOUSEMOVE:
+        OnMouseMove(lParam);
         return 0;
-    case TaskbarGuard::kStateMessage:
-        m_taskbarHidden = wParam != 0;
-        m_controlChannel.Send(ipc::TaskbarState{m_taskbarHidden, static_cast<ipc::TaskbarBlock>(lParam)});
-        UpdateTitle();
+    case WM_MOUSELEAVE:
+        m_trackingMouse = false;
+        SetHovered(std::nullopt);
         return 0;
-    case WM_DPICHANGED: {
-        // Windows suggests a rectangle that keeps the window's DIP size on the new monitor.
-        const auto* suggested = reinterpret_cast<const RECT*>(lParam);
-        SetWindowPos(m_hwnd, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
-                     suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOACTIVATE);
+    case WM_LBUTTONUP:
+        OnClick(lParam);
         return 0;
-    }
+    case WM_DPICHANGED:
+        // Not Windows' suggested rectangle: the layout follows the primary monitor, wherever this window is.
+        Refresh(/*force=*/false);
+        return 0;
+    case WM_DISPLAYCHANGE:
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+    case WM_SYSCOLORCHANGE:
+        Refresh(/*force=*/false);
+        return DefWindowProcW(m_hwnd, message, wParam, lParam);
+    case WM_POWERBROADCAST:
+        if (wParam == PBT_POWERSETTINGCHANGE)
+        {
+            Refresh(/*force=*/false);
+        }
+        return TRUE;
+    case WM_WINDOWPOSCHANGED:
+        UpdatePresentable();
+        return DefWindowProcW(m_hwnd, message, wParam, lParam);
     case WM_DESTROY:
         m_controlChannel.Stop();
+        if (m_powerNotification != nullptr)
+        {
+            UnregisterPowerSettingNotification(m_powerNotification);
+            m_powerNotification = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
     default:

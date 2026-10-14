@@ -1,14 +1,16 @@
 // harbor-dock entry point and composition root. Options (for tests only) are in app/command_line.h.
 
 #include <windows.h>
-
+// Before WIL, which enables its COM helpers (unique_couninitialize_call) only when objbase.h is in.
 #include <chrono>
 #include <format>
+#include <objbase.h>
 #include <shellapi.h>
 #include <string>
 #include <vector>
 #include <wil/resource.h>
 
+#include "adapters/composition_renderer.h"
 #include "adapters/data_dir.h"
 #include "adapters/file_log.h"
 #include "adapters/named_pipe_client.h"
@@ -50,7 +52,7 @@ std::vector<std::wstring> CommandLineArguments()
 
 } // namespace
 
-int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int showCommand)
+int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int)
 {
     const auto arguments = CommandLineArguments();
     const std::vector<std::wstring_view> argumentViews(arguments.begin(), arguments.end());
@@ -121,17 +123,34 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
         return ERROR_GEN_FAILURE;
     }
 
+    // The UI thread is a single-threaded apartment: composition, and later UI Automation, need COM here.
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const wil::unique_couninitialize_call uninitializeCom(SUCCEEDED(comResult));
+    // Declared before the window, so it outlives it; torn down after guard.Stop() put the taskbar back.
+    harbor::adapters::CompositionRenderer renderer(log);
+    if (FAILED(comResult) || !renderer.Initialize())
+    {
+        // Already logged. Starting again wouldn't help; Harbor Shell restores the taskbar and says why.
+        return exit_code::kGraphicsUnavailable;
+    }
+
     harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
     // A test dock whose test died without ending it goes away by itself.
     const auto orphanTimeout = testMode
                                    ? std::chrono::milliseconds(options.testOrphanTimeoutMs.value_or(30'000))
                                    : std::chrono::milliseconds::zero();
-    harbor::dock::DockWindow window(controlChannel, guard, log, {.orphanTimeout = orphanTimeout});
-    if (!window.Create(instance, showCommand))
+    harbor::dock::DockWindow window(controlChannel, guard, renderer, log, {.orphanTimeout = orphanTimeout});
+    switch (window.Create(instance))
     {
+    case harbor::dock::DockWindow::CreateResult::Created:
+        break;
+    case harbor::dock::DockWindow::CreateResult::GraphicsFailed:
+        return exit_code::kGraphicsUnavailable;
+    case harbor::dock::DockWindow::CreateResult::WindowFailed: {
         const DWORD error = GetLastError();
         log.Error(std::format("couldn't create the dock window: error {}", error));
         return static_cast<int>(error);
+    }
     }
 
     // Test docks only: signaling "Local\Harbor.Test.<id>.hang-ui" hangs the UI thread (see DockWindow).

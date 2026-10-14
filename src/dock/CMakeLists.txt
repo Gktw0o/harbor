@@ -5,6 +5,7 @@ find_package(wil CONFIG REQUIRED)
 add_library(harbor_dock_core STATIC
     core/appbar/appbar_state.cpp
     core/ipc/codec.cpp
+    core/island/appearance.cpp
     core/island/layout.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
@@ -21,13 +22,19 @@ target_link_libraries(harbor_dock_core
 
 # Win32 implementations of the ports.
 add_library(harbor_dock_adapters STATIC
+    adapters/composition_renderer.cpp
     adapters/data_dir.cpp
     adapters/file_log.cpp
     adapters/named_pipe_client.cpp
     adapters/process_job.cpp
+    adapters/system_appearance.cpp
     adapters/win32_taskbar.cpp
 )
-target_link_libraries(harbor_dock_adapters PUBLIC harbor_dock_core WIL::WIL)
+# Composition and Direct2D come with the Windows SDK and the OS (C++/WinRT headers included): no packages.
+target_link_libraries(harbor_dock_adapters
+    PUBLIC harbor_dock_core WIL::WIL
+    PRIVATE windowsapp d3d11 d2d1 dxgi dwmapi CoreMessaging
+)
 
 # Application layer (windows, threads, wiring). A library so the tests can link it; main.cpp stays out.
 add_library(harbor_dock_app STATIC
@@ -37,7 +44,7 @@ add_library(harbor_dock_app STATIC
     app/explorer_worker.cpp
     app/taskbar_guard.cpp
 )
-target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters)
+target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore)
 
 add_executable(harbor-dock WIN32
     app/main.cpp

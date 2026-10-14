@@ -1,0 +1,7 @@
+* text=auto
+
+# Windows-only scripts and solution files keep CRLF in the working tree.
+*.ps1  text eol=crlf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.slnx text eol=crlf

@@ -1,0 +1,17 @@
+---
+Language: Cpp
+BasedOnStyle: Microsoft
+ColumnLimit: 110
+PointerAlignment: Left
+InsertNewlineAtEOF: true
+SortIncludes: CaseInsensitive
+IncludeBlocks: Regroup
+IncludeCategories:
+  # <windows.h> must precede every other Win32 header, so it gets its own first block.
+  - Regex: '^<windows\.h>$'
+    Priority: 1
+  - Regex: '^<'
+    Priority: 2
+  - Regex: '.*'
+    Priority: 3
+...

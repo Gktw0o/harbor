@@ -7,10 +7,11 @@ add_executable(harbor_dock_tests
     codec_tests.cpp
     contract_tests.cpp
     line_framer_tests.cpp
+    named_pipe_client_tests.cpp
     pipe_name_tests.cpp
 )
 target_link_libraries(harbor_dock_tests PRIVATE
-    harbor_dock_core
+    harbor_dock_adapters
     nlohmann_json::nlohmann_json
     nlohmann_json_schema_validator::validator
     GTest::gtest

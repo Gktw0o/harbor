@@ -4,4 +4,8 @@
     <TargetFramework>net10.0-windows</TargetFramework>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Harbor.Core.Tests" />
+  </ItemGroup>
+
 </Project>

@@ -134,6 +134,8 @@ try {
     Write-Host "== .NET $platform ($Config) ==" -ForegroundColor Green
     Invoke-Native dotnet @('build', 'Harbor.slnx', '-c', $Config, "-p:Platform=$platform")
     if (-not $NoTest) {
+        # The end-to-end test launches the dock built above, for the same architecture.
+        $env:HARBOR_DOCK_EXE = $dockExe
         Invoke-Native dotnet @('test', '--solution', 'Harbor.slnx', '-c', $Config, "-p:Platform=$platform", '--no-build')
     }
 }

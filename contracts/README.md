@@ -51,6 +51,8 @@ Shell makes them; the dock only reads them. Raw pixels rather than PNG, so the d
   the colors premultiplied by alpha (each ≤ alpha). The file is exactly 12 + 4 × width × height bytes.
 - **Writing:** the Shell writes a temporary file in the same folder and renames it, so a reader never sees
   half a file. A file that doesn't match the layout is treated as no icon.
+- **Fixtures:** `icons/fixtures/{valid,invalid}/*.bgra`. Harbor.Core.Tests writes the valid ones byte for
+  byte; tests/dock parses them and refuses every invalid one. `*.bgra` is binary in `.gitattributes`.
 
 ## State files
 

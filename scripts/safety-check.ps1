@@ -259,6 +259,8 @@ try {
             Start-Harbor
             Enable-Hide
             $dock = Get-Process harbor-dock
+            # Opens a handle now: without one, a Get-Process object can't tell the exit code later.
+            $null = $dock.Handle
             switch ($name) {
                 'panic' {
                     [HarborSafety.Native]::PressKeys(0x11, 0x12, 0x10, 0x48) # Ctrl, Alt, Shift, H

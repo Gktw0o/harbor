@@ -76,3 +76,5 @@ Paste the result table below.
 
 | Date | PC (arch, Windows build) | Section | Result | Notes |
 |---|---|---|---|---|
+| 2026-10-15 | ARM64 (Snapdragon), 26H1 build 28000.3086, one display, 200 %, on battery | 1 (`-ExerciseAutoHide`) | 11/11 (stop-dock checked in the logs) | Restores: panic 14 ms, dock killed 173 ms, Shell closed 237 ms or killed 323 ms, dock frozen 7.3 s, both killed then Shell started 3.6 s; record cleaned up every time. Start menu: no re-show. Idle with the island drawn: 0.006 % CPU, 34.2 MB working set, 14.5 MB private. AppBar: 160 px strip freed 83 ms after the kill with Harbor Shell closed; one strip after a restart. stop-dock: taskbar and strip back in 17 ms, stayed stopped; the script could not read the exit code (fixed since), the dock log says code 0. |
+| 2026-10-15 | same | 2.1 (looks) | open | The island draws but the host backdrop is black (the tint over black: dark glass) in the real dock and in the step-0 spike alike, tonight on battery with transparency on and energy saver off; the spike showed real blur earlier on the same PC. To check: on AC power, and whether Windows' own flyouts are see-through at the time. |

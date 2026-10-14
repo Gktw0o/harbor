@@ -65,6 +65,13 @@ internal static partial class TestDock
         hang.Set();
     }
 
+    // The test hook that makes the dock act as if its graphics device were lost (see DockWindow::kDeviceLostMessage).
+    public static void LoseDevice(FakeTaskbar taskbar)
+    {
+        using var lose = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.lose-device");
+        lose.Set();
+    }
+
     public static async Task<string> ReadLogAsync(string dataDir)
     {
         // The dock keeps the file open for appending.

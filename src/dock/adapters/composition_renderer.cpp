@@ -1,13 +1,15 @@
 #include "adapters/composition_renderer.h"
 
+#include <atomic>
 #include <d2d1_1.h>
-#include <d3d11.h>
+#include <d3d11_4.h>
 #include <DispatcherQueue.h>
 #include <dwmapi.h>
 #include <dxgi.h>
 #include <format>
 #include <string>
 #include <vector>
+#include <wil/resource.h>
 #include <windows.ui.composition.interop.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
@@ -43,12 +45,12 @@ float2 Size(const geometry::Rect& rect) noexcept
 
 // WARP keeps the dock off the GPU driver: its few static surfaces don't need one, and it costs less memory
 // (docs/adr/0008). Hardware only if WARP is missing.
-winrt::com_ptr<ID2D1Device> CreateD2DDevice(std::string& kind)
+winrt::com_ptr<ID2D1Device> CreateD2DDevice(std::string& kind, winrt::com_ptr<ID3D11Device>& d3d)
 {
-    winrt::com_ptr<ID3D11Device> d3d;
     HRESULT result = E_FAIL;
     for (const auto type : {D3D_DRIVER_TYPE_WARP, D3D_DRIVER_TYPE_HARDWARE})
     {
+        d3d = nullptr;
         result = D3D11CreateDevice(nullptr, type, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
                                    D3D11_SDK_VERSION, d3d.put(), nullptr, nullptr);
         if (SUCCEEDED(result))
@@ -74,6 +76,67 @@ struct CompositionRenderer::Impl
 {
     explicit Impl(log::ILogger& logger) : log(logger)
     {
+    }
+
+    ~Impl()
+    {
+        StopWatchingDevice();
+    }
+
+    // Creates a Direct2D device and makes it the one composition draws with; the first time, that creates the
+    // graphics device. Throws winrt::hresult_error.
+    void UseNewDevice()
+    {
+        StopWatchingDevice();
+        std::string kind;
+        winrt::com_ptr<ID3D11Device> d3d;
+        const auto d2d = CreateD2DDevice(kind, d3d);
+        if (!graphics)
+        {
+            winrt::check_hresult(compositor.as<abi::ICompositorInterop>()->CreateGraphicsDevice(
+                d2d.get(), reinterpret_cast<abi::ICompositionGraphicsDevice**>(winrt::put_abi(graphics))));
+        }
+        else
+        {
+            winrt::check_hresult(
+                graphics.as<abi::ICompositionGraphicsDeviceInterop>()->SetRenderingDevice(d2d.get()));
+        }
+        WatchDevice(d3d);
+        log.Info(std::format("composition: drawing with a {} graphics device", kind));
+    }
+
+    // Asks Direct3D to signal an event if the device goes away (a driver update or reset; WARP practically
+    // never), and posts deviceLostMessage to the window when it does.
+    void WatchDevice(const winrt::com_ptr<ID3D11Device>& d3d)
+    {
+        if (!d3d.try_as(device) || !removed.try_create(wil::EventOptions::None, nullptr) ||
+            FAILED(device->RegisterDeviceRemovedEvent(removed.get(), &removedCookie)))
+        {
+            device = nullptr;
+            return;
+        }
+        removedWait.reset(CreateThreadpoolWait(
+            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
+                const auto* self = static_cast<const Impl*>(context);
+                PostMessageW(self->window.load(), self->deviceLostMessage.load(), 0, 0);
+            },
+            this, nullptr));
+        if (removedWait)
+        {
+            SetThreadpoolWait(removedWait.get(), removed.get(), nullptr);
+        }
+    }
+
+    void StopWatchingDevice() noexcept
+    {
+        // Waits for a callback in progress.
+        removedWait.reset();
+        if (device)
+        {
+            device->UnregisterDeviceRemoved(removedCookie);
+            device = nullptr;
+        }
+        removed.reset();
     }
 
     // An item without an icon: a rounded square in the placeholder color.
@@ -108,10 +171,18 @@ struct CompositionRenderer::Impl
     wuc::Desktop::DesktopWindowTarget target{nullptr};
     wuc::ContainerVisual root{nullptr};
     wuc::SpriteVisual hover{nullptr};
-    HWND window = nullptr;
+    // Read by the device-removed callback on a thread-pool thread.
+    std::atomic<HWND> window{nullptr};
+    std::atomic<UINT> deviceLostMessage{0};
     // Window-relative item rectangles and the hover highlight's margin around one, for SetHovered.
     std::vector<geometry::Rect> items;
     int hoverInset = 0;
+
+    winrt::com_ptr<ID3D11Device4> device;
+    DWORD removedCookie = 0;
+    wil::unique_event_nothrow removed;
+    // Declared after the event, so it is closed (and its callback finished) first.
+    wil::unique_threadpool_wait removedWait;
 };
 
 CompositionRenderer::CompositionRenderer(log::ILogger& log) : m_impl(std::make_unique<Impl>(log))
@@ -149,12 +220,7 @@ try
         options,
         reinterpret_cast<ABI::Windows::System::IDispatcherQueueController**>(winrt::put_abi(impl.queue))));
     impl.compositor = wuc::Compositor();
-
-    std::string kind;
-    const auto d2d = CreateD2DDevice(kind);
-    winrt::check_hresult(impl.compositor.as<abi::ICompositorInterop>()->CreateGraphicsDevice(
-        d2d.get(), reinterpret_cast<abi::ICompositionGraphicsDevice**>(winrt::put_abi(impl.graphics))));
-    impl.log.Info(std::format("composition ready: {} graphics device", kind));
+    impl.UseNewDevice();
     return true;
 }
 catch (const winrt::hresult_error& error)
@@ -168,10 +234,28 @@ catch (...)
     return false;
 }
 
-bool CompositionRenderer::Attach(HWND window) noexcept
+bool CompositionRenderer::RecreateDevice() noexcept
+try
+{
+    m_impl->UseNewDevice();
+    return true;
+}
+catch (const winrt::hresult_error& error)
+{
+    m_impl->log.Error("composition: no new graphics device: " + Describe(error));
+    return false;
+}
+catch (...)
+{
+    m_impl->log.Error("composition: no new graphics device: unexpected error");
+    return false;
+}
+
+bool CompositionRenderer::Attach(HWND window, UINT deviceLostMessage) noexcept
 try
 {
     auto& impl = *m_impl;
+    impl.deviceLostMessage.store(deviceLostMessage);
     // The host backdrop brush only shows Windows' blur for a window that asks for it.
     const BOOL useHostBackdrop = TRUE;
     DwmSetWindowAttribute(window, DWMWA_USE_HOSTBACKDROPBRUSH, &useHostBackdrop, sizeof(useHostBackdrop));
@@ -186,7 +270,7 @@ try
     impl.root = impl.compositor.CreateContainerVisual();
     impl.root.RelativeSizeAdjustment({1, 1});
     impl.target.Root(impl.root);
-    impl.window = window;
+    impl.window.store(window);
     return true;
 }
 catch (const winrt::hresult_error& error)
@@ -201,7 +285,8 @@ catch (...)
 }
 
 bool CompositionRenderer::Render(const island::Layout& layout, const island::IslandStyle& style,
-                                 std::optional<std::size_t> hovered, UINT committedMessage) noexcept
+                                 std::optional<std::size_t> hovered, UINT committedMessage,
+                                 WPARAM tag) noexcept
 try
 {
     auto& impl = *m_impl;
@@ -274,12 +359,12 @@ try
 
     SetHovered(hovered);
 
-    const HWND window = impl.window;
+    const HWND window = impl.window.load();
     impl.compositor.RequestCommitAsync().Completed(
-        [window, committedMessage](const auto&, winrt::Windows::Foundation::AsyncStatus status) {
+        [window, committedMessage, tag](const auto&, winrt::Windows::Foundation::AsyncStatus status) {
             if (status == winrt::Windows::Foundation::AsyncStatus::Completed)
             {
-                PostMessageW(window, committedMessage, 0, 0);
+                PostMessageW(window, committedMessage, tag, 0);
             }
         });
     return true;

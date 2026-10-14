@@ -68,6 +68,10 @@ class DockWindow
     // notices a dock whose UI stopped answering while its other threads still run.
     static constexpr UINT kTestHangMessage = WM_APP + 3;
 
+    // The renderer posts this when the graphics device is lost; test docks post it to rehearse that. The
+    // island goes off screen (so the taskbar comes back), gets a new device and is drawn again.
+    static constexpr UINT kDeviceLostMessage = WM_APP + 6;
+
   private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -76,7 +80,8 @@ class DockWindow
     void OnDockItems();
     // Reads the monitor, work area and appearance again and redraws if anything changed (or if forced).
     void Refresh(bool force);
-    void OnCommitted();
+    void OnCommitted(WPARAM generation);
+    void OnDeviceLost();
     void OnMouseMove(LPARAM position);
     void OnClick(LPARAM position);
     void SetHovered(std::optional<std::size_t> hovered);
@@ -103,9 +108,17 @@ class DockWindow
     unsigned m_dpi = 0;
     std::optional<std::size_t> m_hovered;
     bool m_trackingMouse = false;
-    // A frame has been committed since the window was created.
+    // Each Render's number; only the latest one's commit counts.
+    WPARAM m_renderGeneration = 0;
+    // The latest frame is committed (and nothing was lost since).
     bool m_committed = false;
+    // Shown once, after the first frame; after that only the panic hotkey hides it.
+    bool m_shown = false;
     bool m_presentable = false;
+    bool m_deviceLost = false;
+    int m_deviceFailures = 0;
+    // What the process exits with once the window is gone.
+    int m_exitCode = 0;
 };
 
 } // namespace harbor::dock

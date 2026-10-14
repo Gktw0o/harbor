@@ -1,10 +1,12 @@
 // harbor-dock entry point and composition root. Options (for tests only) are in app/command_line.h.
 
 #include <windows.h>
+
 // Before WIL, which enables its COM helpers (unique_couninitialize_call) only when objbase.h is in.
 #include <chrono>
 #include <format>
 #include <objbase.h>
+#include <optional>
 #include <shellapi.h>
 #include <string>
 #include <vector>
@@ -49,6 +51,41 @@ std::vector<std::wstring> CommandLineArguments()
     }
     return arguments;
 }
+
+// Test docks only: signaling the named event "Local\Harbor.Test.<id>.<name>" posts a message to the dock
+// window, so tests can make the dock fail in ways that are hard to cause from outside.
+class TestHook
+{
+  public:
+    TestHook(const std::wstring& testId, const wchar_t* name, HWND window, UINT message)
+        : m_window(window), m_message(message)
+    {
+        if (FAILED(m_event.create(wil::EventOptions::ManualReset,
+                                  (L"Local\\Harbor.Test." + testId + L"." + name).c_str())))
+        {
+            return;
+        }
+        m_wait.reset(CreateThreadpoolWait(
+            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
+                const auto* self = static_cast<const TestHook*>(context);
+                PostMessageW(self->m_window, self->m_message, 0, 0);
+            },
+            this, nullptr));
+        if (m_wait)
+        {
+            SetThreadpoolWait(m_wait.get(), m_event.get(), nullptr);
+        }
+    }
+    TestHook(const TestHook&) = delete;
+    TestHook& operator=(const TestHook&) = delete;
+
+  private:
+    HWND m_window;
+    UINT m_message;
+    wil::unique_event_nothrow m_event;
+    // Declared after the event: closed first, waiting for a callback in progress.
+    wil::unique_threadpool_wait m_wait;
+};
 
 } // namespace
 
@@ -155,22 +192,15 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     }
     }
 
-    // Test docks only: signaling "Local\Harbor.Test.<id>.hang-ui" hangs the UI thread (see DockWindow).
-    wil::unique_event_nothrow hangEvent;
-    wil::unique_threadpool_wait hangWait;
-    if (testMode &&
-        SUCCEEDED(hangEvent.create(wil::EventOptions::ManualReset,
-                                   (L"Local\\Harbor.Test." + *options.testTaskbarId + L".hang-ui").c_str())))
+    // Test docks only: "hang-ui" hangs the UI thread; "lose-device" rehearses losing the graphics device.
+    std::optional<TestHook> hangUi;
+    std::optional<TestHook> loseDevice;
+    if (testMode)
     {
-        hangWait.reset(CreateThreadpoolWait(
-            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
-                PostMessageW(static_cast<HWND>(context), harbor::dock::DockWindow::kTestHangMessage, 0, 0);
-            },
-            window.Hwnd(), nullptr));
-        if (hangWait)
-        {
-            SetThreadpoolWait(hangWait.get(), hangEvent.get(), nullptr);
-        }
+        hangUi.emplace(*options.testTaskbarId, L"hang-ui", window.Hwnd(),
+                       harbor::dock::DockWindow::kTestHangMessage);
+        loseDevice.emplace(*options.testTaskbarId, L"lose-device", window.Hwnd(),
+                           harbor::dock::DockWindow::kDeviceLostMessage);
     }
 
     MSG message{};

@@ -161,6 +161,27 @@ public sealed partial class DockSupervisorTests
         Assert.IsFalse(dock.HasExited);
     }
 
+    // A lost graphics device leaves nothing on screen: the taskbar comes back until the island is drawn again with
+    // a new device, then goes again by itself (hiding is still on).
+    [TestMethod]
+    public async Task ALostGraphicsDeviceBringsTheTaskbarBackUntilTheIslandIsRedrawn()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+
+        TestDock.LoseDevice(harness.Taskbar);
+
+        await harness.WaitForStateAsync(s => !s.Hidden);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+        var log = await TestDock.ReadLogAsync(harness.DataDir);
+        StringAssert.Contains(log, "the graphics device was lost; rebuilding");
+        Assert.AreEqual(2, log.Split("composition: drawing with a").Length - 1, log);
+    }
+
     // The panic hotkey gives back the taskbar and takes the island away; turning hiding on again brings back both
     // (the island first: the taskbar only goes while the island is on screen).
     [TestMethod]

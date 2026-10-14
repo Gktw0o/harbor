@@ -7,6 +7,7 @@
 #include <variant>
 
 #include "adapters/system_appearance.h"
+#include "app/exit_codes.h"
 
 namespace harbor::dock
 {
@@ -25,6 +26,10 @@ constexpr UINT kControlDockItems = WM_APP + 4;         // the list is in m_recei
 constexpr UINT kRenderCommitted = WM_APP + 5;
 
 constexpr UINT_PTR kOrphanTimer = 1;
+constexpr UINT_PTR kDeviceRetryTimer = 2;
+constexpr UINT kDeviceRetryMs = 2000;
+// Failed attempts at a new graphics device before the dock gives up (and Harbor Shell restores the taskbar).
+constexpr int kDeviceAttempts = 5;
 
 struct PrimaryMonitor
 {
@@ -90,7 +95,7 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     {
         return CreateResult::WindowFailed;
     }
-    if (!m_renderer.Attach(m_hwnd))
+    if (!m_renderer.Attach(m_hwnd, kDeviceLostMessage))
     {
         return CreateResult::GraphicsFailed;
     }
@@ -182,6 +187,11 @@ void DockWindow::OnDockItems()
 
 void DockWindow::Refresh(bool force)
 {
+    if (m_deviceLost)
+    {
+        // Nothing can be drawn now; getting a new device redraws everything.
+        return;
+    }
     const auto primary = ReadPrimaryMonitor();
     const auto style = island::StyleFor(adapters::ReadSystemAppearance());
     const auto metrics = island::MeasureFor(primary.monitor.Width(), primary.dpi, m_items.items.size());
@@ -216,7 +226,7 @@ void DockWindow::Refresh(bool force)
     {
         m_hovered.reset();
     }
-    if (m_renderer.Render(*m_layout, m_style, m_hovered, kRenderCommitted))
+    if (m_renderer.Render(*m_layout, m_style, m_hovered, kRenderCommitted, ++m_renderGeneration))
     {
         m_log.Info(std::format("island: {} items, {}x{} at {},{} ({} dpi, {})", m_layout->items.size(),
                                island.Width(), island.Height(), island.left, island.top, m_dpi,
@@ -225,15 +235,49 @@ void DockWindow::Refresh(bool force)
     UpdatePresentable();
 }
 
-void DockWindow::OnCommitted()
+void DockWindow::OnCommitted(WPARAM generation)
 {
-    if (!m_committed)
+    // A frame drawn before the device was lost doesn't count.
+    if (generation != m_renderGeneration || m_deviceLost)
     {
-        m_committed = true;
+        return;
+    }
+    m_committed = true;
+    if (!m_shown)
+    {
+        m_shown = true;
         // Nothing was visible before the first frame: no flash of an empty window.
         ShowWindow(m_hwnd, SW_SHOWNA);
     }
     UpdatePresentable();
+}
+
+void DockWindow::OnDeviceLost()
+{
+    if (!m_deviceLost)
+    {
+        m_log.Warn("island: the graphics device was lost; rebuilding");
+    }
+    // What was drawn is gone: the taskbar comes back until the island is drawn again.
+    m_deviceLost = true;
+    m_committed = false;
+    UpdatePresentable();
+
+    if (!m_renderer.RecreateDevice())
+    {
+        if (++m_deviceFailures >= kDeviceAttempts)
+        {
+            m_log.Error("island: no graphics device to draw with; exiting");
+            m_exitCode = exit_code::kGraphicsUnavailable;
+            DestroyWindow(m_hwnd);
+            return;
+        }
+        SetTimer(m_hwnd, kDeviceRetryTimer, kDeviceRetryMs, nullptr);
+        return;
+    }
+    m_deviceFailures = 0;
+    m_deviceLost = false;
+    Refresh(/*force=*/true);
 }
 
 void DockWindow::UpdatePresentable()
@@ -346,7 +390,10 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         OnDockItems();
         return 0;
     case kRenderCommitted:
-        OnCommitted();
+        OnCommitted(wParam);
+        return 0;
+    case kDeviceLostMessage:
+        OnDeviceLost();
         return 0;
     case kTestHangMessage:
         m_log.Warn("test hook: hanging the UI thread");
@@ -357,7 +404,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case TaskbarGuard::kShowIslandMessage:
         // The panic hotkey hid the island; hiding the taskbar was turned on again.
-        if (m_committed)
+        if (m_shown)
         {
             m_log.Info("island: shown again");
             ShowWindow(m_hwnd, SW_SHOWNA);
@@ -369,6 +416,12 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             m_log.Warn(std::format("test dock: no connection to Harbor Shell for {} ms; exiting",
                                    m_options.orphanTimeout.count()));
             DestroyWindow(m_hwnd);
+            return 0;
+        }
+        if (wParam == kDeviceRetryTimer)
+        {
+            KillTimer(m_hwnd, kDeviceRetryTimer);
+            OnDeviceLost();
             return 0;
         }
         return DefWindowProcW(m_hwnd, message, wParam, lParam);
@@ -410,7 +463,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             UnregisterPowerSettingNotification(m_powerNotification);
             m_powerNotification = nullptr;
         }
-        PostQuitMessage(0);
+        PostQuitMessage(m_exitCode);
         return 0;
     default:
         return DefWindowProcW(m_hwnd, message, wParam, lParam);

@@ -11,6 +11,7 @@
 #include "adapters/data_dir.h"
 #include "adapters/file_log.h"
 #include "adapters/named_pipe_client.h"
+#include "adapters/win32_taskbar.h"
 #include "app/command_line.h"
 #include "app/dock_window.h"
 #include "core/ipc/pipe_name.h"
@@ -61,8 +62,15 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
     const std::string pipeName =
         options.pipeName.value_or(harbor::ipc::PipeName(harbor::ipc::kControlChannel, sessionId));
-    log.Info(std::format("harbor-dock starting: {} build, process {}, control pipe {}", kArchitecture,
-                         GetCurrentProcessId(), pipeName));
+    log.Info(std::format("harbor-dock starting: {} build, process {}, control pipe {}{}", kArchitecture,
+                         GetCurrentProcessId(), pipeName, options.testTaskbarId ? ", test taskbar" : ""));
+
+    harbor::adapters::Win32Taskbar taskbar(
+        options.testTaskbarId ? harbor::adapters::TaskbarTarget::Test(*options.testTaskbarId, dataDir)
+                              : harbor::adapters::TaskbarTarget::Real(),
+        harbor::adapters::RestoreRecordPath(dataDir), log);
+    // Startup recovery: an earlier dock may have died with the taskbar hidden or auto-hide changed.
+    taskbar.Restore({.sessionEnding = GetSystemMetrics(SM_SHUTTINGDOWN) != 0});
 
     harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
     harbor::dock::DockWindow window(controlChannel, log);

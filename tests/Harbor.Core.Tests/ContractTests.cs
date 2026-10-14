@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
 using Harbor.Core.Ipc;
+using Harbor.Core.Taskbar;
 
 namespace Harbor.Core.Tests;
 
@@ -52,6 +53,46 @@ public sealed class ContractTests
             var line = ReadLine(fixture);
             Assert.IsFalse(MessageCodec.TryDecode(line, out _, out _),
                 $"{Path.GetFileName(fixture)}: accepted {Encoding.UTF8.GetString(line)}");
+        }
+    }
+
+    // State files: contracts/state/<name>.schema.json with fixtures in contracts/state/fixtures/<name>/.
+    // Each name needs a decoder here; a new schema without one fails the test.
+    private static byte[]? DecodeAndReencodeState(string name, byte[] text) => name switch
+    {
+        "taskbar-restore" => RestoreRecord.TryDecode(text, out var record) ? RestoreRecord.Encode(record) : null,
+        _ => throw new AssertFailedException($"no decoder for state file {name}"),
+    };
+
+    [TestMethod]
+    public void StateFixturesRoundTripOrAreRejected()
+    {
+        var stateDir = Path.Combine(ContractsDir, "state");
+        var schemas = Directory.GetFiles(stateDir, "*.schema.json");
+        Assert.AreNotEqual(0, schemas.Length, stateDir);
+
+        foreach (var schema in schemas)
+        {
+            var name = Path.GetFileName(schema)[..^".schema.json".Length];
+            var fixtures = Path.Combine(stateDir, "fixtures", name);
+
+            var valid = Directory.GetFiles(Path.Combine(fixtures, "valid"), "*.json");
+            Assert.AreNotEqual(0, valid.Length, $"{name}: no valid fixtures");
+            foreach (var fixture in valid)
+            {
+                var text = ReadLine(fixture);
+                var reencoded = DecodeAndReencodeState(name, text);
+                Assert.IsNotNull(reencoded, $"{name}/{Path.GetFileName(fixture)}: rejected");
+                Assert.IsTrue(JsonNode.DeepEquals(JsonNode.Parse(reencoded), JsonNode.Parse(text)),
+                    $"{name}/{Path.GetFileName(fixture)}: re-encoded as {Encoding.UTF8.GetString(reencoded)}");
+            }
+
+            var invalid = Directory.GetFiles(Path.Combine(fixtures, "invalid"), "*.json");
+            Assert.AreNotEqual(0, invalid.Length, $"{name}: no invalid fixtures");
+            foreach (var fixture in invalid)
+            {
+                Assert.IsNull(DecodeAndReencodeState(name, ReadLine(fixture)), $"{name}/{Path.GetFileName(fixture)}: accepted");
+            }
         }
     }
 

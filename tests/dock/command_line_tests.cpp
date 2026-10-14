@@ -27,12 +27,30 @@ TEST(CommandLine, NoArgumentsMeansDefaults)
     EXPECT_FALSE(options.dataDir);
 }
 
-TEST(CommandLine, AcceptsPipeNameAndDataDir)
+TEST(CommandLine, AcceptsTheTestOptionsTogether)
 {
-    const auto options = std::get<DockOptions>(
-        Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\temp\\x\\..\\h"}));
+    const auto options = std::get<DockOptions>(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir",
+                                                      L"C:\\temp\\x\\..\\h", L"--test-taskbar", L"ab-12"}));
     EXPECT_EQ(options.pipeName, "harbor.test.1");
     EXPECT_EQ(options.dataDir, std::filesystem::path(L"C:\\temp\\h"));
+    EXPECT_EQ(options.testTaskbarId, L"ab-12");
+}
+
+// Otherwise a test could point a dock at the real taskbar, or a test dock could join the real Shell.
+TEST(CommandLine, RejectsTestOptionsOnTheirOwn)
+{
+    EXPECT_TRUE(IsError(Parse({L"--pipe-name", L"harbor.test.1"})));
+    EXPECT_TRUE(IsError(Parse({L"--data-dir", L"C:\\temp"})));
+    EXPECT_TRUE(IsError(Parse({L"--test-taskbar", L"ab"})));
+    EXPECT_TRUE(IsError(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\temp"})));
+    EXPECT_TRUE(IsError(Parse({L"--pipe-name", L"harbor.test.1", L"--test-taskbar", L"ab"})));
+}
+
+TEST(CommandLine, RejectsInvalidTestIds)
+{
+    EXPECT_TRUE(IsError(Parse({L"--test-taskbar", L"AB"})));
+    EXPECT_TRUE(IsError(Parse({L"--test-taskbar", L"a.b"})));
+    EXPECT_TRUE(IsError(Parse({L"--test-taskbar", std::wstring(65, L'a')})));
 }
 
 TEST(CommandLine, RejectsUnknownArguments)
@@ -45,6 +63,7 @@ TEST(CommandLine, RejectsAMissingValue)
 {
     EXPECT_TRUE(IsError(Parse({L"--pipe-name"})));
     EXPECT_TRUE(IsError(Parse({L"--data-dir"})));
+    EXPECT_TRUE(IsError(Parse({L"--test-taskbar"})));
 }
 
 TEST(CommandLine, RejectsRepeatedOptions)

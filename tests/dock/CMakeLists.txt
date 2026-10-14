@@ -12,6 +12,8 @@ add_executable(harbor_dock_tests
     log_line_tests.cpp
     named_pipe_client_tests.cpp
     pipe_name_tests.cpp
+    restore_record_tests.cpp
+    win32_taskbar_tests.cpp
 )
 target_link_libraries(harbor_dock_tests PRIVATE
     harbor_dock_app

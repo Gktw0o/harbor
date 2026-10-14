@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:state:taskbar-restore",
+  "title": "taskbar-restore v1",
+  "description": "%LOCALAPPDATA%\\Harbor\\taskbar-restore.json. Written by the dock just before it turns on the taskbar's auto-hide (only if auto-hide was off), so the original setting can be put back after a crash or reboot. Deleted once a restore is verified, never while the session is ending.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "stateBefore", "createdUtc"],
+  "properties": {
+    "v": { "const": 1 },
+    "stateBefore": {
+      "description": "SHAppBarMessage(ABM_GETSTATE) before Harbor changed it: ABS_AUTOHIDE = 1, ABS_ALWAYSONTOP = 2.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "createdUtc": {
+      "description": "When the record was written, UTC, to the second.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    }
+  }
+}

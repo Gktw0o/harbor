@@ -9,8 +9,9 @@ namespace
 
 constexpr std::wstring_view kPipeName = L"--pipe-name";
 constexpr std::wstring_view kDataDir = L"--data-dir";
+constexpr std::wstring_view kTestTaskbar = L"--test-taskbar";
 
-// Arguments echoed into error messages; anything outside ASCII becomes '?'.
+// Arguments echoed into error messages; anything outside printable ASCII becomes '?'.
 std::string Printable(std::wstring_view text)
 {
     std::string result;
@@ -35,6 +36,22 @@ std::optional<std::string> ToAscii(std::wstring_view text)
     return result;
 }
 
+bool IsValidTestId(std::wstring_view id) noexcept
+{
+    if (id.empty() || id.size() > 64)
+    {
+        return false;
+    }
+    for (const wchar_t c : id)
+    {
+        if (!((c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'-'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wstring_view> args)
@@ -43,7 +60,7 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
     for (size_t i = 0; i < args.size(); ++i)
     {
         const std::wstring_view name = args[i];
-        if (name != kPipeName && name != kDataDir)
+        if (name != kPipeName && name != kDataDir && name != kTestTaskbar)
         {
             return "unknown argument: " + Printable(name);
         }
@@ -66,7 +83,7 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
             }
             options.pipeName = std::move(*pipeName);
         }
-        else
+        else if (name == kDataDir)
         {
             if (options.dataDir)
             {
@@ -79,6 +96,27 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
             }
             options.dataDir = dataDir.lexically_normal();
         }
+        else
+        {
+            if (options.testTaskbarId)
+            {
+                return "--test-taskbar is given more than once";
+            }
+            if (!IsValidTestId(value))
+            {
+                return "--test-taskbar must be 1-64 characters from [a-z0-9-]";
+            }
+            options.testTaskbarId = std::wstring(value);
+        }
+    }
+
+    // All or nothing: an override can never point a dock at the real taskbar, and a test dock can never
+    // join the real Shell or share the real restore record.
+    const int overrides =
+        options.pipeName.has_value() + options.dataDir.has_value() + options.testTaskbarId.has_value();
+    if (overrides != 0 && overrides != 3)
+    {
+        return "--pipe-name, --data-dir and --test-taskbar must be given together";
     }
     return options;
 }

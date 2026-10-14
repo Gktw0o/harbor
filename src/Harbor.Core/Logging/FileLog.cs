@@ -9,7 +9,7 @@ namespace Harbor.Core.Logging;
 /// never use more than about twice <c>maxBytes</c>. With no directory it logs to the debugger only.
 /// Thread-safe, and never throws for I/O problems: logging must not take the Shell down.
 /// </summary>
-public sealed class FileLog
+public sealed class FileLog : ILog
 {
     public const long DefaultMaxBytes = 1024 * 1024;
 
@@ -36,12 +36,6 @@ public sealed class FileLog
             // Shows up as the file not opening; the debugger still gets every line.
         }
     }
-
-    public void Info(string message) => Write(LogLevel.Info, message);
-
-    public void Warn(string message) => Write(LogLevel.Warning, message);
-
-    public void Error(string message) => Write(LogLevel.Error, message);
 
     public void Write(LogLevel level, string message)
     {

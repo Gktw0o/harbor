@@ -6,7 +6,9 @@ add_library(harbor_dock_core STATIC
     core/ipc/codec.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
+    core/json/strict_json.cpp
     core/log/log_line.cpp
+    core/taskbar/restore_record.cpp
 )
 target_include_directories(harbor_dock_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(harbor_dock_core
@@ -19,6 +21,7 @@ add_library(harbor_dock_adapters STATIC
     adapters/data_dir.cpp
     adapters/file_log.cpp
     adapters/named_pipe_client.cpp
+    adapters/win32_taskbar.cpp
 )
 target_link_libraries(harbor_dock_adapters PUBLIC harbor_dock_core WIL::WIL)
 

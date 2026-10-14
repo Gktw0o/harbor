@@ -2,10 +2,9 @@
 
 #include <cstdint>
 #include <limits>
-#include <nlohmann/json.hpp>
-#include <set>
 #include <type_traits>
-#include <vector>
+
+#include "core/json/strict_json.h"
 
 namespace harbor::ipc
 {
@@ -123,43 +122,18 @@ DecodeResult Decode(std::string_view line) noexcept
 {
     try
     {
-        // nlohmann keeps the last of duplicate keys, while System.Text.Json exposes all of them. Reject
-        // duplicates outright so the C++ and C# decoders never disagree about the same bytes.
-        std::vector<std::set<std::string, std::less<>>> keysPerObject;
-        bool duplicateKey = false;
-        const json::parser_callback_t trackKeys = [&](int, json::parse_event_t event, json& parsed) {
-            switch (event)
-            {
-            case json::parse_event_t::object_start:
-                keysPerObject.emplace_back();
-                break;
-            case json::parse_event_t::object_end:
-                keysPerObject.pop_back();
-                break;
-            case json::parse_event_t::key:
-                duplicateKey |= !keysPerObject.back().insert(parsed.get<std::string>()).second;
-                break;
-            default:
-                break;
-            }
-            return true;
-        };
-
-        const auto document = json::parse(line, trackKeys, /*allow_exceptions=*/false);
-        if (document.is_discarded())
+        const auto parsed = harbor::json::ParseStrict(line);
+        if (const auto* error = std::get_if<harbor::json::ParseError>(&parsed))
         {
-            return DecodeError::MalformedJson;
+            return *error == harbor::json::ParseError::DuplicateKey ? DecodeError::UnexpectedField
+                                                                    : DecodeError::MalformedJson;
         }
-        if (duplicateKey)
-        {
-            return DecodeError::UnexpectedField;
-        }
-        return DecodeDocument(document);
+        return DecodeDocument(std::get<json>(parsed));
     }
     catch (...)
     {
-        // Parsing is non-throwing and every access is type-checked first; this is the last line of
-        // defense for "bad IPC input never crashes the dock" (e.g. std::bad_alloc).
+        // Every access is type-checked first; this is the last line of defense for "bad IPC input never
+        // crashes the dock" (e.g. std::bad_alloc).
         return DecodeError::MalformedJson;
     }
 }

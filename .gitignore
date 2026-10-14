@@ -453,8 +453,7 @@ KICKOFF_PROMPT.md
 # Logs
 *.log
 
-# AI files
-memory_bank/
-./memory_bank/
-/memory_bank/
+# AI assistant files (kept local, not published)
+/memory-bank/
 CLAUDE.md
+.claude/

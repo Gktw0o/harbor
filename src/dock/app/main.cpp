@@ -1,69 +1,76 @@
-// harbor-dock entry point and composition root.
-//
-// Usage: harbor-dock.exe [--pipe-name <name>]
-//   --pipe-name  Connect to this control pipe instead of harbor.control.<sessionId> (used by tests).
+// harbor-dock entry point and composition root. Options (for tests only) are in app/command_line.h.
 
 #include <windows.h>
 
-#include <optional>
+#include <format>
 #include <shellapi.h>
 #include <string>
+#include <vector>
 #include <wil/resource.h>
 
+#include "adapters/data_dir.h"
+#include "adapters/file_log.h"
 #include "adapters/named_pipe_client.h"
+#include "app/command_line.h"
 #include "app/dock_window.h"
 #include "core/ipc/pipe_name.h"
 
 namespace
 {
 
-// The control pipe name from --pipe-name, or the default for this session. Empty if the override is invalid.
-std::optional<std::string> ControlPipeName()
+#if defined(_M_ARM64)
+constexpr std::string_view kArchitecture = "arm64";
+#elif defined(_M_X64)
+constexpr std::string_view kArchitecture = "x64";
+#else
+#error Harbor builds for x64 and arm64 only.
+#endif
+
+// The arguments after the program name.
+std::vector<std::wstring> CommandLineArguments()
 {
     int argc = 0;
     const wil::unique_hlocal_ptr<PWSTR[]> argv(CommandLineToArgvW(GetCommandLineW(), &argc));
-    if (argv)
+    std::vector<std::wstring> arguments;
+    for (int i = 1; argv && i < argc; ++i)
     {
-        for (int i = 1; i + 1 < argc; ++i)
-        {
-            if (std::wstring_view(argv[i]) == L"--pipe-name")
-            {
-                const std::wstring_view value = argv[i + 1];
-                std::string name;
-                for (const wchar_t c : value)
-                {
-                    if (c > 0x7F)
-                    {
-                        return std::nullopt;
-                    }
-                    name.push_back(static_cast<char>(c));
-                }
-                return harbor::ipc::IsValidPipeName(name) ? std::optional(name) : std::nullopt;
-            }
-        }
+        arguments.emplace_back(argv[i]);
     }
-
-    DWORD sessionId = 0;
-    ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
-    return harbor::ipc::PipeName(harbor::ipc::kControlChannel, sessionId);
+    return arguments;
 }
 
 } // namespace
 
 int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int showCommand)
 {
-    const auto pipeName = ControlPipeName();
-    if (!pipeName)
+    const auto arguments = CommandLineArguments();
+    const std::vector<std::wstring_view> argumentViews(arguments.begin(), arguments.end());
+    const auto parsed = harbor::dock::ParseCommandLine(argumentViews);
+    if (const auto* error = std::get_if<std::string>(&parsed))
     {
-        OutputDebugStringW(L"harbor-dock: --pipe-name must be \"harbor.\" followed by [a-z0-9.-]\n");
+        // No log file: the data directory itself may be the bad argument.
+        harbor::adapters::FileLog({}, L"dock").Error(*error);
         return ERROR_INVALID_PARAMETER;
     }
+    const auto& options = std::get<harbor::dock::DockOptions>(parsed);
 
-    harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(*pipeName));
-    harbor::dock::DockWindow window(controlChannel);
+    const auto dataDir = options.dataDir.value_or(harbor::adapters::DefaultDataDir());
+    harbor::adapters::FileLog log(dataDir.empty() ? dataDir : dataDir / L"logs", L"dock");
+
+    DWORD sessionId = 0;
+    ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
+    const std::string pipeName =
+        options.pipeName.value_or(harbor::ipc::PipeName(harbor::ipc::kControlChannel, sessionId));
+    log.Info(std::format("harbor-dock starting: {} build, process {}, control pipe {}", kArchitecture,
+                         GetCurrentProcessId(), pipeName));
+
+    harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
+    harbor::dock::DockWindow window(controlChannel, log);
     if (!window.Create(instance, showCommand))
     {
-        return static_cast<int>(GetLastError());
+        const DWORD error = GetLastError();
+        log.Error(std::format("couldn't create the dock window: error {}", error));
+        return static_cast<int>(error);
     }
 
     MSG message{};
@@ -72,5 +79,6 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    log.Info(std::format("harbor-dock exiting with code {}", message.wParam));
     return static_cast<int>(message.wParam);
 }

@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include "ports/ipc_channel.h"
+#include "ports/logger.h"
 
 namespace harbor::dock
 {
@@ -18,7 +19,8 @@ namespace harbor::dock
 class DockWindow
 {
   public:
-    explicit DockWindow(ipc::IIpcChannel& controlChannel);
+    // Both must outlive the window.
+    DockWindow(ipc::IIpcChannel& controlChannel, log::ILogger& log);
     DockWindow(const DockWindow&) = delete;
     DockWindow& operator=(const DockWindow&) = delete;
 
@@ -33,6 +35,7 @@ class DockWindow
     void UpdateTitle();
 
     ipc::IIpcChannel& m_controlChannel;
+    log::ILogger& m_log;
     HWND m_hwnd = nullptr;
     bool m_connected = false;
     bool m_hasPing = false;

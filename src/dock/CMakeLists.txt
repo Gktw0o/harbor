@@ -6,6 +6,7 @@ add_library(harbor_dock_core STATIC
     core/ipc/codec.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
+    core/log/log_line.cpp
 )
 target_include_directories(harbor_dock_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(harbor_dock_core
@@ -15,13 +16,21 @@ target_link_libraries(harbor_dock_core
 
 # Win32 implementations of the ports.
 add_library(harbor_dock_adapters STATIC
+    adapters/data_dir.cpp
+    adapters/file_log.cpp
     adapters/named_pipe_client.cpp
 )
 target_link_libraries(harbor_dock_adapters PUBLIC harbor_dock_core WIL::WIL)
 
+# Application layer (windows, threads, wiring). A library so the tests can link it; main.cpp stays out.
+add_library(harbor_dock_app STATIC
+    app/command_line.cpp
+    app/dock_window.cpp
+)
+target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters)
+
 add_executable(harbor-dock WIN32
     app/main.cpp
-    app/dock_window.cpp
     app/harbor-dock.manifest
 )
-target_link_libraries(harbor-dock PRIVATE harbor_dock_adapters)
+target_link_libraries(harbor-dock PRIVATE harbor_dock_app)

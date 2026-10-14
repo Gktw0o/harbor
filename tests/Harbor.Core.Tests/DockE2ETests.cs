@@ -22,7 +22,11 @@ public sealed class DockE2ETests
         Assert.IsTrue(File.Exists(dockExe), $"HARBOR_DOCK_EXE points at a missing file: {dockExe}");
 
         await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
-        using var dock = Process.Start(new ProcessStartInfo(dockExe) { ArgumentList = { "--pipe-name", server.PipeName } })!;
+        using var dataDir = new TempDirectory();
+        using var dock = Process.Start(new ProcessStartInfo(dockExe)
+        {
+            ArgumentList = { "--pipe-name", server.PipeName, "--data-dir", dataDir.Path },
+        })!;
         try
         {
             // Three distinct pongs, each answering the latest ping: the dock's UI thread keeps responding.
@@ -33,6 +37,13 @@ public sealed class DockE2ETests
                 answered.Add(status.LastPongSeq!.Value);
             }
             Assert.IsFalse(dock.HasExited, $"the dock exited with code {(dock.HasExited ? dock.ExitCode : 0)}");
+
+            // --data-dir took effect: the dock logs there, not to %LOCALAPPDATA%.
+            using var logFile = new StreamReader(new FileStream(
+                Path.Combine(dataDir.Path, "logs", "dock.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+            var log = await logFile.ReadToEndAsync();
+            StringAssert.Contains(log, "harbor-dock starting");
+            StringAssert.Contains(log, "control channel: connected to Harbor Shell");
         }
         finally
         {

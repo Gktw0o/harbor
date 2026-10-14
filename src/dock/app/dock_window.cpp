@@ -19,7 +19,8 @@ constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
 
 } // namespace
 
-DockWindow::DockWindow(ipc::IIpcChannel& controlChannel) : m_controlChannel(controlChannel)
+DockWindow::DockWindow(ipc::IIpcChannel& controlChannel, log::ILogger& log)
+    : m_controlChannel(controlChannel), m_log(log)
 {
 }
 
@@ -59,9 +60,10 @@ bool DockWindow::Create(HINSTANCE instance, int showCommand)
 
 void DockWindow::StartControlChannel()
 {
-    // Callbacks run on the channel's thread, so they only post to the window. PostMessage to a window that
-    // has already been destroyed fails harmlessly.
+    // Callbacks run on the channel's thread, so they only post to the window (and log, which is
+    // thread-safe). PostMessage to a window that has already been destroyed fails harmlessly.
     const HWND hwnd = m_hwnd;
+    log::ILogger& log = m_log;
     m_controlChannel.Start({
         .onMessage =
             [hwnd](const ipc::Message& message) {
@@ -71,13 +73,16 @@ void DockWindow::StartControlChannel()
                 }
             },
         .onConnectionChanged =
-            [hwnd](bool connected) { PostMessageW(hwnd, kControlConnectionChanged, connected, 0); },
+            [hwnd, &log](bool connected) {
+                log.Info(connected ? "control channel: connected to Harbor Shell"
+                                   : "control channel: disconnected");
+                PostMessageW(hwnd, kControlConnectionChanged, connected, 0);
+            },
         .onDiagnostic =
-            [](std::string_view text) {
-                std::string line = "harbor-dock: control channel: ";
+            [&log](std::string_view text) {
+                std::string line = "control channel: ";
                 line.append(text);
-                line.push_back('\n');
-                OutputDebugStringA(line.c_str());
+                log.Warn(line);
             },
     });
 }

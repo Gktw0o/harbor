@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Harbor.Core.Ipc;
+using Harbor.Core.Logging;
 using Microsoft.UI.Xaml;
 
 namespace Harbor.Shell;
@@ -7,16 +8,18 @@ namespace Harbor.Shell;
 public sealed partial class MainWindow : Window
 {
     private readonly string _pipeName;
+    private readonly FileLog _log;
 
-    public MainWindow()
+    public MainWindow(FileLog log)
     {
         InitializeComponent();
+        _log = log;
 
         using var process = Process.GetCurrentProcess();
         _pipeName = PipeNames.For(PipeNames.ControlChannel, (uint)process.SessionId);
         StatusText.Text = $"Waiting for the dock on {_pipeName}";
 
-        var server = new ControlPipeServer(_pipeName, TimeSpan.FromSeconds(1), message => Debug.WriteLine(message));
+        var server = new ControlPipeServer(_pipeName, TimeSpan.FromSeconds(1), log.Warn);
         server.StatusChanged += status => DispatcherQueue.TryEnqueue(() => StatusText.Text = Describe(status));
 
         // Never disposed on purpose: it uses no timer or wait handle, and the server may still observe the
@@ -37,6 +40,7 @@ public sealed partial class MainWindow : Window
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            _log.Error($"couldn't serve {_pipeName}: {exception.Message}");
             StatusText.Text = $"Another process already owns {_pipeName}. Is Harbor Shell already running?";
         }
     }

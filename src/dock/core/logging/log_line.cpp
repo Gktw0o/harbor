@@ -21,9 +21,9 @@ const char* ToString(Level level) noexcept
 
 std::string FormatLine(const Timestamp& time, Level level, std::string_view message)
 {
-    std::string line = std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z [{}] ", time.year, time.month,
-                                   time.day, time.hour, time.minute, time.second, time.millisecond,
-                                   ToString(level));
+    std::string line =
+        std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z [{}] ", time.year, time.month, time.day,
+                    time.hour, time.minute, time.second, time.millisecond, ToString(level));
     line.reserve(line.size() + message.size() + 1);
     for (const char c : message)
     {

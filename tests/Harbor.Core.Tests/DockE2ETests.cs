@@ -1,34 +1,13 @@
 using System.Diagnostics;
+using Harbor.Core.Supervision;
 using Harbor.Core.Taskbar;
 
 namespace Harbor.Core.Tests;
 
-// End to end: the real harbor-dock.exe, always in test mode (fake taskbar windows, its own pipe and data
-// directory). scripts/build.ps1 points HARBOR_DOCK_EXE at the dock built for this test run's architecture.
+// End to end: the real harbor-dock.exe in test mode (see TestDock).
 [TestClass]
 public sealed class DockE2ETests
 {
-    private static string DockExe()
-    {
-        var dockExe = Environment.GetEnvironmentVariable("HARBOR_DOCK_EXE");
-        if (string.IsNullOrEmpty(dockExe))
-        {
-            if (string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase))
-            {
-                Assert.Fail("HARBOR_DOCK_EXE must be set in CI; scripts/build.ps1 sets it.");
-            }
-            Assert.Inconclusive("Set HARBOR_DOCK_EXE to a built harbor-dock.exe to run this test; scripts/build.ps1 does.");
-        }
-        Assert.IsTrue(File.Exists(dockExe), $"HARBOR_DOCK_EXE points at a missing file: {dockExe}");
-        return dockExe;
-    }
-
-    private static Process StartDock(string pipeName, string dataDir, FakeTaskbar taskbar) =>
-        Process.Start(new ProcessStartInfo(DockExe())
-        {
-            ArgumentList = { "--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id },
-        })!;
-
     private static async Task StopAsync(Process dock)
     {
         if (!dock.HasExited)
@@ -38,21 +17,13 @@ public sealed class DockE2ETests
         await dock.WaitForExitAsync();
     }
 
-    private static async Task<string> ReadDockLogAsync(string dataDir)
-    {
-        // The dock keeps the file open for appending.
-        using var reader = new StreamReader(new FileStream(
-            Path.Combine(dataDir, "logs", "dock.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
-        return await reader.ReadToEndAsync();
-    }
-
     [TestMethod]
     public async Task DockAnswersPingsOverTheControlPipe()
     {
         await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
         using var dataDir = new TempDirectory();
         using var taskbar = new FakeTaskbar(dataDir.Path);
-        using var dock = StartDock(server.PipeName, dataDir.Path, taskbar);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
         try
         {
             // Three distinct pongs, each answering the latest ping: the dock's UI thread keeps responding.
@@ -65,7 +36,7 @@ public sealed class DockE2ETests
             Assert.IsFalse(dock.HasExited, $"the dock exited with code {(dock.HasExited ? dock.ExitCode : 0)}");
 
             // --data-dir took effect: the dock logs there, not to %LOCALAPPDATA%.
-            var log = await ReadDockLogAsync(dataDir.Path);
+            var log = await TestDock.ReadLogAsync(dataDir.Path);
             StringAssert.Contains(log, "harbor-dock starting");
             StringAssert.Contains(log, "control channel: connected to Harbor Shell");
         }
@@ -89,7 +60,7 @@ public sealed class DockE2ETests
         File.WriteAllBytes(recordPath, RestoreRecord.Encode(new RestoreRecord(0, "2026-10-14T15:30:00Z")));
 
         // No Shell: recovery doesn't wait for one.
-        using var dock = StartDock($"harbor.e2e.{Guid.NewGuid():N}", dataDir.Path, taskbar);
+        using var dock = TestDock.Start($"harbor.e2e.{Guid.NewGuid():N}", dataDir.Path, taskbar);
         try
         {
             Assert.IsTrue(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: true, TimeSpan.FromSeconds(10)));
@@ -102,11 +73,42 @@ public sealed class DockE2ETests
             }
             Assert.IsFalse(File.Exists(recordPath), "the dock didn't delete the restore record");
             Assert.AreEqual(0u, taskbar.AutoHide);
-            StringAssert.Contains(await ReadDockLogAsync(dataDir.Path), "auto-hide restored to off (recorded 2026-10-14T15:30:00Z)");
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), "auto-hide restored to off (recorded 2026-10-14T15:30:00Z)");
         }
         finally
         {
             await StopAsync(dock);
+        }
+    }
+
+    // Two docks would fight over the taskbar: the second one exits at once with its own exit code.
+    [TestMethod]
+    public async Task ASecondDockExitsBecauseOneIsRunning()
+    {
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var pipeName = $"harbor.e2e.{Guid.NewGuid():N}";
+        using var first = TestDock.Start(pipeName, dataDir.Path, taskbar);
+        try
+        {
+            // Wait until the first one holds its single-instance mutex (it logs right after).
+            var deadline = Stopwatch.StartNew();
+            while (!(File.Exists(Path.Combine(dataDir.Path, "logs", "dock.log")) &&
+                     (await TestDock.ReadLogAsync(dataDir.Path)).Contains("process job:", StringComparison.Ordinal)))
+            {
+                Assert.IsLessThan(TimeSpan.FromSeconds(10), deadline.Elapsed, "the first dock didn't start");
+                await Task.Delay(50);
+            }
+
+            using var second = TestDock.Start(pipeName, dataDir.Path, taskbar);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await second.WaitForExitAsync(timeout.Token);
+            Assert.AreEqual(DockExitCodes.AlreadyRunning, second.ExitCode);
+            Assert.IsFalse(first.HasExited);
+        }
+        finally
+        {
+            await StopAsync(first);
         }
     }
 }

@@ -123,6 +123,24 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
         return static_cast<int>(error);
     }
 
+    // Test docks only: signaling "Local\Harbor.Test.<id>.hang-ui" hangs the UI thread (see DockWindow).
+    wil::unique_event_nothrow hangEvent;
+    wil::unique_threadpool_wait hangWait;
+    if (testMode &&
+        SUCCEEDED(hangEvent.create(wil::EventOptions::ManualReset,
+                                   (L"Local\\Harbor.Test." + *options.testTaskbarId + L".hang-ui").c_str())))
+    {
+        hangWait.reset(CreateThreadpoolWait(
+            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
+                PostMessageW(static_cast<HWND>(context), harbor::dock::DockWindow::kTestHangMessage, 0, 0);
+            },
+            window.Hwnd(), nullptr));
+        if (hangWait)
+        {
+            SetThreadpoolWait(hangWait.get(), hangEvent.get(), nullptr);
+        }
+    }
+
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0)
     {

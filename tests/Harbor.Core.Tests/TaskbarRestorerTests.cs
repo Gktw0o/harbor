@@ -192,10 +192,10 @@ public sealed class TaskbarRestorerTests : IDisposable
         {
             Assert.Inconclusive("no taskbar in this session (Explorer isn't running)");
         }
-        NativeMethods.GetWindowThreadProcessId(NativeMethods.GetShellWindow(), out var shellProcess);
+        Interop.NativeMethods.GetWindowThreadProcessId(Interop.NativeMethods.GetShellWindow(), out var shellProcess);
         foreach (var window in windows)
         {
-            NativeMethods.GetWindowThreadProcessId(window.Handle, out var owner);
+            Interop.NativeMethods.GetWindowThreadProcessId(window.Handle, out var owner);
             Assert.AreEqual(shellProcess, owner);
         }
         Assert.IsTrue(windows[0].IsPrimary);

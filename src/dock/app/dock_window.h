@@ -27,6 +27,15 @@ class DockWindow
     // Returns false (with GetLastError set) if the window class or window can't be created.
     bool Create(HINSTANCE instance, int showCommand);
 
+    HWND Hwnd() const noexcept
+    {
+        return m_hwnd;
+    }
+
+    // Test docks only: posting this makes the UI thread hang for good, so tests can check that Harbor Shell
+    // notices a dock whose UI stopped answering while its other threads still run.
+    static constexpr UINT kTestHangMessage = WM_APP + 3;
+
   private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);

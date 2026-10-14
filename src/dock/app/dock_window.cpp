@@ -151,6 +151,10 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case kControlPing:
         OnPing(static_cast<std::uint32_t>(wParam));
         return 0;
+    case kTestHangMessage:
+        m_log.Warn("test hook: hanging the UI thread");
+        Sleep(INFINITE);
+        return 0;
     case WM_DPICHANGED: {
         // Windows suggests a rectangle that keeps the window's DIP size on the new monitor.
         const auto* suggested = reinterpret_cast<const RECT*>(lParam);

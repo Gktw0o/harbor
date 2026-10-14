@@ -1,6 +1,6 @@
 using System.Globalization;
 using Harbor.Core.Logging;
-using static Harbor.Core.Taskbar.NativeMethods;
+using static Harbor.Core.Interop.NativeMethods;
 
 namespace Harbor.Core.Taskbar;
 

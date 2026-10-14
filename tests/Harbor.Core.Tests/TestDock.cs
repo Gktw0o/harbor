@@ -1,0 +1,71 @@
+using System.Diagnostics;
+
+namespace Harbor.Core.Tests;
+
+// The real harbor-dock.exe, always in test mode: stand-in taskbar windows, its own pipe and data directory.
+// scripts/build.ps1 points HARBOR_DOCK_EXE at the dock built for this test run's architecture.
+internal static class TestDock
+{
+    public static string ExePath
+    {
+        get
+        {
+            var dockExe = Environment.GetEnvironmentVariable("HARBOR_DOCK_EXE");
+            if (string.IsNullOrEmpty(dockExe))
+            {
+                if (string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase))
+                {
+                    Assert.Fail("HARBOR_DOCK_EXE must be set in CI; scripts/build.ps1 sets it.");
+                }
+                Assert.Inconclusive("Set HARBOR_DOCK_EXE to a built harbor-dock.exe to run this test; scripts/build.ps1 does.");
+            }
+            Assert.IsTrue(File.Exists(dockExe), $"HARBOR_DOCK_EXE points at a missing file: {dockExe}");
+            return dockExe;
+        }
+    }
+
+    public static string[] Arguments(string pipeName, string dataDir, FakeTaskbar taskbar) =>
+        ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id];
+
+    public static Process Start(string pipeName, string dataDir, FakeTaskbar taskbar)
+    {
+        var startInfo = new ProcessStartInfo(ExePath);
+        foreach (var argument in Arguments(pipeName, dataDir, taskbar))
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+        return Process.Start(startInfo)!;
+    }
+
+    // The test hook that hangs only the dock's UI thread (see DockWindow::kTestHangMessage).
+    public static void HangUi(FakeTaskbar taskbar)
+    {
+        using var hang = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.hang-ui");
+        hang.Set();
+    }
+
+    public static async Task<string> ReadLogAsync(string dataDir)
+    {
+        // The dock keeps the file open for appending.
+        using var reader = new StreamReader(new FileStream(
+            Path.Combine(dataDir, "logs", "dock.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+        return await reader.ReadToEndAsync();
+    }
+
+    public static void KillQuietly(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            process.Kill();
+            process.WaitForExit(10_000);
+        }
+        catch (ArgumentException)
+        {
+            // Already gone.
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+}

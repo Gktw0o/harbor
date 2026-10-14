@@ -11,13 +11,20 @@
 #include "adapters/data_dir.h"
 #include "adapters/file_log.h"
 #include "adapters/named_pipe_client.h"
+#include "adapters/process_job.h"
 #include "adapters/win32_taskbar.h"
 #include "app/command_line.h"
+#include "app/crash_guard.h"
 #include "app/dock_window.h"
+#include "app/exit_codes.h"
+#include "app/hidden_windows.h"
+#include "app/taskbar_guard.h"
 #include "core/ipc/pipe_name.h"
 
 namespace
 {
+
+namespace exit_code = harbor::dock::exit_code;
 
 #if defined(_M_ARM64)
 constexpr std::string_view kArchitecture = "arm64";
@@ -51,26 +58,61 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     {
         // No log file: the data directory itself may be the bad argument.
         harbor::adapters::FileLog({}, L"dock").Error(*error);
-        return ERROR_INVALID_PARAMETER;
+        return exit_code::kInvalidArguments;
     }
     const auto& options = std::get<harbor::dock::DockOptions>(parsed);
+    const bool testMode = options.testTaskbarId.has_value();
 
     const auto dataDir = options.dataDir.value_or(harbor::adapters::DefaultDataDir());
     harbor::adapters::FileLog log(dataDir.empty() ? dataDir : dataDir / L"logs", L"dock");
+
+    // Crash handlers first, so they cover everything after. They only act on windows the dock hid.
+    static harbor::dock::HiddenWindows hiddenWindows;
+    harbor::dock::crash_guard::Install(hiddenWindows);
 
     DWORD sessionId = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
     const std::string pipeName =
         options.pipeName.value_or(harbor::ipc::PipeName(harbor::ipc::kControlChannel, sessionId));
     log.Info(std::format("harbor-dock starting: {} build, process {}, control pipe {}{}", kArchitecture,
-                         GetCurrentProcessId(), pipeName, options.testTaskbarId ? ", test taskbar" : ""));
+                         GetCurrentProcessId(), pipeName, testMode ? ", test taskbar" : ""));
+
+    // One dock per session (per test id for test docks): two would fight over the taskbar and its record.
+    const std::wstring mutexName =
+        testMode ? L"Local\\Harbor.Dock.Test." + *options.testTaskbarId : std::wstring(L"Local\\Harbor.Dock");
+    const HANDLE mutex = CreateMutexW(nullptr, FALSE, mutexName.c_str());
+    const DWORD mutexError = GetLastError();
+    const wil::unique_handle instanceMutex(mutex);
+    if (mutexError == ERROR_ALREADY_EXISTS)
+    {
+        log.Warn("another harbor-dock is already running; exiting");
+        return exit_code::kAlreadyRunning;
+    }
+
+    // Hear about logoff and shutdown before ordinary apps (and, it's hoped, before Explorer saves its
+    // settings), so the taskbar's auto-hide is restored first. 0x3FF is the earliest level an app may use.
+    SetProcessShutdownParameters(0x3FF, 0);
+    const auto job = harbor::adapters::CurrentProcessJob();
+    log.Info(std::format("process job: {}", harbor::adapters::ToString(job)));
 
     harbor::adapters::Win32Taskbar taskbar(
-        options.testTaskbarId ? harbor::adapters::TaskbarTarget::Test(*options.testTaskbarId, dataDir)
-                              : harbor::adapters::TaskbarTarget::Real(),
+        testMode ? harbor::adapters::TaskbarTarget::Test(*options.testTaskbarId, dataDir)
+                 : harbor::adapters::TaskbarTarget::Real(),
         harbor::adapters::RestoreRecordPath(dataDir), log);
     // Startup recovery: an earlier dock may have died with the taskbar hidden or auto-hide changed.
     taskbar.Restore({.sessionEnding = GetSystemMetrics(SM_SHUTTINGDOWN) != 0});
+
+    harbor::dock::TaskbarGuard guard(taskbar, hiddenWindows, log,
+                                     {
+                                         .hotkey = testMode ? harbor::dock::TaskbarGuard::kTestHotkey
+                                                            : harbor::dock::TaskbarGuard::kPanicHotkey,
+                                         .windowTitle = std::wstring(pipeName.begin(), pipeName.end()),
+                                     });
+    if (!guard.Start())
+    {
+        // Already logged. No guard means no panic hotkey: don't run.
+        return ERROR_GEN_FAILURE;
+    }
 
     harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
     harbor::dock::DockWindow window(controlChannel, log);
@@ -87,6 +129,8 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
+    // Normal exit: put the taskbar back before the process ends.
+    guard.Stop();
     log.Info(std::format("harbor-dock exiting with code {}", message.wParam));
     return static_cast<int>(message.wParam);
 }

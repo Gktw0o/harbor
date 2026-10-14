@@ -21,6 +21,7 @@ add_library(harbor_dock_adapters STATIC
     adapters/data_dir.cpp
     adapters/file_log.cpp
     adapters/named_pipe_client.cpp
+    adapters/process_job.cpp
     adapters/win32_taskbar.cpp
 )
 target_link_libraries(harbor_dock_adapters PUBLIC harbor_dock_core WIL::WIL)
@@ -28,7 +29,10 @@ target_link_libraries(harbor_dock_adapters PUBLIC harbor_dock_core WIL::WIL)
 # Application layer (windows, threads, wiring). A library so the tests can link it; main.cpp stays out.
 add_library(harbor_dock_app STATIC
     app/command_line.cpp
+    app/crash_guard.cpp
     app/dock_window.cpp
+    app/explorer_worker.cpp
+    app/taskbar_guard.cpp
 )
 target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters)
 

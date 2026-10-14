@@ -171,6 +171,9 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     });
     Refresh(/*force=*/true);
     m_launcher.emplace(m_hwnd);
+    // The base is private: converted here, where it's accessible.
+    adapters::IIslandAccess& access = *this;
+    m_accessibility = std::make_unique<adapters::IslandAccessibility>(m_hwnd, access);
 
     // The guard's state reports go out through this thread, like pongs.
     m_guard.SetStateWindow(m_hwnd);
@@ -248,6 +251,11 @@ void DockWindow::OnDockItems()
         m_log.Info(std::format("dock items: {} received", m_items.items.size()));
         m_hovered.reset();
         Refresh(/*force=*/true);
+        if (m_accessibility)
+        {
+            // Names and order may differ: UI Automation clients must look again.
+            m_accessibility->ItemsChanged();
+        }
     }
 }
 
@@ -295,10 +303,16 @@ void DockWindow::Refresh(bool force)
 
     m_style = style;
     m_dpi = primary.dpi;
+    const bool countChanged = !m_layout || m_layout->items.size() != layout.items.size();
     m_layout = std::move(layout);
     if (m_hovered && *m_hovered >= m_layout->items.size())
     {
         m_hovered.reset();
+    }
+    if (countChanged && m_accessibility)
+    {
+        // More or fewer items fit the monitor now.
+        m_accessibility->ItemsChanged();
     }
     // Read again on every redraw rather than kept: decoded, 40 icons would hold 10 MB (rule 4).
     std::vector<std::vector<std::uint8_t>> files;
@@ -390,16 +404,15 @@ void DockWindow::UpdatePresentable()
     }
 }
 
-std::optional<std::size_t> DockWindow::ItemAt(LPARAM position) const
+std::optional<std::size_t> DockWindow::ItemAtClient(LPARAM position) const
 {
     if (!m_layout)
     {
         return std::nullopt;
     }
     // Client coordinates; the layout is in screen coordinates.
-    const geometry::Point point{m_layout->island.left + static_cast<short>(LOWORD(position)),
-                                m_layout->island.top + static_cast<short>(HIWORD(position))};
-    return island::HitTest(*m_layout, point);
+    return ItemAt({m_layout->island.left + static_cast<short>(LOWORD(position)),
+                   m_layout->island.top + static_cast<short>(HIWORD(position))});
 }
 
 void DockWindow::SetHovered(std::optional<std::size_t> hovered)
@@ -418,21 +431,68 @@ void DockWindow::OnMouseMove(LPARAM position)
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, m_hwnd, 0};
         m_trackingMouse = TrackMouseEvent(&track) != FALSE;
     }
-    SetHovered(ItemAt(position));
+    SetHovered(ItemAtClient(position));
 }
 
 void DockWindow::OnClick(LPARAM position)
 {
-    const auto item = ItemAt(position);
-    if (!item || *item >= m_items.items.size() || !m_launcher)
+    if (const auto item = ItemAtClient(position))
     {
-        return;
+        LaunchItem(*item, "click");
     }
-    // The click was the user's: whatever starts may take the foreground (Explorer starts it, not the dock).
+}
+
+bool DockWindow::LaunchItem(std::size_t index, std::string_view how)
+{
+    if (!m_layout || index >= m_layout->items.size() || index >= m_items.items.size() || !m_launcher)
+    {
+        return false;
+    }
+    // The user asked: whatever starts may take the foreground (Explorer starts it, not the dock).
     AllowSetForegroundWindow(ASFW_ANY);
     // Which item, not which app: the pinned list is the user's business.
-    m_log.Info(std::format("launch: item {}", *item));
-    m_launcher->Launch(*item, m_items.items[*item]);
+    m_log.Info(std::format("launch: item {} ({})", index, how));
+    m_launcher->Launch(index, m_items.items[index]);
+    return true;
+}
+
+std::size_t DockWindow::ItemCount() const
+{
+    return m_layout ? m_layout->items.size() : 0;
+}
+
+std::wstring DockWindow::ItemName(std::size_t index) const
+{
+    if (index >= m_items.items.size())
+    {
+        return {};
+    }
+    const auto& name = m_items.items[index].name;
+    const int length =
+        MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
+    std::wstring wide(static_cast<std::size_t>(std::max(length, 0)), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide.data(), length);
+    return wide;
+}
+
+RECT DockWindow::ItemBounds(std::size_t index) const
+{
+    if (!m_layout || index >= m_layout->items.size())
+    {
+        return {};
+    }
+    const auto& item = m_layout->items[index];
+    return {item.left, item.top, item.right, item.bottom};
+}
+
+std::optional<std::size_t> DockWindow::ItemAt(POINT screenPoint) const
+{
+    return m_layout ? island::HitTest(*m_layout, {screenPoint.x, screenPoint.y}) : std::nullopt;
+}
+
+bool DockWindow::InvokeItem(std::size_t index)
+{
+    return LaunchItem(index, "UI Automation");
 }
 
 void DockWindow::OnAppBarNotification(WPARAM notification, LPARAM lParam)
@@ -633,7 +693,20 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_WINDOWPOSCHANGED:
         UpdatePresentable();
         return DefWindowProcW(m_hwnd, message, wParam, lParam);
+    case WM_GETOBJECT:
+        if (m_accessibility)
+        {
+            if (const auto result = m_accessibility->OnGetObject(wParam, lParam))
+            {
+                return *result;
+            }
+        }
+        return DefWindowProcW(m_hwnd, message, wParam, lParam);
     case WM_DESTROY:
+        if (m_accessibility)
+        {
+            m_accessibility->Disconnect();
+        }
         m_controlChannel.Stop();
         if (m_powerNotification != nullptr)
         {

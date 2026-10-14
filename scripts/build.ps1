@@ -137,6 +137,7 @@ try {
         # The end-to-end tests launch the dock built above, for the same architecture, and pin the marker app.
         $env:HARBOR_DOCK_EXE = $dockExe
         $env:HARBOR_MARKER_EXE = Join-Path $repoRoot "build\$preset\tests\dock\$Config\harbor_test_marker.exe"
+        $env:HARBOR_UIA_CLIENT_EXE = Join-Path $repoRoot "build\$preset\tests\dock\$Config\harbor_test_uia_client.exe"
         Invoke-Native dotnet @('test', '--solution', 'Harbor.slnx', '-c', $Config, "-p:Platform=$platform", '--no-build')
     }
 }

@@ -40,6 +40,33 @@ internal static partial class TestDock
         return copy;
     }
 
+    // Runs tests/dock/uia_client.cpp against the island: a UI Automation client in its own process, as a screen
+    // reader is. Returns its exit code and output.
+    public static async Task<(int ExitCode, string Output)> RunUiaClientAsync(nint island, params string[] arguments)
+    {
+        var client = Environment.GetEnvironmentVariable("HARBOR_UIA_CLIENT_EXE");
+        if (string.IsNullOrEmpty(client))
+        {
+            Assert.Inconclusive("Set HARBOR_UIA_CLIENT_EXE to a built harbor_test_uia_client.exe; scripts/build.ps1 does.");
+        }
+        var startInfo = new ProcessStartInfo(client)
+        {
+            RedirectStandardOutput = true,
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add(island.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+        using var process = Process.Start(startInfo)!;
+        var output = await process.StandardOutput.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await process.WaitForExitAsync(timeout.Token);
+        return (process.ExitCode, output);
+    }
+
     // A short ping timeout (the real one is 5 s) keeps the tests that wait for it quick.
     public static string[] Arguments(string pipeName, string dataDir, FakeTaskbar taskbar) =>
         ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];

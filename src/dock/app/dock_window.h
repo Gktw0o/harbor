@@ -6,9 +6,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <memory>
 #include <optional>
+#include <string>
+#include <string_view>
 
 #include "adapters/composition_renderer.h"
+#include "adapters/uia_island.h"
 #include "app/appbar_worker.h"
 #include "app/latest_value.h"
 #include "app/launcher.h"
@@ -31,7 +35,7 @@ namespace harbor::dock
 // destroyed. Pings are answered from this window's (UI) thread, so a pong also proves the UI thread is
 // responsive. Everything that affects the taskbar (connection, pings, setTaskbar) goes straight from the
 // channel's thread to the guard, never through this thread. dockItems comes here.
-class DockWindow
+class DockWindow : private adapters::IIslandAccess
 {
   public:
     struct Options
@@ -101,8 +105,17 @@ class DockWindow
     // Takes ownership of report.
     void OnLaunched(LaunchReport* report);
     void SetHovered(std::optional<std::size_t> hovered);
-    std::optional<std::size_t> ItemAt(LPARAM position) const;
+    std::optional<std::size_t> ItemAtClient(LPARAM position) const;
+    // A click or UI Automation's Invoke. how is for the log.
+    bool LaunchItem(std::size_t index, std::string_view how);
     void UpdatePresentable();
+
+    // adapters::IIslandAccess, for UI Automation: the visible items.
+    std::size_t ItemCount() const override;
+    std::wstring ItemName(std::size_t index) const override;
+    RECT ItemBounds(std::size_t index) const override;
+    std::optional<std::size_t> ItemAt(POINT screenPoint) const override;
+    bool InvokeItem(std::size_t index) override;
 
     ipc::IIpcChannel& m_controlChannel;
     TaskbarGuard& m_guard;
@@ -120,6 +133,7 @@ class DockWindow
     // A full-screen app covers the monitor: the island is behind it.
     bool m_fullScreen = false;
     std::optional<Launcher> m_launcher;
+    std::unique_ptr<adapters::IslandAccessibility> m_accessibility;
     HPOWERNOTIFY m_powerNotification = nullptr;
     UINT m_taskbarCreatedMessage = 0;
     bool m_connected = false;

@@ -191,6 +191,55 @@ public sealed class DockE2ETests
         }
     }
 
+    // A screen reader (any UI Automation client) sees a tool bar of buttons named after the apps, and starting one
+    // through its Invoke pattern works like a click.
+    [TestMethod]
+    public async Task ScreenReadersSeeTheAppsAndCanStartOne()
+    {
+        const int ToolBar = 50021;
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var app = TestDock.CopyMarkerApp(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\missing.exe", "Ünïcødé \U0001D538", null),
+                new DockItem(DockItemKind.Path, app, "Marker", null),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 2 items", TimeSpan.FromSeconds(10)));
+            var island = IslandWindow.Find(dock.Id);
+
+            var (listed, tree) = await TestDock.RunUiaClientAsync(island, "list");
+            Assert.AreEqual(0, listed, tree);
+            CollectionAssert.AreEqual(
+                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tÜnïcødé \U0001D538", $"{Button}\tMarker" },
+                tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), tree);
+
+            var (invoked, _) = await TestDock.RunUiaClientAsync(island, "invoke", "Marker");
+            Assert.AreEqual(0, invoked);
+            var marker = app + ".launched";
+            var deadline = Stopwatch.StartNew();
+            while (!File.Exists(marker) && deadline.Elapsed < TimeSpan.FromSeconds(20))
+            {
+                await Task.Delay(50);
+            }
+            Assert.IsTrue(File.Exists(marker), await TestDock.ReadLogAsync(dataDir.Path));
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), "launch: item 1 (UI Automation)");
+
+            Assert.AreEqual(3, (await TestDock.RunUiaClientAsync(island, "invoke", "Nothing")).ExitCode);
+        }
+        finally
+        {
+            await StopAsync(dock);
+            await Task.Delay(200);
+        }
+    }
+
     // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
     [TestMethod]
     public async Task TheDockExitsNormallyWhenItsWindowIsClosed()

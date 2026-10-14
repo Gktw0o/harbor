@@ -1,6 +1,7 @@
 find_package(GTest CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(nlohmann_json_schema_validator CONFIG REQUIRED)
+find_package(wil CONFIG REQUIRED)
 include(GoogleTest)
 
 # Crashes on request, so crash_guard_tests.cpp can check the dock's crash handlers in a real crash.
@@ -11,6 +12,11 @@ target_link_libraries(harbor_dock_crash_helper PRIVATE harbor_dock_app wer)
 # its path to Harbor.Core.Tests as HARBOR_MARKER_EXE).
 add_executable(harbor_test_marker WIN32 marker_app.cpp)
 target_link_libraries(harbor_test_marker PRIVATE harbor_compiler_options)
+
+# A UI Automation client in its own process, as a screen reader is: the island's end-to-end test drives it
+# (HARBOR_UIA_CLIENT_EXE).
+add_executable(harbor_test_uia_client uia_client.cpp)
+target_link_libraries(harbor_test_uia_client PRIVATE harbor_compiler_options WIL::WIL ole32 oleaut32)
 
 add_executable(harbor_dock_tests
     app_launcher_tests.cpp

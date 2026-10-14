@@ -15,11 +15,12 @@ constexpr GuardPolicyConfig kConfig{
 constexpr GuardDecision kHide{true, TaskbarBlock::None};
 constexpr GuardDecision kShow{false, TaskbarBlock::None};
 
-// A policy where everything allows hiding: the hotkey is registered, the link is up with enough pings,
-// the last at t = 1000 ms, and the Shell asked.
+// A policy where everything allows hiding: the island is on screen, the hotkey is registered, the link is up
+// with enough pings, the last at t = 1000 ms, and the Shell asked.
 GuardPolicy Allowed()
 {
     GuardPolicy policy(kConfig);
+    policy.OnPresentable(true);
     policy.OnHotkeyRegistered(true);
     policy.OnLinkUp();
     for (int i = 0; i < 3; ++i)
@@ -35,6 +36,27 @@ TEST(GuardPolicy, HidesWhenEverythingHolds)
     EXPECT_EQ(Allowed().Evaluate(1000ms), kHide);
 }
 
+// Without the island on screen the user would have neither taskbar nor dock. Not a block the user must clear:
+// hiding resumes once it's back.
+TEST(GuardPolicy, HidesOnlyWhileTheIslandIsOnScreen)
+{
+    auto policy = Allowed();
+    policy.OnPresentable(false);
+    EXPECT_EQ(policy.Evaluate(1000ms), kShow);
+    policy.OnPresentable(true);
+    EXPECT_EQ(policy.Evaluate(1000ms), kHide);
+
+    GuardPolicy fresh(kConfig);
+    fresh.OnHotkeyRegistered(true);
+    fresh.OnLinkUp();
+    for (int i = 0; i < 3; ++i)
+    {
+        fresh.OnPing(0ms);
+    }
+    fresh.OnRequest(true);
+    EXPECT_EQ(fresh.Evaluate(0ms), kShow) << "the island counts as not shown until the dock says it is";
+}
+
 TEST(GuardPolicy, NothingHidesWithoutARequest)
 {
     auto policy = Allowed();
@@ -45,6 +67,7 @@ TEST(GuardPolicy, NothingHidesWithoutARequest)
 TEST(GuardPolicy, WaitsForAStableLink)
 {
     GuardPolicy policy(kConfig);
+    policy.OnPresentable(true);
     policy.OnHotkeyRegistered(true);
     policy.OnLinkUp();
     policy.OnRequest(true);
@@ -58,6 +81,7 @@ TEST(GuardPolicy, WaitsForAStableLink)
 TEST(GuardPolicy, PingsBeforeTheLinkIsUpDontCount)
 {
     GuardPolicy policy(kConfig);
+    policy.OnPresentable(true);
     policy.OnHotkeyRegistered(true);
     for (int i = 0; i < 3; ++i)
     {

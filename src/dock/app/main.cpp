@@ -72,6 +72,8 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     // Crash handlers first, so they cover everything after. They only act on windows the dock hid.
     static harbor::dock::HiddenWindows hiddenWindows;
     harbor::dock::crash_guard::Install(hiddenWindows);
+    // A hung UI thread must not turn the island into a framed "Not Responding" ghost window over everything.
+    DisableProcessWindowsGhosting();
 
     DWORD sessionId = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);

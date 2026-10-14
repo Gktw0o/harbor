@@ -254,6 +254,8 @@ void DockWindow::UpdatePresentable()
     {
         m_presentable = presentable;
         m_log.Info(presentable ? "island: shown" : "island: not shown");
+        // The taskbar may only be hidden while the island is on screen.
+        m_guard.PostPresentable(presentable);
     }
 }
 
@@ -352,6 +354,14 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case TaskbarGuard::kStateMessage:
         m_controlChannel.Send(ipc::TaskbarState{wParam != 0, static_cast<ipc::TaskbarBlock>(lParam)});
+        return 0;
+    case TaskbarGuard::kShowIslandMessage:
+        // The panic hotkey hid the island; hiding the taskbar was turned on again.
+        if (m_committed)
+        {
+            m_log.Info("island: shown again");
+            ShowWindow(m_hwnd, SW_SHOWNA);
+        }
         return 0;
     case WM_TIMER:
         if (wParam == kOrphanTimer)

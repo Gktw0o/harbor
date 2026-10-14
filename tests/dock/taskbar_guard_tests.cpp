@@ -1,8 +1,11 @@
 // The guard thread against stand-in taskbar windows. Its hotkey is the test one (Ctrl+Alt+Shift+F24), and
 // tests post WM_HOTKEY instead of pressing keys: synthetic input is unreliable on CI machines.
 
+#include <atomic>
 #include <functional>
+#include <future>
 #include <gtest/gtest.h>
+#include <thread>
 
 #include "app/taskbar_guard.h"
 #include "capturing_logger.h"
@@ -39,6 +42,8 @@ class TaskbarGuardTest : public ::testing::Test
     void SetUp() override
     {
         ASSERT_TRUE(guard.Start());
+        // No island here: these tests start with it on screen.
+        guard.PostPresentable(true);
     }
 
     // What an earlier hide would have left: hidden windows the dock knows about, auto-hide on, a record.
@@ -105,9 +110,117 @@ class TaskbarGuardTest : public ::testing::Test
         }};
 };
 
+// Stands in for the dock's island: a visible 1x1 tool window on its own pumping thread that remembers whether
+// the guard asked to show it again.
+class TestIsland
+{
+  public:
+    TestIsland()
+    {
+        std::promise<HWND> created;
+        auto window = created.get_future();
+        m_thread = std::thread([this, &created] {
+            WNDCLASSEXW windowClass{sizeof(windowClass)};
+            windowClass.lpfnWndProc = [](HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) -> LRESULT {
+                if (message == TaskbarGuard::kShowIslandMessage)
+                {
+                    reinterpret_cast<TestIsland*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA))->m_showRequested =
+                        true;
+                    ShowWindow(hwnd, SW_SHOWNA);
+                    return 0;
+                }
+                return DefWindowProcW(hwnd, message, wParam, lParam);
+            };
+            windowClass.hInstance = GetModuleHandleW(nullptr);
+            windowClass.lpszClassName = L"Harbor.Test.GuardIsland";
+            RegisterClassExW(&windowClass);
+            const HWND hwnd =
+                CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, windowClass.lpszClassName, L"", WS_POPUP,
+                                0, 0, 1, 1, nullptr, nullptr, windowClass.hInstance, nullptr);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+            ShowWindow(hwnd, SW_SHOWNA);
+            created.set_value(hwnd);
+            MSG message{};
+            while (GetMessageW(&message, nullptr, 0, 0) > 0)
+            {
+                DispatchMessageW(&message);
+            }
+            DestroyWindow(hwnd);
+        });
+        m_hwnd = window.get();
+    }
+
+    ~TestIsland()
+    {
+        PostThreadMessageW(GetThreadId(m_thread.native_handle()), WM_QUIT, 0, 0);
+        m_thread.join();
+    }
+
+    HWND Hwnd() const noexcept
+    {
+        return m_hwnd;
+    }
+    bool ShowRequested() const noexcept
+    {
+        return m_showRequested.load();
+    }
+
+  private:
+    std::thread m_thread;
+    HWND m_hwnd = nullptr;
+    std::atomic<bool> m_showRequested{false};
+};
+
 TEST_F(TaskbarGuardTest, RegistersThePanicHotkey)
 {
     EXPECT_TRUE(guard.HotkeyRegistered());
+}
+
+// GuardPolicy rule 7 on the guard thread: the taskbar comes back when the island leaves the screen, and goes
+// again when the island returns.
+TEST_F(TaskbarGuardTest, HidesOnlyWhileTheIslandIsOnScreen)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+
+    guard.PostPresentable(false);
+    ASSERT_TRUE(WaitUntilRestored());
+    EXPECT_EQ(guard.State().blocked, TaskbarBlock::None);
+    EXPECT_TRUE(log.Contains("the island isn't on screen"));
+
+    guard.PostPresentable(true);
+    EXPECT_TRUE(WaitUntilHidden());
+}
+
+// While hiding is on, the panic hotkey also takes the island away (a way out of the dock); it comes back when
+// hiding is turned on again.
+TEST_F(TaskbarGuardTest, ThePanicHotkeyHidesTheIslandUntilHidingIsBackOn)
+{
+    TestIsland island;
+    guard.SetStateWindow(island.Hwnd());
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+
+    PostMessageW(guard.Window(), WM_HOTKEY, TaskbarGuard::kPanicHotkeyId, 0);
+    ASSERT_TRUE(WaitUntilRestored());
+    EXPECT_TRUE(WaitFor([&] { return !IsWindowVisible(island.Hwnd()); }));
+
+    // What Harbor Shell does: it turns the request off when it sees the panic block, then the user turns
+    // hiding back on.
+    guard.PostRequest(false);
+    EXPECT_FALSE(island.ShowRequested());
+    guard.PostRequest(true);
+    EXPECT_TRUE(WaitFor([&] { return island.ShowRequested() && IsWindowVisible(island.Hwnd()); }));
+}
+
+TEST_F(TaskbarGuardTest, ThePanicHotkeyLeavesTheIslandAloneWhenNothingIsHidden)
+{
+    TestIsland island;
+    guard.SetStateWindow(island.Hwnd());
+    PostMessageW(guard.Window(), WM_HOTKEY, TaskbarGuard::kPanicHotkeyId, 0);
+    EXPECT_TRUE(WaitFor([&] { return log.Contains("panic hotkey pressed"); }));
+    Sleep(200);
+    EXPECT_TRUE(IsWindowVisible(island.Hwnd()));
 }
 
 TEST_F(TaskbarGuardTest, HidesOnceTheWatchdogHasPingedEnough)

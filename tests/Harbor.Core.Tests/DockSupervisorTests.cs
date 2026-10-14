@@ -161,25 +161,32 @@ public sealed partial class DockSupervisorTests
         Assert.IsFalse(dock.HasExited);
     }
 
+    // The panic hotkey gives back the taskbar and takes the island away; turning hiding on again brings back both
+    // (the island first: the taskbar only goes while the island is on screen).
     [TestMethod]
     public async Task ThePanicHotkeyRestoresTheTaskbarAndTurnsHidingOff()
     {
         await using var harness = new Harness(launch: true);
-        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
         await harness.WaitForPongAsync();
         harness.Supervisor.SetTaskbarHidden(true);
         await harness.WaitForStateAsync(s => s.Hidden);
+        var island = IslandWindow.Find((int)running.ProcessId!);
+        Assert.IsTrue(IslandWindow.IsWindowVisible(island));
 
         TestDock.PressPanicHotkey(harness.PipeName);
 
         await harness.WaitForStateAsync(s => s.Blocked == TaskbarBlock.PanicHotkey);
         await harness.WaitForHideRequestAsync(false);
         harness.AssertFullyRestored();
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "island: not shown", Timeout));
+        Assert.IsFalse(IslandWindow.IsWindowVisible(island));
 
         // Turning it back on works: the Shell's "off" cleared the dock's panic block.
         harness.Supervisor.SetTaskbarHidden(true);
         await harness.WaitForStateAsync(s => s.Hidden);
         harness.AssertHidden();
+        Assert.IsTrue(IslandWindow.IsWindowVisible(island));
     }
 
     [TestMethod]

@@ -61,3 +61,4 @@ check against their decoders (and `tests/dock` against the schema).
 | File | Schema | Written by | Read by |
 |---|---|---|---|
 | `%LOCALAPPDATA%\Harbor\taskbar-restore.json` | [`taskbar-restore`](state/taskbar-restore.schema.json) v1 | dock, before it turns on auto-hide | dock and Shell, to put auto-hide back |
+| `%LOCALAPPDATA%\Harbor\settings.json` | [`settings`](state/settings.schema.json) v1 | Shell (defaults on first run) and people | Shell only (`tests/dock` checks the schema alone) |

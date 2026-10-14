@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:state:settings",
+  "title": "settings v1",
+  "description": "%LOCALAPPDATA%\\Harbor\\settings.json: Harbor's settings. Harbor Shell writes the defaults on first run and reads it; people may edit it by hand. A file that doesn't match is reported and never overwritten. Lengths count Unicode characters. Any change bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "pinned"],
+  "properties": {
+    "v": { "const": 1 },
+    "pinned": {
+      "description": "The apps on the dock, in order: as many as dockItems carries.",
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["app"],
+            "properties": { "app": { "description": "An AppUserModelID, as in shell:AppsFolder.", "$ref": "#/definitions/target" } }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": {
+                "description": "An absolute path (drive or UNC) to an .exe or .lnk.",
+                "allOf": [{ "$ref": "#/definitions/target" }, { "pattern": "^(?:[A-Za-z]:\\\\|\\\\\\\\)" }]
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "target": { "type": "string", "minLength": 1, "maxLength": 260, "pattern": "^[^\\x00-\\x1f]*$" }
+  }
+}

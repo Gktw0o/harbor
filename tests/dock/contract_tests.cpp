@@ -146,7 +146,7 @@ TEST(Contracts, InvalidFixturesMatchNoSchemaAndAreRejected)
 }
 
 // State files: contracts/state/<name>.schema.json with fixtures in contracts/state/fixtures/<name>/.
-// Each name needs a decoder here; a new schema without one fails the test.
+// Each name the dock reads needs a decoder here; a new schema without one fails the test.
 std::optional<std::string> DecodeAndReencodeState(std::string_view name, std::string_view text)
 {
     if (name == "taskbar-restore")
@@ -156,6 +156,12 @@ std::optional<std::string> DecodeAndReencodeState(std::string_view name, std::st
     }
     ADD_FAILURE() << "no decoder for state file " << name;
     return std::nullopt;
+}
+
+// State files only Harbor Shell reads: here they are checked against their schema alone.
+bool IsReadByTheDock(std::string_view name)
+{
+    return name != "settings";
 }
 
 TEST(StateContracts, FixturesConformAndRoundTrip)
@@ -180,6 +186,10 @@ TEST(StateContracts, FixturesConformAndRoundTrip)
             SCOPED_TRACE(fixture.filename().string());
             const auto text = ReadLine(fixture);
             EXPECT_TRUE(Conforms(schema, json::parse(text))) << "schema rejects: " << text;
+            if (!IsReadByTheDock(name))
+            {
+                continue;
+            }
             const auto reencoded = DecodeAndReencodeState(name, text);
             ASSERT_TRUE(reencoded) << "decoder rejects: " << text;
             EXPECT_EQ(json::parse(*reencoded), json::parse(text)) << *reencoded;
@@ -196,7 +206,10 @@ TEST(StateContracts, FixturesConformAndRoundTrip)
             {
                 EXPECT_FALSE(Conforms(schema, document)) << "schema accepts: " << text;
             }
-            EXPECT_FALSE(DecodeAndReencodeState(name, text)) << "decoder accepts: " << text;
+            if (IsReadByTheDock(name))
+            {
+                EXPECT_FALSE(DecodeAndReencodeState(name, text)) << "decoder accepts: " << text;
+            }
         }
     }
 }

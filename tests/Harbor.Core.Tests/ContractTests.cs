@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
 using Harbor.Core.Ipc;
+using Harbor.Core.Settings;
 using Harbor.Core.Taskbar;
 
 namespace Harbor.Core.Tests;
@@ -61,6 +62,7 @@ public sealed class ContractTests
     private static byte[]? DecodeAndReencodeState(string name, byte[] text) => name switch
     {
         "taskbar-restore" => RestoreRecord.TryDecode(text, out var record) ? RestoreRecord.Encode(record) : null,
+        "settings" => HarborSettings.TryDecode(text, out var settings, out _) ? HarborSettings.Encode(settings) : null,
         _ => throw new AssertFailedException($"no decoder for state file {name}"),
     };
 

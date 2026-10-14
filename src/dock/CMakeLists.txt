@@ -1,9 +1,16 @@
+find_package(nlohmann_json CONFIG REQUIRED)
+
 # Pure domain logic: no Win32 headers, so it is testable on any machine.
 add_library(harbor_dock_core STATIC
+    core/ipc/codec.cpp
+    core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
 )
 target_include_directories(harbor_dock_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(harbor_dock_core PUBLIC harbor_compiler_options)
+target_link_libraries(harbor_dock_core
+    PUBLIC harbor_compiler_options
+    PRIVATE nlohmann_json::nlohmann_json
+)
 
 add_executable(harbor-dock WIN32
     app/main.cpp

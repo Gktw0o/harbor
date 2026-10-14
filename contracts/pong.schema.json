@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:harbor:contract:pong",
+  "title": "pong v1",
+  "description": "Answer to a ping, dock to Harbor.Shell, on the control channel. The dock answers from its UI thread, so a pong also proves the UI thread is responsive. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "pong" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq"],
+      "properties": {
+        "seq": {
+          "description": "The seq of the ping being answered.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    }
+  }
+}

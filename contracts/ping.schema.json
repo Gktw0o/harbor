@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:harbor:contract:ping",
+  "title": "ping v1",
+  "description": "Liveness probe, Harbor.Shell to dock, on the control channel. The receiver answers with a pong carrying the same seq. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "ping" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq"],
+      "properties": {
+        "seq": {
+          "description": "Sender-chosen sequence number, echoed in the pong.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    }
+  }
+}

@@ -8,7 +8,8 @@ A macOS-style dock and system-stats island for Windows 11, native on **x64 and A
 ## Prerequisites
 
 - Windows 11 22H2 or later, x64 or ARM64.
-- **Visual Studio 2022 (17.14+) or 2026, or the Build Tools**, with these components:
+- **Visual Studio 2026 or its Build Tools** (what local builds and CI use; 2022 may work but is
+  untested), with these components:
 
   | Component | ID |
   |---|---|

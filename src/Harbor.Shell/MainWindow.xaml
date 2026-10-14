@@ -13,6 +13,16 @@
     <StackPanel Orientation="Horizontal" Spacing="8">
       <Button x:Name="RestoreButton" Content="Restore taskbar now" Click="OnRestoreClicked" />
       <Button x:Name="StartDockButton" Content="Start dock" Click="OnStartDockClicked" IsEnabled="False" />
+      <Button x:Name="StopDockButton" Content="Stop dock" Click="OnStopDockClicked" IsEnabled="False" />
     </StackPanel>
+    <TextBlock Text="Pinned apps" Margin="0,12,0,0" Style="{StaticResource SubtitleTextBlockStyle}" />
+    <TextBlock x:Name="PinnedText" Text="Looking them up…" TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" />
+    <TextBlock x:Name="SettingsProblemText" TextWrapping="Wrap" Visibility="Collapsed"
+               Foreground="{ThemeResource SystemFillColorCriticalBrush}" Style="{StaticResource BodyTextBlockStyle}" />
+    <StackPanel Orientation="Horizontal" Spacing="8">
+      <Button Content="Edit pinned apps…" Click="OnEditPinnedClicked" />
+    </StackPanel>
+    <TextBlock Text="Pinned apps are kept in settings.json; Harbor picks up your changes when you save it."
+               TextWrapping="Wrap" Style="{StaticResource CaptionTextBlockStyle}" />
   </StackPanel>
 </Window>

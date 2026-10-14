@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Threading.Channels;
+using Harbor.Core.Interop;
 using Harbor.Core.Ipc;
 using Harbor.Core.Logging;
 using Harbor.Core.Taskbar;
@@ -28,6 +29,15 @@ public sealed record DockSupervisorOptions
 
     /// <summary>See <see cref="RestoreOptions.VerifyDelay"/>.</summary>
     public TimeSpan RestoreVerifyDelay { get; init; } = TimeSpan.FromSeconds(1);
+
+    /// <summary>When a dock that failed is started again (<see cref="RestartPolicy"/>).</summary>
+    public RestartOptions Restart { get; init; } = new();
+
+    /// <summary>A started dock that hasn't connected by then counts as failed: it is ended (and maybe restarted).</summary>
+    public TimeSpan ConnectTimeout { get; init; } = TimeSpan.FromSeconds(10);
+
+    /// <summary>How long "Stop dock" waits for the dock to close by itself before ending it.</summary>
+    public TimeSpan StopTimeout { get; init; } = TimeSpan.FromSeconds(5);
 }
 
 public enum DockState
@@ -39,7 +49,8 @@ public enum DockState
 
 /// <param name="ExitCode">Set once a dock has stopped.</param>
 /// <param name="Reason">Why it stopped or isn't running, for people.</param>
-public sealed record DockStatus(DockState State, uint? ProcessId = null, int? ExitCode = null, string? Reason = null);
+/// <param name="Next">What happens next after a stop (it starts again in a moment, or it doesn't and why), for people.</param>
+public sealed record DockStatus(DockState State, uint? ProcessId = null, int? ExitCode = null, string? Reason = null, string? Next = null);
 
 /// <param name="Reason">Why the taskbar was restored, for people.</param>
 /// <param name="Result">What was restored; null if Explorer didn't answer in time.</param>
@@ -92,8 +103,8 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
                 await serving.ConfigureAwait(false);
             }
 
-            using var session = new Session(options.MissedPongLimit, Stopwatch.GetTimestamp());
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var session = new Session(options.MissedPongLimit, Stopwatch.GetTimestamp(), new RestartPolicy(options.Restart), stop.Token);
             var ticking = TickAsync(stop.Token);
             var watching = WatchAsync(session, stop.Token);
             try
@@ -119,6 +130,40 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
 
     /// <summary>Starts a dock if none is running (the "Start dock" button).</summary>
     public void StartDock() => Post(session => session.Dock is null ? LaunchAsync(session) : Task.CompletedTask);
+
+    /// <summary>
+    /// Stops the dock (the "Stop dock" button): asks it to close, which puts the taskbar back and frees its strip,
+    /// and ends it if it hasn't after <see cref="DockSupervisorOptions.StopTimeout"/>. It isn't started again.
+    /// </summary>
+    public void StopDock() => Post(session =>
+    {
+        if (session.Dock is not { } dock)
+        {
+            return Task.CompletedTask;
+        }
+        session.StopRequested = true;
+        var island = session.Island != 0 ? session.Island : DockWindows.FindIsland(dock.Id);
+        log.Info($"watchdog: stopping dock process {dock.Id} as asked");
+        if (island == 0 || !NativeMethods.PostMessage(island, NativeMethods.WmClose, 0, 0))
+        {
+            session.KillReason = "you stopped it";
+            dock.Kill();
+            return Task.CompletedTask;
+        }
+        _ = Task.Delay(options.StopTimeout, session.Stopping).ContinueWith(
+            _ => Post(s =>
+            {
+                if (s.Dock == dock)
+                {
+                    log.Warn($"watchdog: dock process {dock.Id} didn't close when asked; ending it");
+                    s.KillReason = "you stopped it (it didn't close by itself)";
+                    dock.Kill();
+                }
+                return Task.CompletedTask;
+            }),
+            CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+        return Task.CompletedTask;
+    });
 
     /// <summary>
     /// Asks the dock to hide the taskbar or show it (the toggle). The dock is only asked to hide while the
@@ -269,6 +314,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             if (session.Dock is not null && status.ClientProcessId == session.Dock.Id)
             {
                 session.Island = DockWindows.FindIsland(session.Dock.Id);
+                session.LaunchedAt = null;
             }
             // Every connection hears the current request (the dock forgets it when a connection drops).
             SendHideRequest(session);
@@ -289,6 +335,15 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
                 session.StartupDone = true;
                 await StartupAsync(session).ConfigureAwait(false);
             }
+            return;
+        }
+        // A dock this watchdog started that never connected is as good as crashed: it can't be watched.
+        if (session.LaunchedAt is { } launchedAt && Stopwatch.GetElapsedTime(launchedAt) >= options.ConnectTimeout)
+        {
+            log.Error($"watchdog: dock process {session.Dock.Id} didn't connect within {options.ConnectTimeout.TotalSeconds:0} s; ending it");
+            session.LaunchedAt = null;
+            session.KillReason = "it never connected to Harbor Shell";
+            session.Dock.Kill();
             return;
         }
         if (!server.IsConnected)
@@ -334,6 +389,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             var dock = DockProcess.Launch(options.DockExePath, options.DockArguments, log);
             log.Info($"watchdog: started dock process {dock.Id}");
             Supervise(session, dock);
+            session.LaunchedAt = Stopwatch.GetTimestamp();
         }
         catch (Win32Exception exception)
         {
@@ -347,6 +403,8 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     {
         session.Dock = dock;
         session.KillReason = null;
+        session.StopRequested = false;
+        session.LaunchedAt = null;
         session.StartupDone = true;
         DockStatusChanged?.Invoke(new DockStatus(DockState.Running, dock.Id));
         _ = dock.Exited.ContinueWith(_ => Post(s => HandleExitAsync(s, dock)), TaskScheduler.Default);
@@ -400,14 +458,34 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             log.Info($"watchdog: dock process {dock.Id} exited because another dock is already running");
             return;
         }
-        var reason = session.KillReason ?? (exitCode == 0 ? "it exited" : $"it stopped unexpectedly (exit code 0x{exitCode:X8})");
+        var stopped = session.StopRequested;
+        var reason = session.KillReason ?? (stopped ? "you stopped it"
+            : exitCode == 0 ? "it exited"
+            : exitCode == DockExitCodes.GraphicsUnavailable ? "it can't draw on this PC (graphics unavailable)"
+            : $"it stopped unexpectedly (exit code 0x{exitCode:X8})");
         // After any end, hiding stays off until the user turns it back on.
         SetHideRequest(session, false, $"the dock ended ({reason})");
         log.Warn($"watchdog: dock process {dock.Id} ended: {reason}; restoring the taskbar");
         var result = await FullRestoreAsync().ConfigureAwait(false);
         TaskbarRestored?.Invoke(new TaskbarRestore($"the dock ended: {reason}", result));
         await ReleaseAppBarAsync(session).ConfigureAwait(false);
-        DockStatusChanged?.Invoke(new DockStatus(DockState.Stopped, dock.Id, exitCode, reason));
+
+        // A dock the user stopped stays stopped; one that failed may start again (RestartPolicy).
+        var restart = stopped
+            ? new RestartDecision(null, "it stays stopped until you start it")
+            : session.Restarts.Decide(exitCode, Stopwatch.GetElapsedTime(session.StartedAt), TaskbarRestorer.IsSessionEnding);
+        if (restart.Delay is { } delay)
+        {
+            log.Info($"watchdog: {restart.Reason}");
+            _ = Task.Delay(delay, session.Stopping).ContinueWith(
+                _ => Post(s => s.Dock is null ? LaunchAsync(s) : Task.CompletedTask),
+                CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
+        }
+        else if (!stopped && exitCode != 0)
+        {
+            log.Warn($"watchdog: not starting the dock again: {restart.Reason}");
+        }
+        DockStatusChanged?.Invoke(new DockStatus(DockState.Stopped, dock.Id, exitCode, reason, restart.Reason));
     }
 
     // The taskbar first, then the strip: Explorer frees a dead window's strip by itself, so this is only a backup.
@@ -460,9 +538,20 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     }
 
     // The watchdog's state, owned by its loop.
-    private sealed class Session(int missedPongLimit, long startedAt) : IDisposable
+    private sealed class Session(int missedPongLimit, long startedAt, RestartPolicy restarts, CancellationToken stopping) : IDisposable
     {
         public long StartedAt { get; } = startedAt;
+
+        public RestartPolicy Restarts { get; } = restarts;
+
+        /// <summary>Cancelled when the watchdog stops: delayed work (restarts, stop timeouts) is dropped.</summary>
+        public CancellationToken Stopping { get; } = stopping;
+
+        /// <summary>"Stop dock" was asked for this dock: its end is no failure.</summary>
+        public bool StopRequested { get; set; }
+
+        /// <summary>When this watchdog started the dock, until it connects (<see cref="DockSupervisorOptions.ConnectTimeout"/>).</summary>
+        public long? LaunchedAt { get; set; }
 
         public Heartbeat Heartbeat { get; } = new(missedPongLimit);
 

@@ -41,6 +41,12 @@ internal static partial class NativeMethods
     [LibraryImport("user32.dll")]
     public static partial nint GetShellWindow();
 
+    public const uint WmClose = 0x0010;
+
+    [LibraryImport("user32.dll", EntryPoint = "PostMessageW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool PostMessage(nint window, uint message, nuint wParam, nint lParam);
+
     [LibraryImport("user32.dll")]
     public static partial uint GetWindowThreadProcessId(nint window, out uint processId);
 

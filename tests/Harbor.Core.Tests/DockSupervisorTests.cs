@@ -109,6 +109,65 @@ public sealed partial class DockSupervisorTests
         StringAssert.Contains(waiting.Reason, "wasn't found");
     }
 
+    private static readonly RestartOptions QuickRestarts = new()
+    {
+        Delays = [TimeSpan.FromMilliseconds(100)],
+        MaxRestarts = 2,
+        Window = TimeSpan.FromMinutes(5),
+    };
+
+    // A dock that died is started again (hiding stays off: the user turns it back on).
+    [TestMethod]
+    public async Task ADockThatCrashedIsStartedAgain()
+    {
+        await using var harness = new Harness(launch: true, restart: QuickRestarts);
+        var first = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+
+        TestDock.KillQuietly((int)first.ProcessId!);
+
+        var stopped = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        StringAssert.Contains(stopped.Next, "starting it again");
+        var second = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        Assert.AreNotEqual(first.ProcessId, second.ProcessId);
+        await harness.WaitForPongAsync();
+    }
+
+    // "Stop dock": the dock closes by itself (exit code 0) and stays stopped.
+    [TestMethod]
+    public async Task AStoppedDockClosesAndStaysStopped()
+    {
+        await using var harness = new Harness(launch: true, restart: QuickRestarts);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+
+        harness.Supervisor.StopDock();
+
+        var stopped = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        Assert.AreEqual(0, stopped.ExitCode);
+        Assert.AreEqual("you stopped it", stopped.Reason);
+        StringAssert.Contains(stopped.Next, "stays stopped");
+        await Task.Delay(1000);
+        Assert.IsFalse(harness.TryTakeDockStatus(out var later), $"then: {later}");
+    }
+
+    // A started dock that never reaches the pipe can't be watched: it is ended, retried, and given up on.
+    [TestMethod]
+    public async Task ADockThatNeverConnectsIsEndedThenRetriedThenGivenUpOn()
+    {
+        await using var harness = new Harness(launch: true, restart: QuickRestarts with { MaxRestarts = 1 },
+            connectTimeout: TimeSpan.FromSeconds(2), dockPipeName: $"harbor.test.{Guid.NewGuid():N}");
+
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        var first = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        Assert.AreEqual("it never connected to Harbor Shell", first.Reason);
+        StringAssert.Contains(first.Next, "starting it again");
+
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        var second = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        StringAssert.Contains(second.Next, "giving up");
+    }
+
     // The list is set before any dock runs: the dock gets it when it connects, then each change.
     [TestMethod]
     public async Task SendsTheAppsToTheDockOnConnectAndOnChange()
@@ -276,7 +335,11 @@ public sealed partial class DockSupervisorTests
         private readonly List<int> _docks = [];
         private readonly Task _run;
 
-        public Harness(bool launch, bool startDockFirst = false, bool simulateHiddenFirst = false)
+        // restart: when to start a failed dock again (default: never, so the tests about one dock's end see only
+        // that). connectTimeout: generous by default for slow CI machines. dockPipeName: the pipe the started docks
+        // look for, if not this harness's (a dock that never connects).
+        public Harness(bool launch, bool startDockFirst = false, bool simulateHiddenFirst = false, RestartOptions? restart = null,
+            TimeSpan? connectTimeout = null, string? dockPipeName = null)
         {
             Taskbar = new FakeTaskbar(_dir.Path);
             var pipeName = $"harbor.test.{Guid.NewGuid():N}";
@@ -295,12 +358,14 @@ public sealed partial class DockSupervisorTests
                 new DockSupervisorOptions
                 {
                     DockExePath = launch ? TestDock.ExePath : null,
-                    DockArguments = TestDock.Arguments(pipeName, _dir.Path, Taskbar),
+                    DockArguments = TestDock.Arguments(dockPipeName ?? pipeName, _dir.Path, Taskbar),
                     PingInterval = TimeSpan.FromMilliseconds(100),
                     MissedPongLimit = 5,
                     // A pre-started dock needs a moment to reach the pipe.
                     AdoptWait = startDockFirst ? TimeSpan.FromSeconds(5) : TimeSpan.FromMilliseconds(200),
                     RestoreVerifyDelay = TimeSpan.Zero,
+                    Restart = restart ?? new RestartOptions { MaxRestarts = 0 },
+                    ConnectTimeout = connectTimeout ?? TimeSpan.FromSeconds(20),
                 },
                 new ControlPipeServer(pipeName, Log),
                 new TaskbarRestorer(Taskbar.Target, RecordPath, Log),
@@ -368,6 +433,10 @@ public sealed partial class DockSupervisorTests
         }
 
         public Task<DockStatus> WaitForDockAsync(Func<DockStatus, bool> predicate) => WaitAsync(_dockStatuses, predicate);
+
+        // A dock status reported since the last wait, if any.
+        public bool TryTakeDockStatus([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out DockStatus? status) =>
+            _dockStatuses.Reader.TryRead(out status);
 
         public Task<TaskbarRestore> WaitForRestoreAsync(Func<TaskbarRestore, bool> predicate) => WaitAsync(_restores, predicate);
 

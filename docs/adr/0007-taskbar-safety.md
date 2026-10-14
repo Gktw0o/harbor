@@ -89,7 +89,7 @@ more than about 4 MiB together. Every restore says why it happened.
     dock).
 - Dock idle cost with the taskbar hidden: 0.014 % CPU and 18.7 MB working set (budget 0.5 % and 40 MB).
 - An x64 Debug build (Debug CRT) with Control Flow Guard, running under emulation on ARM64, fails fast on a
-  main-thread exception before any filter runs. Release builds and arm64 are fine; the one test it
-  affects skips itself there.
+  main-thread exception before any filter runs. Native x64 (CI), Release builds and arm64 are fine; the
+  one test it affects skips itself only in that combination.
 - Test runners such as ctest run tests in kill-on-close jobs, so in-process guard tests replace the job
   check; a separate end-to-end test checks the real one.

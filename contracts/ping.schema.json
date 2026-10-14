@@ -1,5 +1,5 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "urn:harbor:contract:ping",
   "title": "ping v1",
   "description": "Liveness probe, Harbor.Shell to dock, on the control channel. The receiver answers with a pong carrying the same seq. Any change to this message bumps v.",

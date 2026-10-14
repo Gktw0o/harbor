@@ -18,8 +18,12 @@ Every message is one compact UTF-8 JSON object followed by `\n`, at most 64 KiB 
 
 `fixtures/valid/*.json` must validate against their message's schema, decode, and re-encode to equal JSON.
 `fixtures/invalid/*.json` must match no message schema and be rejected by both decoders.
-Both test suites (`tests/dock`, `tests/Harbor.Core.Tests`) run every fixture, so a new file here is
-picked up by both sides automatically.
+
+- `tests/dock` checks every fixture against the schemas (JSON Schema draft-07, via
+  [json-schema-validator](https://github.com/pboettch/json-schema-validator)) and the C++ codec.
+- `tests/Harbor.Core.Tests` checks every fixture against the C# codec.
+
+Both suites list the files when they run, so a new schema or fixture is picked up without a rebuild.
 
 | Message | Direction | Channel |
 |---|---|---|

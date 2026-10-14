@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "dependencies": [
     "gtest",
+    "json-schema-validator",
     "nlohmann-json"
   ]
 }

@@ -1,5 +1,5 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "urn:harbor:contract:pong",
   "title": "pong v1",
   "description": "Answer to a ping, dock to Harbor.Shell, on the control channel. The dock answers from its UI thread, so a pong also proves the UI thread is responsive. Any change to this message bumps v.",

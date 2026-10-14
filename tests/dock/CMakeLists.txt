@@ -1,5 +1,6 @@
 find_package(GTest CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+find_package(nlohmann_json_schema_validator CONFIG REQUIRED)
 include(GoogleTest)
 
 add_executable(harbor_dock_tests
@@ -11,6 +12,7 @@ add_executable(harbor_dock_tests
 target_link_libraries(harbor_dock_tests PRIVATE
     harbor_dock_core
     nlohmann_json::nlohmann_json
+    nlohmann_json_schema_validator::validator
     GTest::gtest
     GTest::gtest_main
 )

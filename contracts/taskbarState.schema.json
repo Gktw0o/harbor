@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:contract:taskbarState",
+  "title": "taskbarState v1",
+  "description": "Dock to Harbor.Shell, on the control channel: whether the dock hides the taskbar now and, if it was asked to but doesn't, why. Sent whenever either changes and on every connect. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "taskbarState" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hidden", "blocked"],
+      "properties": {
+        "hidden": { "type": "boolean" },
+        "blocked": {
+          "description": "none, or why a requested hide isn't happening: hotkeyUnavailable (another app holds the panic hotkey), panicHotkey (the user pressed it), explorerFighting (Explorer kept re-showing the taskbar), taskbarNotFound, killOnCloseJob (the dock could be ended without warning).",
+          "enum": ["none", "hotkeyUnavailable", "panicHotkey", "explorerFighting", "taskbarNotFound", "killOnCloseJob"]
+        }
+      }
+    }
+  }
+}

@@ -31,3 +31,15 @@ Both suites list the files when they run, so a new schema or fixture is picked u
 |---|---|---|
 | [`ping`](ping.schema.json) v1 | Shell → dock | `control` |
 | [`pong`](pong.schema.json) v1 | dock → Shell | `control` |
+| [`setTaskbar`](setTaskbar.schema.json) v1 | Shell → dock | `control` |
+| [`taskbarState`](taskbarState.schema.json) v1 | dock → Shell | `control` |
+
+## State files
+
+Files that more than one Harbor process reads live in `state/`, with the same rules: a strict schema, a
+`v` that any change bumps, and fixtures in `state/fixtures/<name>/{valid,invalid}` that both test suites
+check against their decoders (and `tests/dock` against the schema).
+
+| File | Schema | Written by | Read by |
+|---|---|---|---|
+| `%LOCALAPPDATA%\Harbor\taskbar-restore.json` | [`taskbar-restore`](state/taskbar-restore.schema.json) v1 | dock, before it turns on auto-hide | dock and Shell, to put auto-hide back |

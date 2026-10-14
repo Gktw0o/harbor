@@ -49,7 +49,17 @@ public sealed class ControlPipeServerTests
         Assert.IsTrue(status.Connected);
         Assert.IsNotNull(status.RoundTrip);
         Assert.IsTrue(status.RoundTrip < RunningServer.Timeout);
+        // This process is the client here.
+        Assert.AreEqual((uint)Environment.ProcessId, status.ClientProcessId);
         await stop.CancelAsync();
+    }
+
+    [TestMethod]
+    public async Task TrySendFailsWithoutAConnection()
+    {
+        await using var server = new RunningServer(RunningServer.UniquePipeName(), PingInterval);
+        Assert.IsFalse(server.Server.TrySend(new Ping(1)));
+        Assert.IsNull(server.Server.TryPing());
     }
 
     [TestMethod]
@@ -68,7 +78,7 @@ public sealed class ControlPipeServerTests
         await server.WaitForAsync(s => s.LastPongSeq is not null);
         await stop.CancelAsync();
 
-        var log = string.Join("\n", server.Log);
+        var log = string.Join("\n", server.Log.Lines);
         StringAssert.Contains(log, "dropped message (MalformedJson)");
         StringAssert.Contains(log, "dropped an oversized line");
         StringAssert.Contains(log, "ignored unexpected Ping");
@@ -100,7 +110,7 @@ public sealed class ControlPipeServerTests
     public async Task SecondServerForTheSameNameFails()
     {
         await using var first = new RunningServer(RunningServer.UniquePipeName(), PingInterval);
-        var second = new ControlPipeServer(first.PipeName, PingInterval);
+        var second = new ControlPipeServer(first.PipeName);
 
         // The first server allows a single instance, so Windows reports ERROR_PIPE_BUSY.
         var exception = await Assert.ThrowsExactlyAsync<IOException>(() => second.RunAsync(CancellationToken.None));
@@ -114,7 +124,7 @@ public sealed class ControlPipeServerTests
         // to join its pipe with ERROR_ACCESS_DENIED instead of letting the dock talk to it.
         var pipeName = RunningServer.UniquePipeName();
         await using var squatter = new NamedPipeServerStream(pipeName, PipeDirection.InOut, maxNumberOfServerInstances: 2);
-        var server = new ControlPipeServer(pipeName, PingInterval);
+        var server = new ControlPipeServer(pipeName);
 
         await Assert.ThrowsExactlyAsync<UnauthorizedAccessException>(() => server.RunAsync(CancellationToken.None));
     }

@@ -19,7 +19,8 @@ constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
 
 } // namespace
 
-DockWindow::DockWindow(ipc::IIpcChannel& controlChannel) : m_controlChannel(controlChannel)
+DockWindow::DockWindow(ipc::IIpcChannel& controlChannel, TaskbarGuard& guard, log::ILogger& log)
+    : m_controlChannel(controlChannel), m_guard(guard), m_log(log)
 {
 }
 
@@ -53,31 +54,44 @@ bool DockWindow::Create(HINSTANCE instance, int showCommand)
 
     UpdateTitle();
     ShowWindow(m_hwnd, showCommand);
+    // The guard's state reports go out through this thread, like pongs.
+    m_guard.SetStateWindow(m_hwnd);
     StartControlChannel();
     return true;
 }
 
 void DockWindow::StartControlChannel()
 {
-    // Callbacks run on the channel's thread, so they only post to the window. PostMessage to a window that
-    // has already been destroyed fails harmlessly.
+    // Callbacks run on the channel's thread, so they only post (to this window and to the guard) and log,
+    // all thread-safe. PostMessage to a window that has already been destroyed fails harmlessly.
     const HWND hwnd = m_hwnd;
+    TaskbarGuard& guard = m_guard;
+    log::ILogger& log = m_log;
     m_controlChannel.Start({
         .onMessage =
-            [hwnd](const ipc::Message& message) {
+            [hwnd, &guard](const ipc::Message& message) {
                 if (const auto* ping = std::get_if<ipc::Ping>(&message))
                 {
                     PostMessageW(hwnd, kControlPing, ping->seq, 0);
+                    guard.PostPing();
+                }
+                else if (const auto* setTaskbar = std::get_if<ipc::SetTaskbar>(&message))
+                {
+                    guard.PostRequest(setTaskbar->hidden);
                 }
             },
         .onConnectionChanged =
-            [hwnd](bool connected) { PostMessageW(hwnd, kControlConnectionChanged, connected, 0); },
+            [hwnd, &guard, &log](bool connected) {
+                log.Info(connected ? "control channel: connected to Harbor Shell"
+                                   : "control channel: disconnected");
+                guard.PostLinkChanged(connected);
+                PostMessageW(hwnd, kControlConnectionChanged, connected, 0);
+            },
         .onDiagnostic =
-            [](std::string_view text) {
-                std::string line = "harbor-dock: control channel: ";
+            [&log](std::string_view text) {
+                std::string line = "control channel: ";
                 line.append(text);
-                line.push_back('\n');
-                OutputDebugStringA(line.c_str());
+                log.Warn(line);
             },
     });
 }
@@ -104,6 +118,10 @@ void DockWindow::UpdateTitle()
     else
     {
         title += L"connected, ping " + std::to_wstring(m_lastPingSeq);
+    }
+    if (m_taskbarHidden)
+    {
+        title += L" - taskbar hidden (Ctrl+Alt+Shift+H restores it)";
     }
     SetWindowTextW(m_hwnd, title.c_str());
 }
@@ -145,6 +163,15 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case kControlPing:
         OnPing(static_cast<std::uint32_t>(wParam));
+        return 0;
+    case kTestHangMessage:
+        m_log.Warn("test hook: hanging the UI thread");
+        Sleep(INFINITE);
+        return 0;
+    case TaskbarGuard::kStateMessage:
+        m_taskbarHidden = wParam != 0;
+        m_controlChannel.Send(ipc::TaskbarState{m_taskbarHidden, static_cast<ipc::TaskbarBlock>(lParam)});
+        UpdateTitle();
         return 0;
     case WM_DPICHANGED: {
         // Windows suggests a rectangle that keeps the window's DIP size on the new monitor.

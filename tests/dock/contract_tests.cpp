@@ -16,6 +16,7 @@
 #include <sstream>
 
 #include "core/ipc/codec.h"
+#include "core/taskbar/restore_record.h"
 
 namespace harbor::ipc
 {
@@ -143,6 +144,62 @@ TEST(Contracts, InvalidFixturesMatchNoSchemaAndAreRejected)
     }
 }
 
+// State files: contracts/state/<name>.schema.json with fixtures in contracts/state/fixtures/<name>/.
+// Each name needs a decoder here; a new schema without one fails the test.
+std::optional<std::string> DecodeAndReencodeState(std::string_view name, std::string_view text)
+{
+    if (name == "taskbar-restore")
+    {
+        const auto record = taskbar::DecodeRestoreRecord(text);
+        return record ? std::optional(taskbar::EncodeRestoreRecord(*record)) : std::nullopt;
+    }
+    ADD_FAILURE() << "no decoder for state file " << name;
+    return std::nullopt;
+}
+
+TEST(StateContracts, FixturesConformAndRoundTrip)
+{
+    const auto stateDir = ContractsDir() / "state";
+    const auto schemas = ListFiles(stateDir, ".schema.json");
+    ASSERT_FALSE(schemas.empty()) << stateDir;
+
+    for (const auto& schemaPath : schemas)
+    {
+        const auto file = schemaPath.filename().string();
+        const auto name = file.substr(0, file.size() - std::string_view(".schema.json").size());
+        SCOPED_TRACE(name);
+        json_validator schema;
+        schema.set_root_schema(json::parse(ReadLine(schemaPath)));
+        const auto fixtures = stateDir / "fixtures" / name;
+
+        const auto valid = ListFiles(fixtures / "valid", ".json");
+        EXPECT_FALSE(valid.empty());
+        for (const auto& fixture : valid)
+        {
+            SCOPED_TRACE(fixture.filename().string());
+            const auto text = ReadLine(fixture);
+            EXPECT_TRUE(Conforms(schema, json::parse(text))) << "schema rejects: " << text;
+            const auto reencoded = DecodeAndReencodeState(name, text);
+            ASSERT_TRUE(reencoded) << "decoder rejects: " << text;
+            EXPECT_EQ(json::parse(*reencoded), json::parse(text)) << *reencoded;
+        }
+
+        const auto invalid = ListFiles(fixtures / "invalid", ".json");
+        EXPECT_FALSE(invalid.empty());
+        for (const auto& fixture : invalid)
+        {
+            SCOPED_TRACE(fixture.filename().string());
+            const auto text = ReadLine(fixture);
+            const auto document = json::parse(text, nullptr, /*allow_exceptions=*/false);
+            if (!document.is_discarded())
+            {
+                EXPECT_FALSE(Conforms(schema, document)) << "schema accepts: " << text;
+            }
+            EXPECT_FALSE(DecodeAndReencodeState(name, text)) << "decoder accepts: " << text;
+        }
+    }
+}
+
 TEST(Contracts, EncodedPingMatchesFixture)
 {
     EXPECT_EQ(json::parse(Encode(Ping{42})),
@@ -153,6 +210,19 @@ TEST(Contracts, EncodedPongMatchesFixture)
 {
     EXPECT_EQ(json::parse(Encode(Pong{42})),
               json::parse(ReadLine(ContractsDir() / "fixtures/valid/pong.json")));
+}
+
+TEST(Contracts, EncodedSetTaskbarMatchesFixture)
+{
+    EXPECT_EQ(json::parse(Encode(SetTaskbar{true})),
+              json::parse(ReadLine(ContractsDir() / "fixtures/valid/set-taskbar-hidden.json")));
+}
+
+TEST(Contracts, EncodedTaskbarStateMatchesFixture)
+{
+    EXPECT_EQ(
+        json::parse(Encode(TaskbarState{false, TaskbarBlock::PanicHotkey})),
+        json::parse(ReadLine(ContractsDir() / "fixtures/valid/taskbar-state-blocked-panic-hotkey.json")));
 }
 
 } // namespace

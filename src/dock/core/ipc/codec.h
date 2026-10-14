@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -30,5 +31,9 @@ std::string Encode(const Message& message);
 DecodeResult Decode(std::string_view line) noexcept;
 
 const char* ToString(DecodeError error) noexcept;
+
+// TaskbarBlock as it appears on the wire: "none", "hotkeyUnavailable", ...
+std::string_view ToWireName(TaskbarBlock block) noexcept;
+std::optional<TaskbarBlock> TaskbarBlockFromWireName(std::string_view name) noexcept;
 
 } // namespace harbor::ipc

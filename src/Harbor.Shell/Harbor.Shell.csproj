@@ -22,4 +22,16 @@
     <ProjectReference Include="..\Harbor.Core\Harbor.Core.csproj" />
   </ItemGroup>
 
+  <!-- The dock Harbor Shell starts and supervises, from the CMake build of the same architecture and
+       configuration (scripts\build.ps1 builds it first). Without it, the Shell waits for a dock started by
+       hand. MSIX packaging (M7) replaces this. -->
+  <PropertyGroup>
+    <HarborDockArch Condition="'$(Platform)' == 'x64'">x64</HarborDockArch>
+    <HarborDockArch Condition="'$(Platform)' == 'ARM64'">arm64</HarborDockArch>
+    <HarborDockExe>$(MSBuildThisFileDirectory)..\..\build\msvc-$(HarborDockArch)\src\dock\$(Configuration)\harbor-dock.exe</HarborDockExe>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(HarborDockArch)' != '' And Exists('$(HarborDockExe)')">
+    <None Include="$(HarborDockExe)" Link="harbor-dock.exe" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+  </ItemGroup>
+
 </Project>

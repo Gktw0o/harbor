@@ -2,8 +2,20 @@
 
 A macOS-style dock and system-stats island for Windows 11, native on **x64 and ARM64**.
 
-> **Status: M0 (skeleton).** An empty dock window and the Harbor Shell app exchange `ping`/`pong`
-> over a per-user named pipe. Harbor does **not** hide or replace the taskbar yet.
+> **Status: M1 (safety first).** Harbor can hide the Windows taskbar, and gives it back on exit, crash,
+> hang, sign-out, or **Ctrl+Alt+Shift+H**. The dock itself is still a plain test window (M2).
+
+## If your taskbar is ever missing
+
+1. Press **Ctrl+Alt+Shift+H** (works while Harbor's dock runs, even if it is hung).
+2. Or click **Restore taskbar now** in Harbor Shell.
+3. Or press Ctrl+Shift+Esc, select **Windows Explorer** under Processes, and choose **Restart**.
+
+Harbor turns on Windows' "Automatically hide the taskbar" while it hides the taskbar, if it was off, and
+turns it off again when it gives the taskbar back. If that ever didn't happen (say Harbor crashed and was
+never started again), turn it off under Settings > Personalization > Taskbar > Taskbar behaviors, or just
+start Harbor Shell once: it restores the setting from its record. Logs are in `%LOCALAPPDATA%\Harbor\logs`.
+How this works: [ADR 0006](docs/adr/0006-hiding-the-taskbar.md), [ADR 0007](docs/adr/0007-taskbar-safety.md).
 
 ## Prerequisites
 
@@ -66,7 +78,17 @@ dotnet build Harbor.slnx -c Debug -p:Platform=x64      # or -p:Platform=ARM64
 dotnet test --solution Harbor.slnx -c Debug -p:Platform=x64 --no-build
 ```
 
-Set `HARBOR_DOCK_EXE` to a built `harbor-dock.exe` of the same architecture to include the end-to-end test.
+Set `HARBOR_DOCK_EXE` to a built `harbor-dock.exe` of the same architecture to include the end-to-end tests.
+Tests never touch your real taskbar: they use stand-in windows.
+
+Real-taskbar check (local only, never CI; your taskbar disappears for seconds at a time while it runs):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Arch arm64 -Config Release
+powershell -ExecutionPolicy Bypass -File scripts\safety-check.ps1 -Arch arm64 -ExerciseAutoHide
+```
+
+The rest, by hand: [docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md).
 
 Formatting:
 
@@ -77,26 +99,28 @@ dotnet format whitespace Harbor.slnx; dotnet format style Harbor.slnx   # C#
 
 ## Run
 
-Start the Shell, then the dock (either order works; the dock reconnects on its own):
+Start Harbor Shell; it starts the dock built next to it and watches over it:
 
 ```powershell
 src\Harbor.Shell\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64\Harbor.Shell.exe
-build\msvc-x64\src\dock\Debug\harbor-dock.exe
 ```
 
-The Shell shows `Dock connected · pong N · <round trip>`, and the dock's title shows the last ping.
+Turn on **Hide the Windows taskbar** to hide it. The Shell shows the link to the dock (`pong N · <round
+trip>`) and the taskbar's state. A dock you start yourself (`build\msvc-x64\src\dock\Debug\harbor-dock.exe`)
+is adopted when it connects.
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `src/dock/` | C++ dock: `core/` (portable logic), `ports/` (interfaces), `adapters/` (Win32), `app/` |
-| `src/Harbor.Shell/` | WinUI 3 app: settings, onboarding and the dock's watchdog (later milestones) |
-| `src/Harbor.Core/` | Shared C# code, including the IPC codec and pipe server |
+| `src/Harbor.Shell/` | WinUI 3 app: starts and watches the dock; settings and onboarding later |
+| `src/Harbor.Core/` | Shared C# code: IPC codec and pipe server, the dock's watchdog, taskbar restore, logs |
 | `src/Harbor.Sensors/` | Hardware sensors service (empty until milestone M4) |
-| `contracts/` | IPC message schemas and shared test fixtures, see [contracts/README.md](contracts/README.md) |
+| `contracts/` | IPC message and state-file schemas with shared test fixtures, see [contracts/README.md](contracts/README.md) |
 | `tests/` | C++ (`dock/`) and C# (`Harbor.Core.Tests/`) tests |
-| `docs/adr/` | Architecture decision records |
+| `scripts/` | `build.ps1` (build and test one architecture), `safety-check.ps1` (real-taskbar check) |
+| `docs/` | Architecture decision records (`adr/`), manual test checklists (`testing/`) |
 
 ## License
 

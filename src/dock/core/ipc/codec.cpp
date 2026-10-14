@@ -2,10 +2,11 @@
 
 #include <cstdint>
 #include <limits>
-#include <nlohmann/json.hpp>
-#include <set>
+#include <optional>
 #include <type_traits>
-#include <vector>
+#include <utility>
+
+#include "core/json/strict_json.h"
 
 namespace harbor::ipc
 {
@@ -13,57 +14,149 @@ namespace
 {
 
 using nlohmann::json;
+using nlohmann::ordered_json;
 
+constexpr std::pair<TaskbarBlock, std::string_view> kTaskbarBlockNames[] = {
+    {TaskbarBlock::None, "none"},
+    {TaskbarBlock::HotkeyUnavailable, "hotkeyUnavailable"},
+    {TaskbarBlock::PanicHotkey, "panicHotkey"},
+    {TaskbarBlock::ExplorerFighting, "explorerFighting"},
+    {TaskbarBlock::TaskbarNotFound, "taskbarNotFound"},
+    {TaskbarBlock::KillOnCloseJob, "killOnCloseJob"},
+};
+
+// The payload must be an object with exactly these keys. Returns nullopt if it is.
+template <size_t N> std::optional<DecodeError> CheckKeys(const json& payload, const char* const (&keys)[N])
+{
+    if (!payload.is_object())
+    {
+        return DecodeError::InvalidField;
+    }
+    for (const char* key : keys)
+    {
+        if (!payload.contains(key))
+        {
+            return DecodeError::MissingField;
+        }
+    }
+    if (payload.size() != N)
+    {
+        return DecodeError::UnexpectedField;
+    }
+    return std::nullopt;
+}
+
+// Payload of both ping and pong: exactly {"seq": <uint32>}.
+template <typename T> DecodeResult DecodeSeqPayload(const json& payload)
+{
+    if (const auto error = CheckKeys(payload, {"seq"}))
+    {
+        return *error;
+    }
+    // Negative integers parse as number_integer and fractions as number_float, so both fail here.
+    const auto& seq = payload.at("seq");
+    if (!seq.is_number_unsigned() || seq.get<std::uint64_t>() > std::numeric_limits<std::uint32_t>::max())
+    {
+        return DecodeError::InvalidField;
+    }
+    return Message{T{static_cast<std::uint32_t>(seq.get<std::uint64_t>())}};
+}
+
+// Each message type's name, version and payload.
 template <typename T> struct MessageTraits;
 
 template <> struct MessageTraits<Ping>
 {
     static constexpr std::string_view kType = "ping";
     static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const Ping& message)
+    {
+        return {{"seq", message.seq}};
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        return DecodeSeqPayload<Ping>(payload);
+    }
 };
 
 template <> struct MessageTraits<Pong>
 {
     static constexpr std::string_view kType = "pong";
     static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const Pong& message)
+    {
+        return {{"seq", message.seq}};
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        return DecodeSeqPayload<Pong>(payload);
+    }
 };
 
-// Payload of both ping and pong: exactly {"seq": <uint32>}.
-std::variant<std::uint32_t, DecodeError> DecodeSeqPayload(const json& payload)
+template <> struct MessageTraits<SetTaskbar>
 {
-    if (!payload.is_object())
+    static constexpr std::string_view kType = "setTaskbar";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const SetTaskbar& message)
     {
-        return DecodeError::InvalidField;
+        return {{"hidden", message.hidden}};
     }
-    const auto seq = payload.find("seq");
-    if (seq == payload.end())
+    static DecodeResult FromPayload(const json& payload)
     {
-        return DecodeError::MissingField;
+        if (const auto error = CheckKeys(payload, {"hidden"}))
+        {
+            return *error;
+        }
+        const auto& hidden = payload.at("hidden");
+        if (!hidden.is_boolean())
+        {
+            return DecodeError::InvalidField;
+        }
+        return Message{SetTaskbar{hidden.get<bool>()}};
     }
-    if (payload.size() != 1)
-    {
-        return DecodeError::UnexpectedField;
-    }
-    // Negative integers parse as number_integer and fractions as number_float, so both fail here.
-    if (!seq->is_number_unsigned() || seq->get<std::uint64_t>() > std::numeric_limits<std::uint32_t>::max())
-    {
-        return DecodeError::InvalidField;
-    }
-    return static_cast<std::uint32_t>(seq->get<std::uint64_t>());
-}
+};
 
-template <typename T> DecodeResult DecodeSeqMessage(std::uint64_t version, const json& payload)
+template <> struct MessageTraits<TaskbarState>
 {
+    static constexpr std::string_view kType = "taskbarState";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const TaskbarState& message)
+    {
+        return {{"hidden", message.hidden}, {"blocked", ToWireName(message.blocked)}};
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"hidden", "blocked"}))
+        {
+            return *error;
+        }
+        const auto& hidden = payload.at("hidden");
+        const auto& blocked = payload.at("blocked");
+        if (!hidden.is_boolean() || !blocked.is_string())
+        {
+            return DecodeError::InvalidField;
+        }
+        const auto block = TaskbarBlockFromWireName(blocked.get_ref<const std::string&>());
+        if (!block)
+        {
+            return DecodeError::InvalidField;
+        }
+        return Message{TaskbarState{hidden.get<bool>(), *block}};
+    }
+};
+
+template <typename T>
+std::optional<DecodeResult> DecodeIf(std::string_view type, std::uint64_t version, const json& payload)
+{
+    if (type != MessageTraits<T>::kType)
+    {
+        return std::nullopt;
+    }
     if (version != MessageTraits<T>::kVersion)
     {
         return DecodeError::UnsupportedVersion;
     }
-    const auto seq = DecodeSeqPayload(payload);
-    if (const auto* error = std::get_if<DecodeError>(&seq))
-    {
-        return *error;
-    }
-    return Message{T{std::get<std::uint32_t>(seq)}};
+    return MessageTraits<T>::FromPayload(payload);
 }
 
 DecodeResult DecodeDocument(const json& document)
@@ -90,13 +183,13 @@ DecodeResult DecodeDocument(const json& document)
 
     const auto& typeName = type->get_ref<const std::string&>();
     const auto versionNumber = version->get<std::uint64_t>();
-    if (typeName == MessageTraits<Ping>::kType)
+    for (const auto decode :
+         {&DecodeIf<Ping>, &DecodeIf<Pong>, &DecodeIf<SetTaskbar>, &DecodeIf<TaskbarState>})
     {
-        return DecodeSeqMessage<Ping>(versionNumber, *payload);
-    }
-    if (typeName == MessageTraits<Pong>::kType)
-    {
-        return DecodeSeqMessage<Pong>(versionNumber, *payload);
+        if (auto result = decode(typeName, versionNumber, *payload))
+        {
+            return std::move(*result);
+        }
     }
     return DecodeError::UnknownType;
 }
@@ -109,57 +202,56 @@ std::string Encode(const Message& message)
         [](const auto& typed) {
             using T = std::decay_t<decltype(typed)>;
             // ordered_json keeps the documented field order ("v", "type", "payload") for readable logs.
-            const nlohmann::ordered_json document{
+            const ordered_json document{
                 {"v", MessageTraits<T>::kVersion},
                 {"type", MessageTraits<T>::kType},
-                {"payload", {{"seq", typed.seq}}},
+                {"payload", MessageTraits<T>::Payload(typed)},
             };
             return document.dump();
         },
         message);
 }
 
+std::string_view ToWireName(TaskbarBlock block) noexcept
+{
+    for (const auto& [value, name] : kTaskbarBlockNames)
+    {
+        if (value == block)
+        {
+            return name;
+        }
+    }
+    return "none";
+}
+
+std::optional<TaskbarBlock> TaskbarBlockFromWireName(std::string_view name) noexcept
+{
+    for (const auto& [value, wireName] : kTaskbarBlockNames)
+    {
+        if (wireName == name)
+        {
+            return value;
+        }
+    }
+    return std::nullopt;
+}
+
 DecodeResult Decode(std::string_view line) noexcept
 {
     try
     {
-        // nlohmann keeps the last of duplicate keys, while System.Text.Json exposes all of them. Reject
-        // duplicates outright so the C++ and C# decoders never disagree about the same bytes.
-        std::vector<std::set<std::string, std::less<>>> keysPerObject;
-        bool duplicateKey = false;
-        const json::parser_callback_t trackKeys = [&](int, json::parse_event_t event, json& parsed) {
-            switch (event)
-            {
-            case json::parse_event_t::object_start:
-                keysPerObject.emplace_back();
-                break;
-            case json::parse_event_t::object_end:
-                keysPerObject.pop_back();
-                break;
-            case json::parse_event_t::key:
-                duplicateKey |= !keysPerObject.back().insert(parsed.get<std::string>()).second;
-                break;
-            default:
-                break;
-            }
-            return true;
-        };
-
-        const auto document = json::parse(line, trackKeys, /*allow_exceptions=*/false);
-        if (document.is_discarded())
+        const auto parsed = harbor::json::ParseStrict(line);
+        if (const auto* error = std::get_if<harbor::json::ParseError>(&parsed))
         {
-            return DecodeError::MalformedJson;
+            return *error == harbor::json::ParseError::DuplicateKey ? DecodeError::UnexpectedField
+                                                                    : DecodeError::MalformedJson;
         }
-        if (duplicateKey)
-        {
-            return DecodeError::UnexpectedField;
-        }
-        return DecodeDocument(document);
+        return DecodeDocument(std::get<json>(parsed));
     }
     catch (...)
     {
-        // Parsing is non-throwing and every access is type-checked first; this is the last line of
-        // defense for "bad IPC input never crashes the dock" (e.g. std::bad_alloc).
+        // Every access is type-checked first; this is the last line of defense for "bad IPC input never
+        // crashes the dock" (e.g. std::bad_alloc).
         return DecodeError::MalformedJson;
     }
 }

@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
 using Harbor.Core.Ipc;
+using Harbor.Core.Taskbar;
 
 namespace Harbor.Core.Tests;
 
@@ -55,6 +56,46 @@ public sealed class ContractTests
         }
     }
 
+    // State files: contracts/state/<name>.schema.json with fixtures in contracts/state/fixtures/<name>/.
+    // Each name needs a decoder here; a new schema without one fails the test.
+    private static byte[]? DecodeAndReencodeState(string name, byte[] text) => name switch
+    {
+        "taskbar-restore" => RestoreRecord.TryDecode(text, out var record) ? RestoreRecord.Encode(record) : null,
+        _ => throw new AssertFailedException($"no decoder for state file {name}"),
+    };
+
+    [TestMethod]
+    public void StateFixturesRoundTripOrAreRejected()
+    {
+        var stateDir = Path.Combine(ContractsDir, "state");
+        var schemas = Directory.GetFiles(stateDir, "*.schema.json");
+        Assert.AreNotEqual(0, schemas.Length, stateDir);
+
+        foreach (var schema in schemas)
+        {
+            var name = Path.GetFileName(schema)[..^".schema.json".Length];
+            var fixtures = Path.Combine(stateDir, "fixtures", name);
+
+            var valid = Directory.GetFiles(Path.Combine(fixtures, "valid"), "*.json");
+            Assert.AreNotEqual(0, valid.Length, $"{name}: no valid fixtures");
+            foreach (var fixture in valid)
+            {
+                var text = ReadLine(fixture);
+                var reencoded = DecodeAndReencodeState(name, text);
+                Assert.IsNotNull(reencoded, $"{name}/{Path.GetFileName(fixture)}: rejected");
+                Assert.IsTrue(JsonNode.DeepEquals(JsonNode.Parse(reencoded), JsonNode.Parse(text)),
+                    $"{name}/{Path.GetFileName(fixture)}: re-encoded as {Encoding.UTF8.GetString(reencoded)}");
+            }
+
+            var invalid = Directory.GetFiles(Path.Combine(fixtures, "invalid"), "*.json");
+            Assert.AreNotEqual(0, invalid.Length, $"{name}: no invalid fixtures");
+            foreach (var fixture in invalid)
+            {
+                Assert.IsNull(DecodeAndReencodeState(name, ReadLine(fixture)), $"{name}/{Path.GetFileName(fixture)}: accepted");
+            }
+        }
+    }
+
     [TestMethod]
     public void EncodedPingMatchesFixture() =>
         Assert.IsTrue(JsonNode.DeepEquals(
@@ -66,4 +107,30 @@ public sealed class ContractTests
         Assert.IsTrue(JsonNode.DeepEquals(
             JsonNode.Parse(MessageCodec.Encode(new Pong(42))),
             JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "pong.json")))));
+
+    [TestMethod]
+    public void EncodedSetTaskbarMatchesFixture() =>
+        Assert.IsTrue(JsonNode.DeepEquals(
+            JsonNode.Parse(MessageCodec.Encode(new SetTaskbar(Hidden: true))),
+            JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "set-taskbar-hidden.json")))));
+
+    [TestMethod]
+    public void EncodedTaskbarStateMatchesFixture() =>
+        Assert.IsTrue(JsonNode.DeepEquals(
+            JsonNode.Parse(MessageCodec.Encode(new TaskbarState(Hidden: false, TaskbarBlock.PanicHotkey))),
+            JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "taskbar-state-blocked-panic-hotkey.json")))));
+
+    // Every TaskbarBlock has a wire name, and a valid fixture uses it: an enum value added on one side
+    // without the other fails here or in the fixtures.
+    [TestMethod]
+    public void EveryTaskbarBlockHasAWireNameAndAFixture()
+    {
+        var fixtures = string.Join("\n", ListFixtures("valid").Select(File.ReadAllText));
+        foreach (var block in Enum.GetValues<TaskbarBlock>())
+        {
+            var name = MessageCodec.WireName(block);
+            Assert.IsTrue(MessageCodec.TryParseWireName(name, out var parsed) && parsed == block, $"{block}: {name}");
+            StringAssert.Contains(fixtures, $"\"blocked\":\"{name}\"", $"no valid fixture uses {name}");
+        }
+    }
 }

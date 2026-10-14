@@ -2,6 +2,9 @@ using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.AccessControl;
 using System.Security.Principal;
+using System.Threading.Channels;
+using Harbor.Core.Interop;
+using Harbor.Core.Logging;
 
 namespace Harbor.Core.Ipc;
 
@@ -9,22 +12,34 @@ namespace Harbor.Core.Ipc;
 /// <param name="Connected">Whether a dock is connected.</param>
 /// <param name="LastPongSeq">Seq of the most recent pong that answered the latest ping.</param>
 /// <param name="RoundTrip">Time between sending that ping and receiving its pong.</param>
-public sealed record ControlLinkStatus(bool Connected, uint? LastPongSeq = null, TimeSpan? RoundTrip = null);
+/// <param name="ClientProcessId">The connected dock's process id, if Windows reported it.</param>
+public sealed record ControlLinkStatus(bool Connected, uint? LastPongSeq = null, TimeSpan? RoundTrip = null, uint? ClientProcessId = null);
 
 /// <summary>
-/// Server end of the control channel. Serves one dock at a time: sends a ping every interval and reports
-/// each pong that answers the latest ping. Bad input is logged and dropped; a dock that disconnects is
-/// replaced by the next one that connects.
+/// Server end of the control channel. Serves one dock at a time and carries messages; it doesn't decide
+/// when to ping (the watchdog does, so a ping proves the watchdog is alive). Bad input is logged and
+/// dropped; a dock that disconnects is replaced by the next one that connects.
 /// </summary>
-public sealed class ControlPipeServer(string pipeName, TimeSpan pingInterval, Action<string>? log = null)
+public sealed class ControlPipeServer(string pipeName, ILog? log = null)
 {
+    // A dock that stops reading for this many messages is hung; the watchdog deals with it.
+    private const int OutboxCapacity = 64;
+
+    private volatile Connection? _connection;
+
     /// <summary>Raised on a background thread whenever the link status changes.</summary>
     public event Action<ControlLinkStatus>? StatusChanged;
+
+    /// <summary>Messages from the dock other than pongs, raised on a background thread.</summary>
+    public event Action<Message>? MessageReceived;
+
+    public bool IsConnected => _connection is not null;
 
     /// <summary>
     /// Serves connections until cancelled, then throws <see cref="OperationCanceledException"/>. If the pipe
     /// name is taken, throws <see cref="IOException"/> (another Harbor.Shell serves it) or
-    /// <see cref="UnauthorizedAccessException"/> (another process created it first).
+    /// <see cref="UnauthorizedAccessException"/> (another process created it first). The pipe exists by the
+    /// time this first returns to the caller.
     /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -38,9 +53,45 @@ public sealed class ControlPipeServer(string pipeName, TimeSpan pingInterval, Ac
 
             StatusChanged?.Invoke(new ControlLinkStatus(Connected: false));
             await pipe.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-            StatusChanged?.Invoke(new ControlLinkStatus(Connected: true));
-            await ServeAsync(pipe, cancellationToken).ConfigureAwait(false);
+            var connection = new Connection(
+                NativeMethods.GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var clientProcessId) ? clientProcessId : null);
+            _connection = connection;
+            StatusChanged?.Invoke(new ControlLinkStatus(Connected: true, ClientProcessId: connection.ProcessId));
+            try
+            {
+                await ServeAsync(pipe, connection, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                _connection = null;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            StatusChanged?.Invoke(new ControlLinkStatus(Connected: false));
         }
+    }
+
+    /// <summary>Queues a message for the connected dock. False if none is connected or it stopped reading.</summary>
+    public bool TrySend(Message message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        var connection = _connection;
+        return connection is not null && connection.Outbox.Writer.TryWrite([.. MessageCodec.Encode(message), (byte)'\n']);
+    }
+
+    /// <summary>
+    /// Sends the next ping; only a pong for it counts from now on. Returns its seq, or null if no dock is
+    /// connected or it stopped reading.
+    /// </summary>
+    public uint? TryPing()
+    {
+        var connection = _connection;
+        if (connection is null)
+        {
+            return null;
+        }
+        var seq = connection.Outstanding.Next(Stopwatch.GetTimestamp());
+        return TrySend(new Ping(seq)) ? seq : null;
     }
 
     /// <summary>
@@ -59,38 +110,30 @@ public sealed class ControlPipeServer(string pipeName, TimeSpan pingInterval, Ac
         return security;
     }
 
-    private async Task ServeAsync(NamedPipeServerStream pipe, CancellationToken cancellationToken)
+    private async Task ServeAsync(NamedPipeServerStream pipe, Connection connection, CancellationToken cancellationToken)
     {
-        using var connection = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var outstanding = new OutstandingPing();
-        var reading = ReadLoopAsync(pipe, outstanding, connection.Token);
-        var pinging = PingLoopAsync(pipe, outstanding, connection.Token);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var reading = ReadLoopAsync(pipe, connection, linked.Token);
+        var writing = WriteLoopAsync(pipe, connection, linked.Token);
 
         // Either loop ending means the connection is over: the dock went away, or a write failed.
-        await Task.WhenAny(reading, pinging).ConfigureAwait(false);
-        await connection.CancelAsync().ConfigureAwait(false);
+        await Task.WhenAny(reading, writing).ConfigureAwait(false);
+        connection.Outbox.Writer.TryComplete();
+        await linked.CancelAsync().ConfigureAwait(false);
         await IgnoreDisconnectAsync(reading).ConfigureAwait(false);
-        await IgnoreDisconnectAsync(pinging).ConfigureAwait(false);
-
-        cancellationToken.ThrowIfCancellationRequested();
-        StatusChanged?.Invoke(new ControlLinkStatus(Connected: false));
+        await IgnoreDisconnectAsync(writing).ConfigureAwait(false);
     }
 
-    private async Task PingLoopAsync(NamedPipeServerStream pipe, OutstandingPing outstanding, CancellationToken cancellationToken)
+    private static async Task WriteLoopAsync(NamedPipeServerStream pipe, Connection connection, CancellationToken cancellationToken)
     {
-        using var timer = new PeriodicTimer(pingInterval);
-        uint seq = 0;
-        do
+        // The only writer, so lines never interleave.
+        await foreach (var line in connection.Outbox.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
         {
-            seq = unchecked(seq + 1);
-            outstanding.Set(seq, Stopwatch.GetTimestamp());
-            byte[] line = [.. MessageCodec.Encode(new Ping(seq)), (byte)'\n'];
             await pipe.WriteAsync(line, cancellationToken).ConfigureAwait(false);
         }
-        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false));
     }
 
-    private async Task ReadLoopAsync(NamedPipeServerStream pipe, OutstandingPing outstanding, CancellationToken cancellationToken)
+    private async Task ReadLoopAsync(NamedPipeServerStream pipe, Connection connection, CancellationToken cancellationToken)
     {
         var framer = new LineFramer();
         var buffer = new byte[4096];
@@ -105,33 +148,38 @@ public sealed class ControlPipeServer(string pipeName, TimeSpan pingInterval, Ac
             var droppedBefore = framer.DroppedLineCount;
             foreach (var line in framer.Push(buffer.AsSpan(0, read)))
             {
-                HandleLine(line, outstanding);
+                HandleLine(line, connection);
             }
             if (framer.DroppedLineCount != droppedBefore)
             {
-                log?.Invoke("control channel: dropped an oversized line");
+                log?.Warn("control channel: dropped an oversized line");
             }
         }
     }
 
-    private void HandleLine(byte[] line, OutstandingPing outstanding)
+    private void HandleLine(byte[] line, Connection connection)
     {
         if (!MessageCodec.TryDecode(line, out var message, out var error))
         {
-            log?.Invoke($"control channel: dropped message ({error})");
+            log?.Warn($"control channel: dropped message ({error})");
             return;
         }
-        if (message is not Pong pong)
+        switch (message)
         {
-            log?.Invoke($"control channel: ignored unexpected {message.GetType().Name}");
-            return;
+            case Pong pong when connection.Outstanding.TryMatch(pong.Seq, out var sentAt):
+                StatusChanged?.Invoke(new ControlLinkStatus(
+                    Connected: true, pong.Seq, Stopwatch.GetElapsedTime(sentAt), connection.ProcessId));
+                break;
+            case Pong pong:
+                log?.Warn($"control channel: ignored stale pong {pong.Seq}");
+                break;
+            case Ping:
+                log?.Warn("control channel: ignored unexpected Ping");
+                break;
+            default:
+                MessageReceived?.Invoke(message);
+                break;
         }
-        if (!outstanding.TryMatch(pong.Seq, out var sentAt))
-        {
-            log?.Invoke($"control channel: ignored stale pong {pong.Seq}");
-            return;
-        }
-        StatusChanged?.Invoke(new ControlLinkStatus(Connected: true, pong.Seq, Stopwatch.GetElapsedTime(sentAt)));
     }
 
     private static async Task IgnoreDisconnectAsync(Task task)
@@ -145,18 +193,32 @@ public sealed class ControlPipeServer(string pipeName, TimeSpan pingInterval, Ac
         }
     }
 
-    // The latest ping sent; written by the ping loop, read by the read loop.
+    private sealed class Connection(uint? processId)
+    {
+        public uint? ProcessId { get; } = processId;
+
+        public Channel<byte[]> Outbox { get; } = Channel.CreateBounded<byte[]>(
+            new BoundedChannelOptions(OutboxCapacity) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
+
+        public OutstandingPing Outstanding { get; } = new();
+    }
+
+    // The latest ping sent; written by whoever pings, read by the read loop.
     private sealed class OutstandingPing
     {
         private readonly Lock _lock = new();
+        private bool _sent;
         private uint _seq;
         private long _sentAt;
 
-        public void Set(uint seq, long sentAt)
+        public uint Next(long sentAt)
         {
             lock (_lock)
             {
-                (_seq, _sentAt) = (seq, sentAt);
+                _sent = true;
+                _seq = unchecked(_seq + 1);
+                _sentAt = sentAt;
+                return _seq;
             }
         }
 
@@ -165,7 +227,7 @@ public sealed class ControlPipeServer(string pipeName, TimeSpan pingInterval, Ac
             lock (_lock)
             {
                 sentAt = _sentAt;
-                return seq == _seq;
+                return _sent && seq == _seq;
             }
         }
     }

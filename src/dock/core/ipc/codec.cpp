@@ -95,6 +95,42 @@ bool IsIconFileName(std::string_view name) noexcept
                        [](char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
 }
 
+// null, or bounded text.
+bool IsOptionalText(const json& value, std::size_t maxLength) noexcept
+{
+    return value.is_null() || IsBoundedText(value, maxLength);
+}
+
+// An integer from 1 to 2^32 - 1 (ids and window handles).
+std::optional<std::uint32_t> PositiveUint32(const json& value) noexcept
+{
+    if (!value.is_number_unsigned())
+    {
+        return std::nullopt;
+    }
+    const auto number = value.get<std::uint64_t>();
+    if (number == 0 || number > std::numeric_limits<std::uint32_t>::max())
+    {
+        return std::nullopt;
+    }
+    return static_cast<std::uint32_t>(number);
+}
+
+std::optional<std::string> OptionalString(const json& value)
+{
+    return value.is_null() ? std::nullopt : std::optional(value.get<std::string>());
+}
+
+ordered_json OptionalJson(const std::optional<std::string>& value)
+{
+    return value ? ordered_json(*value) : ordered_json(nullptr);
+}
+
+ordered_json TargetJson(const AppTarget& target)
+{
+    return {{"kind", WireName(target.kind)}, {"target", target.target}};
+}
+
 // The payload must be an object with exactly these keys. Returns nullopt if it is.
 template <size_t N> std::optional<DecodeError> CheckKeys(const json& payload, const char* const (&keys)[N])
 {
@@ -271,6 +307,135 @@ template <> struct MessageTraits<DockItems>
     }
 };
 
+// {"kind", "target"}, as in dockItems; nullopt if it isn't one.
+std::optional<AppTarget> TargetFrom(const json& value)
+{
+    if (CheckKeys(value, {"kind", "target"}))
+    {
+        return std::nullopt;
+    }
+    const auto kind = DockItemKindFrom(value.at("kind"));
+    if (!kind || !IsBoundedText(value.at("target"), DockItems::kMaxTargetLength))
+    {
+        return std::nullopt;
+    }
+    return AppTarget{*kind, value.at("target").get<std::string>()};
+}
+
+template <> struct MessageTraits<AppLookup>
+{
+    static constexpr std::string_view kType = "appLookup";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const AppLookup& message)
+    {
+        return {
+            {"id", message.id},
+            {"aumid", OptionalJson(message.aumid)},
+            {"exe", OptionalJson(message.exe)},
+            {"window", message.window ? ordered_json(*message.window) : ordered_json(nullptr)},
+        };
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"id", "aumid", "exe", "window"}))
+        {
+            return *error;
+        }
+        const auto id = PositiveUint32(payload.at("id"));
+        const auto& window = payload.at("window");
+        const auto windowId = PositiveUint32(window);
+        if (!id || !IsOptionalText(payload.at("aumid"), AppLookup::kMaxAumidLength) ||
+            !IsOptionalText(payload.at("exe"), AppLookup::kMaxExeLength) || !(window.is_null() || windowId))
+        {
+            return DecodeError::InvalidField;
+        }
+        return Message{AppLookup{
+            .id = *id,
+            .aumid = OptionalString(payload.at("aumid")),
+            .exe = OptionalString(payload.at("exe")),
+            .window = windowId,
+        }};
+    }
+};
+
+template <> struct MessageTraits<AppInfo>
+{
+    static constexpr std::string_view kType = "appInfo";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const AppInfo& message)
+    {
+        return {
+            {"id", message.id},
+            {"name", message.name},
+            {"icon", OptionalJson(message.icon)},
+            {"pinned", message.pinned ? TargetJson(*message.pinned) : ordered_json(nullptr)},
+            {"launch", message.launch ? TargetJson(*message.launch) : ordered_json(nullptr)},
+        };
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"id", "name", "icon", "pinned", "launch"}))
+        {
+            return *error;
+        }
+        const auto id = PositiveUint32(payload.at("id"));
+        const auto& icon = payload.at("icon");
+        const auto& pinned = payload.at("pinned");
+        const auto& launch = payload.at("launch");
+        const auto pinnedTarget = pinned.is_null() ? std::nullopt : TargetFrom(pinned);
+        const auto launchTarget = launch.is_null() ? std::nullopt : TargetFrom(launch);
+        if (!id || !IsBoundedText(payload.at("name"), DockItems::kMaxNameLength) ||
+            !(icon.is_null() || (icon.is_string() && IsIconFileName(icon.get_ref<const std::string&>()))) ||
+            (!pinned.is_null() && !pinnedTarget) || (!launch.is_null() && !launchTarget))
+        {
+            return DecodeError::InvalidField;
+        }
+        return Message{AppInfo{
+            .id = *id,
+            .name = payload.at("name").get<std::string>(),
+            .icon = OptionalString(icon),
+            .pinned = pinnedTarget,
+            .launch = launchTarget,
+        }};
+    }
+};
+
+template <> struct MessageTraits<PinRequest>
+{
+    static constexpr std::string_view kType = "pinRequest";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const PinRequest& message)
+    {
+        return {
+            {"action", message.action == PinAction::Pin ? "pin" : "unpin"},
+            {"kind", WireName(message.item.kind)},
+            {"target", message.item.target},
+        };
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"action", "kind", "target"}))
+        {
+            return *error;
+        }
+        const auto& action = payload.at("action");
+        const auto kind = DockItemKindFrom(payload.at("kind"));
+        if (!action.is_string() || !kind || !IsBoundedText(payload.at("target"), DockItems::kMaxTargetLength))
+        {
+            return DecodeError::InvalidField;
+        }
+        const auto& actionName = action.get_ref<const std::string&>();
+        if (actionName != "pin" && actionName != "unpin")
+        {
+            return DecodeError::InvalidField;
+        }
+        return Message{PinRequest{
+            .action = actionName == "pin" ? PinAction::Pin : PinAction::Unpin,
+            .item = {*kind, payload.at("target").get<std::string>()},
+        }};
+    }
+};
+
 template <typename T>
 std::optional<DecodeResult> DecodeIf(std::string_view type, std::uint64_t version, const json& payload)
 {
@@ -309,8 +474,9 @@ DecodeResult DecodeDocument(const json& document)
 
     const auto& typeName = type->get_ref<const std::string&>();
     const auto versionNumber = version->get<std::uint64_t>();
-    for (const auto decode : {&DecodeIf<Ping>, &DecodeIf<Pong>, &DecodeIf<SetTaskbar>,
-                              &DecodeIf<TaskbarState>, &DecodeIf<DockItems>})
+    for (const auto decode :
+         {&DecodeIf<Ping>, &DecodeIf<Pong>, &DecodeIf<SetTaskbar>, &DecodeIf<TaskbarState>,
+          &DecodeIf<DockItems>, &DecodeIf<AppLookup>, &DecodeIf<AppInfo>, &DecodeIf<PinRequest>})
     {
         if (auto result = decode(typeName, versionNumber, *payload))
         {

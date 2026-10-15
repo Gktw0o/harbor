@@ -90,6 +90,60 @@ struct DockItems
     friend bool operator==(const DockItems&, const DockItems&) = default;
 };
 
-using Message = std::variant<Ping, Pong, SetTaskbar, TaskbarState, DockItems>;
+// Something the dock can start or pin, as in dockItems (bounded like DockItem::target).
+struct AppTarget
+{
+    DockItemKind kind = DockItemKind::App;
+    std::string target;
+    friend bool operator==(const AppTarget&, const AppTarget&) = default;
+};
+
+// Dock to Harbor.Shell: a running app the dock hasn't had named yet (contracts/appLookup.schema.json, v1).
+// The Shell answers with AppInfo for the same id.
+struct AppLookup
+{
+    static constexpr std::size_t kMaxAumidLength = 130;
+    static constexpr std::size_t kMaxExeLength = 2048;
+
+    // The dock's number for the app, never reused for another app. Not 0.
+    std::uint32_t id = 0;
+    std::optional<std::string> aumid;
+    std::optional<std::string> exe;
+    // One of its windows (HWND), for the Shell to read the window's relaunch name and icon.
+    std::optional<std::uint32_t> window;
+    friend bool operator==(const AppLookup&, const AppLookup&) = default;
+};
+
+// Harbor.Shell to dock: what the Shell knows about a running app (contracts/appInfo.schema.json, v1). May
+// come twice for one id: at once from what the Shell knows, then with the real name and icon.
+struct AppInfo
+{
+    std::uint32_t id = 0;
+    // Bounded like DockItem::name.
+    std::string name;
+    std::optional<std::string> icon;
+    // The pinned item this app is.
+    std::optional<AppTarget> pinned;
+    // How to start it again, and what pinning it pins.
+    std::optional<AppTarget> launch;
+    friend bool operator==(const AppInfo&, const AppInfo&) = default;
+};
+
+enum class PinAction
+{
+    Pin,
+    Unpin,
+};
+
+// Dock to Harbor.Shell: the user asked to pin or unpin an app (contracts/pinRequest.schema.json, v1). The
+// dock changes nothing until the Shell's next dockItems.
+struct PinRequest
+{
+    PinAction action = PinAction::Pin;
+    AppTarget item;
+    friend bool operator==(const PinRequest&, const PinRequest&) = default;
+};
+
+using Message = std::variant<Ping, Pong, SetTaskbar, TaskbarState, DockItems, AppLookup, AppInfo, PinRequest>;
 
 } // namespace harbor::ipc

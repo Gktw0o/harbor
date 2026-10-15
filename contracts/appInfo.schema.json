@@ -1,0 +1,52 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:contract:appInfo",
+  "title": "appInfo v1",
+  "description": "Harbor.Shell to dock, on the control channel: what the Shell knows about a running app the dock asked about with appLookup (docs/adr/0010). It may answer twice for one id: first from what it knows at once, then with the real name and icon. After a change to the pinned list it sends dockItems, then every appInfo again. Lengths count Unicode characters (code points); control characters are not allowed. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "definitions": {
+    "target": {
+      "description": "Something the dock can start or pin, as in dockItems. app: an AppUserModelID, started as shell:AppsFolder\\<target>. path: an absolute path to an .exe or .lnk.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "target"],
+      "properties": {
+        "kind": { "enum": ["app", "path"] },
+        "target": { "type": "string", "minLength": 1, "maxLength": 260, "pattern": "^[^\\x00-\\x1f]*$" }
+      }
+    }
+  },
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "appInfo" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "icon", "pinned", "launch"],
+      "properties": {
+        "id": { "description": "The id from appLookup.", "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "name": {
+          "description": "Display name, for people and screen readers.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[^\\x00-\\x1f]*$"
+        },
+        "icon": {
+          "description": "File name of the app's icon in the icons folder (contracts/README.md), or null.",
+          "anyOf": [{ "type": "null" }, { "type": "string", "pattern": "^[0-9a-f]{16}\\.bgra$" }]
+        },
+        "pinned": {
+          "description": "The pinned item (from dockItems) this app is, or null if it isn't pinned.",
+          "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/target" }]
+        },
+        "launch": {
+          "description": "How to start the app (another window), and what pinning it would pin; null if the Shell doesn't know.",
+          "anyOf": [{ "type": "null" }, { "$ref": "#/definitions/target" }]
+        }
+      }
+    }
+  }
+}

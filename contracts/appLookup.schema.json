@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:contract:appLookup",
+  "title": "appLookup v1",
+  "description": "Dock to Harbor.Shell, on the control channel: a running app the dock hasn't had named yet (docs/adr/0010). The Shell answers with appInfo for the same id. Sent once per app the dock sees, and again for every live one after a reconnect. Lengths count Unicode characters (code points); control characters are not allowed. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "appLookup" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "aumid", "exe", "window"],
+      "properties": {
+        "id": {
+          "description": "The dock's number for the app: one per app identity, never reused for another app.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        },
+        "aumid": {
+          "description": "The app's AppUserModelID (the window's, or its package's), or null if it has none.",
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 130, "pattern": "^[^\\x00-\\x1f]*$" }]
+        },
+        "exe": {
+          "description": "The full path of the app's executable, or null if the dock couldn't read it.",
+          "anyOf": [{ "type": "null" }, { "type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[^\\x00-\\x1f]*$" }]
+        },
+        "window": {
+          "description": "One of the app's windows (its HWND), so the Shell can read the window's relaunch name and icon; null if none.",
+          "anyOf": [{ "type": "null" }, { "type": "integer", "minimum": 1, "maximum": 4294967295 }]
+        }
+      }
+    }
+  }
+}

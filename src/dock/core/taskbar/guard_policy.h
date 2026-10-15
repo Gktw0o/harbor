@@ -40,7 +40,9 @@ struct GuardDecision
 //   3. the panic hotkey is registered;
 //   4. no panic or Explorer-fighting block is set (only a request to show the taskbar clears one);
 //   5. a taskbar exists;
-//   6. the dock isn't in a kill-on-close job.
+//   6. the dock isn't in a kill-on-close job;
+//   7. the island is on screen (drawn and visible on the primary monitor): without it, the user would have
+//      neither a taskbar nor a dock.
 // The caller adds its own vetoes (the process is crashing, the session is ending, the dock is exiting).
 class GuardPolicy
 {
@@ -58,6 +60,8 @@ class GuardPolicy
     void OnPanic();
     void OnKillOnCloseJob(bool inside);
     void OnTaskbarFound(bool found);
+    // Whether the island is on screen. Off until the dock says so.
+    void OnPresentable(bool presentable);
     // Explorer showed the hidden taskbar again and the dock hid it. True if that tripped the circuit
     // breaker, which blocks hiding like the panic hotkey does.
     bool OnRehide(Milliseconds now);
@@ -73,6 +77,7 @@ class GuardPolicy
     bool m_hotkeyRegistered = false;
     bool m_killOnCloseJob = false;
     bool m_taskbarFound = true;
+    bool m_presentable = false;
     ipc::TaskbarBlock m_latch = ipc::TaskbarBlock::None;
     std::deque<Milliseconds> m_rehides;
 };

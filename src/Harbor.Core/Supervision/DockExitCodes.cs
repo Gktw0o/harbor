@@ -11,4 +11,7 @@ public static class DockExitCodes
 
     /// <summary>Used by the watchdog when it ends a hung dock.</summary>
     public const int KilledByWatchdog = 0x20000002;
+
+    /// <summary>The dock can't draw (composition failed to start): starting it again won't help.</summary>
+    public const int GraphicsUnavailable = 0x20000003;
 }

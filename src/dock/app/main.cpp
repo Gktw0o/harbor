@@ -2,12 +2,17 @@
 
 #include <windows.h>
 
+#include <objbase.h>
+
+#include <chrono>
 #include <format>
+#include <optional>
 #include <shellapi.h>
 #include <string>
 #include <vector>
 #include <wil/resource.h>
 
+#include "adapters/composition_renderer.h"
 #include "adapters/data_dir.h"
 #include "adapters/file_log.h"
 #include "adapters/named_pipe_client.h"
@@ -47,9 +52,44 @@ std::vector<std::wstring> CommandLineArguments()
     return arguments;
 }
 
+// Test docks only: signaling the named event "Local\Harbor.Test.<id>.<name>" posts a message to the dock
+// window, so tests can make the dock fail in ways that are hard to cause from outside.
+class TestHook
+{
+  public:
+    TestHook(const std::wstring& testId, const wchar_t* name, HWND window, UINT message)
+        : m_window(window), m_message(message)
+    {
+        if (FAILED(m_event.create(wil::EventOptions::ManualReset,
+                                  (L"Local\\Harbor.Test." + testId + L"." + name).c_str())))
+        {
+            return;
+        }
+        m_wait.reset(CreateThreadpoolWait(
+            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
+                const auto* self = static_cast<const TestHook*>(context);
+                PostMessageW(self->m_window, self->m_message, 0, 0);
+            },
+            this, nullptr));
+        if (m_wait)
+        {
+            SetThreadpoolWait(m_wait.get(), m_event.get(), nullptr);
+        }
+    }
+    TestHook(const TestHook&) = delete;
+    TestHook& operator=(const TestHook&) = delete;
+
+  private:
+    HWND m_window;
+    UINT m_message;
+    wil::unique_event_nothrow m_event;
+    // Declared after the event: closed first, waiting for a callback in progress.
+    wil::unique_threadpool_wait m_wait;
+};
+
 } // namespace
 
-int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int showCommand)
+int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int)
 {
     const auto arguments = CommandLineArguments();
     const std::vector<std::wstring_view> argumentViews(arguments.begin(), arguments.end());
@@ -69,6 +109,8 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     // Crash handlers first, so they cover everything after. They only act on windows the dock hid.
     static harbor::dock::HiddenWindows hiddenWindows;
     harbor::dock::crash_guard::Install(hiddenWindows);
+    // A hung UI thread must not turn the island into a framed "Not Responding" ghost window over everything.
+    DisableProcessWindowsGhosting();
 
     DWORD sessionId = 0;
     ProcessIdToSessionId(GetCurrentProcessId(), &sessionId);
@@ -120,31 +162,48 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
         return ERROR_GEN_FAILURE;
     }
 
-    harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
-    harbor::dock::DockWindow window(controlChannel, guard, log);
-    if (!window.Create(instance, showCommand))
+    // The UI thread is a single-threaded apartment: composition, and later UI Automation, need COM here.
+    const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const wil::unique_couninitialize_call uninitializeCom(SUCCEEDED(comResult));
+    // Declared before the window, so it outlives it; torn down after guard.Stop() put the taskbar back.
+    harbor::adapters::CompositionRenderer renderer(log);
+    if (FAILED(comResult) || !renderer.Initialize())
     {
+        // Already logged. Starting again wouldn't help; Harbor Shell restores the taskbar and says why.
+        return exit_code::kGraphicsUnavailable;
+    }
+
+    harbor::adapters::NamedPipeClient controlChannel(harbor::adapters::PipePath(pipeName));
+    // A test dock whose test died without ending it goes away by itself.
+    const auto orphanTimeout = testMode
+                                   ? std::chrono::milliseconds(options.testOrphanTimeoutMs.value_or(30'000))
+                                   : std::chrono::milliseconds::zero();
+    harbor::dock::DockWindow window(controlChannel, guard, renderer, log,
+                                    {.orphanTimeout = orphanTimeout,
+                                     .iconsDir = dataDir.empty() ? dataDir : dataDir / L"icons",
+                                     .testAppBar = testMode});
+    switch (window.Create(instance))
+    {
+    case harbor::dock::DockWindow::CreateResult::Created:
+        break;
+    case harbor::dock::DockWindow::CreateResult::GraphicsFailed:
+        return exit_code::kGraphicsUnavailable;
+    case harbor::dock::DockWindow::CreateResult::WindowFailed: {
         const DWORD error = GetLastError();
         log.Error(std::format("couldn't create the dock window: error {}", error));
         return static_cast<int>(error);
     }
+    }
 
-    // Test docks only: signaling "Local\Harbor.Test.<id>.hang-ui" hangs the UI thread (see DockWindow).
-    wil::unique_event_nothrow hangEvent;
-    wil::unique_threadpool_wait hangWait;
-    if (testMode &&
-        SUCCEEDED(hangEvent.create(wil::EventOptions::ManualReset,
-                                   (L"Local\\Harbor.Test." + *options.testTaskbarId + L".hang-ui").c_str())))
+    // Test docks only: "hang-ui" hangs the UI thread; "lose-device" rehearses losing the graphics device.
+    std::optional<TestHook> hangUi;
+    std::optional<TestHook> loseDevice;
+    if (testMode)
     {
-        hangWait.reset(CreateThreadpoolWait(
-            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
-                PostMessageW(static_cast<HWND>(context), harbor::dock::DockWindow::kTestHangMessage, 0, 0);
-            },
-            window.Hwnd(), nullptr));
-        if (hangWait)
-        {
-            SetThreadpoolWait(hangWait.get(), hangEvent.get(), nullptr);
-        }
+        hangUi.emplace(*options.testTaskbarId, L"hang-ui", window.Hwnd(),
+                       harbor::dock::DockWindow::kTestHangMessage);
+        loseDevice.emplace(*options.testTaskbarId, L"lose-device", window.Hwnd(),
+                           harbor::dock::DockWindow::kDeviceLostMessage);
     }
 
     MSG message{};
@@ -153,8 +212,10 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
-    // Normal exit: put the taskbar back before the process ends.
+    // Normal exit, in order: the taskbar back first (nothing may delay that), then the AppBar and the window,
+    // then composition (the renderer goes with this scope).
     guard.Stop();
+    window.Shutdown();
     log.Info(std::format("harbor-dock exiting with code {}", message.wParam));
     return static_cast<int>(message.wParam);
 }

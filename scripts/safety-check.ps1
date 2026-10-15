@@ -22,6 +22,11 @@
       idle         the dock's CPU and memory with the taskbar hidden (rule 4: < 0.5 % CPU, < 40 MB).
       explorer     Explorer restarts (only with -IncludeExplorerRestart; closes File Explorer windows):
                    the dock hides the new taskbar again.
+      appbar-kill     the dock's screen strip (AppBar) is reserved while it runs; with Harbor Shell closed and
+                      the dock killed, Windows frees it (maximized windows reach the taskbar again).
+      appbar-restart  the dock is killed and Harbor Shell starts it again: one strip, not two.
+      stop-dock       "Stop dock" in Harbor Shell: the dock closes, the taskbar and the strip come back, and
+                      the dock isn't started again.
 
 .PARAMETER ExerciseAutoHide
     If your taskbar's auto-hide is on, turn it off for the run, so Harbor has to turn it on and restore it
@@ -36,8 +41,10 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string] $Arch,
 
-    [ValidateSet('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle', 'explorer')]
-    [string[]] $Scenario = @('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle'),
+    [ValidateSet('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle', 'explorer',
+        'appbar-kill', 'appbar-restart', 'stop-dock')]
+    [string[]] $Scenario = @('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle',
+        'appbar-kill', 'appbar-restart', 'stop-dock'),
 
     [switch] $ExerciseAutoHide,
 
@@ -117,7 +124,18 @@ public static void PressKeys(params byte[] keys) {
     foreach (var key in keys) keybd_event(key, 0, 0, UIntPtr.Zero);
     for (var i = keys.Length - 1; i >= 0; i--) keybd_event(keys[i], 0, 2, UIntPtr.Zero);
 }
+[DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action, uint param, ref Rect rect, uint winIni);
+[DllImport("user32.dll")] static extern IntPtr MonitorFromPoint(long point, uint flags);
+[StructLayout(LayoutKind.Sequential)] struct MonitorInfo { public int Size; public Rect Monitor; public Rect Work; public uint Flags; }
+[DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+// The primary monitor's work area and full bottom edge, in physical pixels (call PerMonitorAware first).
+public static int WorkBottom() { var r = new Rect(); SystemParametersInfo(0x30, 0, ref r, 0); return r.Bottom; }
+public static int MonitorBottom() { var i = new MonitorInfo(); i.Size = Marshal.SizeOf(i); GetMonitorInfo(MonitorFromPoint(0, 1), ref i); return i.Monitor.Bottom; }
+public static void PerMonitorAware() { SetThreadDpiAwarenessContext((IntPtr)(-4)); }
 '@
+# Physical pixels for the work-area checks, like the dock's own numbers.
+[HarborSafety.Native]::PerMonitorAware() | Out-Null
 
 function Wait-Until {
     param([scriptblock] $Condition, [int] $TimeoutMs)
@@ -172,6 +190,21 @@ function Enable-Hide {
     Start-Sleep -Milliseconds 500
 }
 
+# The dock reserved its strip: the work area ends above the bottom edge (the taskbar is hidden then).
+function Wait-StripReserved {
+    $ms = Wait-Until { [HarborSafety.Native]::WorkBottom() -lt [HarborSafety.Native]::MonitorBottom() - 20 } 10000
+    if ($ms -lt 0) { throw 'The dock reserved no strip (the work area reaches the bottom of the screen).' }
+    return [HarborSafety.Native]::MonitorBottom() - [HarborSafety.Native]::WorkBottom()
+}
+
+function Invoke-ShellButton {
+    param([string] $Name)
+    $condition = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, $Name)
+    $button = (Get-ShellWindow).FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)
+    if ($null -eq $button) { throw "Harbor Shell has no '$Name' button." }
+    $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+
 function Stop-Harbor {
     Get-Process -Name 'Harbor.Shell', 'harbor-dock' -ErrorAction SilentlyContinue | Stop-Process -Force
     Wait-Until { $null -eq (Get-Process -Name 'Harbor.Shell', 'harbor-dock' -ErrorAction SilentlyContinue) } 10000 | Out-Null
@@ -210,12 +243,14 @@ if (-not [HarborSafety.Native]::PrimaryVisible()) {
 }
 Write-Host "Taskbar before the run: visible, auto-hide $(if ($userAutoHide) { 'on' } else { 'off' })."
 $script:runAutoHide = $userAutoHide
+$script:runWorkBottom = [HarborSafety.Native]::WorkBottom()
 try {
     if ($ExerciseAutoHide -and $userAutoHide -eq 1) {
         Write-Host 'Turning auto-hide off for the run (-ExerciseAutoHide).'
         [HarborSafety.Native]::SetAutoHide(0)
         $script:runAutoHide = 0
         Start-Sleep -Seconds 1
+        $script:runWorkBottom = [HarborSafety.Native]::WorkBottom()
     }
 
     foreach ($name in $Scenario) {
@@ -224,6 +259,8 @@ try {
             Start-Harbor
             Enable-Hide
             $dock = Get-Process harbor-dock
+            # Opens a handle now: without one, a Get-Process object can't tell the exit code later.
+            $null = $dock.Handle
             switch ($name) {
                 'panic' {
                     [HarborSafety.Native]::PressKeys(0x11, 0x12, 0x10, 0x48) # Ctrl, Alt, Shift, H
@@ -289,6 +326,36 @@ try {
                     $privateMb = $dock.PrivateMemorySize64 / 1MB
                     $passed = $cpuPercent -lt 0.5 -and $workingSetMb -lt 40
                     Add-Result $name $passed ("{0:N3} % CPU over {1} s, {2:N1} MB working set, {3:N1} MB private" -f $cpuPercent, $IdleSeconds, $workingSetMb, $privateMb)
+                }
+                'appbar-kill' {
+                    $strip = Wait-StripReserved
+                    # Without Harbor Shell nothing restarts the dock (or sends ABM_REMOVE for it): Windows alone
+                    # must free the strip of a dock that died.
+                    $window = Get-ShellWindow
+                    $window.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close()
+                    Wait-Until { Test-Restored } 5000 | Out-Null
+                    Stop-Process -Id $dock.Id -Force
+                    $ms = Wait-Until { [HarborSafety.Native]::WorkBottom() -eq $script:runWorkBottom } 5000
+                    Add-Result $name ($ms -ge 0) "strip of $strip px freed $ms ms after the kill (work area bottom $([HarborSafety.Native]::WorkBottom()), was $script:runWorkBottom)"
+                }
+                'appbar-restart' {
+                    $strip = Wait-StripReserved
+                    Stop-Process -Id $dock.Id -Force
+                    # Hiding stays off after a crash: the new dock's strip goes above the visible taskbar.
+                    $restarted = (Wait-Until { $null -ne (Get-Process harbor-dock -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $dock.Id }) } 15000) -ge 0
+                    $expected = $script:runWorkBottom - $strip
+                    $ms = Wait-Until { [Math]::Abs([HarborSafety.Native]::WorkBottom() - $expected) -le 1 } 10000
+                    Add-Result $name ($restarted -and $ms -ge 0) "restarted: $restarted; work area bottom $([HarborSafety.Native]::WorkBottom()), one strip would be $expected"
+                }
+                'stop-dock' {
+                    $strip = Wait-StripReserved
+                    Invoke-ShellButton 'Stop dock'
+                    $exited = (Wait-Until { $dock.HasExited } 10000) -ge 0
+                    $ms = Wait-Until { (Test-Restored) -and [HarborSafety.Native]::WorkBottom() -eq $script:runWorkBottom } 8000
+                    Start-Sleep -Seconds 3
+                    $stayedStopped = $null -eq (Get-Process harbor-dock -ErrorAction SilentlyContinue)
+                    $code = if ($exited) { $dock.ExitCode } else { 'n/a' }
+                    Add-Result $name ($exited -and $code -eq 0 -and $ms -ge 0 -and $stayedStopped) "exit code $code; taskbar and $strip px strip back in $ms ms; stayed stopped: $stayedStopped"
                 }
                 'explorer' {
                     Get-Process explorer | Stop-Process -Force

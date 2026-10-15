@@ -65,6 +65,11 @@ void GuardPolicy::OnTaskbarFound(bool found)
     m_taskbarFound = found;
 }
 
+void GuardPolicy::OnPresentable(bool presentable)
+{
+    m_presentable = presentable;
+}
+
 bool GuardPolicy::OnRehide(Milliseconds now)
 {
     while (!m_rehides.empty() && now - m_rehides.front() > m_config.fightWindow)
@@ -102,6 +107,12 @@ GuardDecision GuardPolicy::Evaluate(Milliseconds now) const
     if (!m_taskbarFound)
     {
         return {false, TaskbarBlock::TaskbarNotFound};
+    }
+    // The island isn't on screen (not drawn yet, being rebuilt, hidden): like a watchdog that isn't proven
+    // alive below, a reason not to hide, but nothing the user must fix.
+    if (!m_presentable)
+    {
+        return {};
     }
     // The watchdog isn't proven alive (yet, or any more): not hiding, but nothing the user must fix.
     if (!m_linkUp || m_pingsOnThisLink < m_config.stablePings || now - m_lastPing > m_config.pingTimeout)

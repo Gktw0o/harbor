@@ -2,13 +2,16 @@
 
 A macOS-style dock and system-stats island for Windows 11, native on **x64 and ARM64**.
 
-> **Status: M1 (safety first).** Harbor can hide the Windows taskbar, and gives it back on exit, crash,
-> hang, sign-out, or **Ctrl+Alt+Shift+H**. The dock itself is still a plain test window (M2).
+> **Status: M2 (the dock window).** A rounded island at the bottom of the primary screen shows your pinned
+> apps and starts them with a click; maximized windows stop above it; screen readers see its apps. Harbor can
+> hide the Windows taskbar and gives it back on exit, crash, hang, sign-out, or **Ctrl+Alt+Shift+H**. Running
+> windows, other monitors and stats come next (M3, M4).
 
 ## If your taskbar is ever missing
 
-1. Press **Ctrl+Alt+Shift+H** (works while Harbor's dock runs, even if it is hung).
-2. Or click **Restore taskbar now** in Harbor Shell.
+1. Press **Ctrl+Alt+Shift+H** (works while Harbor's dock runs, even if it is hung). It also hides the dock
+   until you turn hiding on again.
+2. Or click **Restore taskbar now** (or **Stop dock**) in Harbor Shell.
 3. Or press Ctrl+Shift+Esc, select **Windows Explorer** under Processes, and choose **Restart**.
 
 Harbor turns on Windows' "Automatically hide the taskbar" while it hides the taskbar, if it was off, and
@@ -78,8 +81,11 @@ dotnet build Harbor.slnx -c Debug -p:Platform=x64      # or -p:Platform=ARM64
 dotnet test --solution Harbor.slnx -c Debug -p:Platform=x64 --no-build
 ```
 
-Set `HARBOR_DOCK_EXE` to a built `harbor-dock.exe` of the same architecture to include the end-to-end tests.
-Tests never touch your real taskbar: they use stand-in windows.
+Set `HARBOR_DOCK_EXE` to a built `harbor-dock.exe` of the same architecture to include the end-to-end tests,
+and `HARBOR_MARKER_EXE` / `HARBOR_UIA_CLIENT_EXE` to `harbor_test_marker.exe` / `harbor_test_uia_client.exe`
+from `build\msvc-<arch>\tests\dock\<Config>\` for the launch and screen-reader tests (`build.ps1` sets all
+three). Tests never touch your real taskbar or work area: they use stand-in windows and an AppBar that
+reserves nothing. Their docks do show a small island at the bottom of the screen for a moment.
 
 Real-taskbar check (local only, never CI; your taskbar disappears for seconds at a time while it runs):
 
@@ -88,7 +94,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Arch arm64 -Config R
 powershell -ExecutionPolicy Bypass -File scripts\safety-check.ps1 -Arch arm64 -ExerciseAutoHide
 ```
 
-The rest, by hand: [docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md).
+It also checks the dock's screen strip (AppBar) and "Stop dock". The rest, by hand:
+[docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md) and
+[docs/testing/m2-checklist.md](docs/testing/m2-checklist.md).
 
 Formatting:
 
@@ -105,19 +113,29 @@ Start Harbor Shell; it starts the dock built next to it and watches over it:
 src\Harbor.Shell\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64\Harbor.Shell.exe
 ```
 
-Turn on **Hide the Windows taskbar** to hide it. The Shell shows the link to the dock (`pong N · <round
-trip>`) and the taskbar's state. A dock you start yourself (`build\msvc-x64\src\dock\Debug\harbor-dock.exe`)
-is adopted when it connects.
+The dock reserves a strip at the bottom of the primary screen and shows the apps pinned in
+`%LOCALAPPDATA%\Harbor\settings.json` (first run: File Explorer, Microsoft Edge, Windows Terminal,
+Settings). **Edit pinned apps…** opens the file; Harbor picks up your changes when you save it:
+
+```json
+{ "v": 1, "pinned": [ { "app": "Microsoft.Windows.Explorer" }, { "path": "C:\\Tools\\app.exe" } ] }
+```
+
+An `app` is an AppUserModelID (`Get-StartApps` in PowerShell lists them), a `path` an absolute path to an
+`.exe` or `.lnk`. Turn on **Hide the Windows taskbar** to hide it. The Shell shows the link to the dock
+(`pong N · <round trip>`) and the taskbar's state, starts the dock again if it fails, and **Stop dock** closes
+it. A dock you start yourself (`build\msvc-x64\src\dock\Debug\harbor-dock.exe`) is adopted when it connects.
+How the dock works: [ADR 0008](docs/adr/0008-dock-rendering.md), [ADR 0009](docs/adr/0009-pinned-apps-launching-appbar.md).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `src/dock/` | C++ dock: `core/` (portable logic), `ports/` (interfaces), `adapters/` (Win32), `app/` |
-| `src/Harbor.Shell/` | WinUI 3 app: starts and watches the dock; settings and onboarding later |
-| `src/Harbor.Core/` | Shared C# code: IPC codec and pipe server, the dock's watchdog, taskbar restore, logs |
+| `src/Harbor.Shell/` | WinUI 3 app: starts and watches the dock, pinned apps; settings UI and onboarding later |
+| `src/Harbor.Core/` | Shared C# code: IPC codec and pipe server, the dock's watchdog, taskbar restore, settings, app lookup and icons, logs |
 | `src/Harbor.Sensors/` | Hardware sensors service (empty until milestone M4) |
-| `contracts/` | IPC message and state-file schemas with shared test fixtures, see [contracts/README.md](contracts/README.md) |
+| `contracts/` | IPC message, state-file and icon-file formats with shared test fixtures, see [contracts/README.md](contracts/README.md) |
 | `tests/` | C++ (`dock/`) and C# (`Harbor.Core.Tests/`) tests |
 | `scripts/` | `build.ps1` (build and test one architecture), `safety-check.ps1` (real-taskbar check) |
 | `docs/` | Architecture decision records (`adr/`), manual test checklists (`testing/`) |

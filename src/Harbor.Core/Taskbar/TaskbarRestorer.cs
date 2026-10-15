@@ -137,6 +137,22 @@ public sealed class TaskbarRestorer(TaskbarTarget target, string? recordPath, IL
     }
 
     /// <summary>
+    /// After a dock ended: tells Explorer to drop the screen strip (AppBar) its island reserved. Explorer frees a
+    /// dead window's strip by itself; this is the belt to those braces. Only for the real taskbar: tests never
+    /// touch the user's work area. Can block on Explorer.
+    /// </summary>
+    public bool ReleaseAppBar(nint island)
+    {
+        if (!target.IsReal || island == 0)
+        {
+            return false;
+        }
+        var data = new AppBarData { Size = (uint)System.Runtime.InteropServices.Marshal.SizeOf<AppBarData>(), Window = island };
+        SHAppBarMessage(AbmRemove, ref data);
+        return true;
+    }
+
+    /// <summary>
     /// <see cref="ShowHiddenWindows"/>, then: if a restore record exists, puts auto-hide back as recorded (off if
     /// the record is damaged) and deletes the record once that is verified. Can block on Explorer.
     /// </summary>

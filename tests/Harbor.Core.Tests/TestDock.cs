@@ -25,14 +25,56 @@ internal static partial class TestDock
         }
     }
 
+    // A windowless GUI app that writes "<its path>.launched" when started (tests/dock/marker_app.cpp). Copied to
+    // a path with spaces and non-ASCII characters, so launching handles both.
+    public static string CopyMarkerApp(string dir)
+    {
+        var marker = Environment.GetEnvironmentVariable("HARBOR_MARKER_EXE");
+        if (string.IsNullOrEmpty(marker))
+        {
+            Assert.Inconclusive("Set HARBOR_MARKER_EXE to a built harbor_test_marker.exe; scripts/build.ps1 does.");
+        }
+        var folder = Directory.CreateDirectory(Path.Combine(dir, "Ünïcødé ğ apps")).FullName;
+        var copy = Path.Combine(folder, "marker app.exe");
+        File.Copy(marker, copy);
+        return copy;
+    }
+
+    // Runs tests/dock/uia_client.cpp against the island: a UI Automation client in its own process, as a screen
+    // reader is. Returns its exit code and output.
+    public static async Task<(int ExitCode, string Output)> RunUiaClientAsync(nint island, params string[] arguments)
+    {
+        var client = Environment.GetEnvironmentVariable("HARBOR_UIA_CLIENT_EXE");
+        if (string.IsNullOrEmpty(client))
+        {
+            Assert.Inconclusive("Set HARBOR_UIA_CLIENT_EXE to a built harbor_test_uia_client.exe; scripts/build.ps1 does.");
+        }
+        var startInfo = new ProcessStartInfo(client)
+        {
+            RedirectStandardOutput = true,
+            StandardOutputEncoding = System.Text.Encoding.UTF8,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add(island.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        foreach (var argument in arguments)
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+        using var process = Process.Start(startInfo)!;
+        var output = await process.StandardOutput.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await process.WaitForExitAsync(timeout.Token);
+        return (process.ExitCode, output);
+    }
+
     // A short ping timeout (the real one is 5 s) keeps the tests that wait for it quick.
     public static string[] Arguments(string pipeName, string dataDir, FakeTaskbar taskbar) =>
         ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];
 
-    public static Process Start(string pipeName, string dataDir, FakeTaskbar taskbar)
+    public static Process Start(string pipeName, string dataDir, FakeTaskbar taskbar, params string[] extraArguments)
     {
         var startInfo = new ProcessStartInfo(ExePath);
-        foreach (var argument in Arguments(pipeName, dataDir, taskbar))
+        foreach (var argument in Arguments(pipeName, dataDir, taskbar).Concat(extraArguments))
         {
             startInfo.ArgumentList.Add(argument);
         }
@@ -65,12 +107,36 @@ internal static partial class TestDock
         hang.Set();
     }
 
+    // The test hook that makes the dock act as if its graphics device were lost (see DockWindow::kDeviceLostMessage).
+    public static void LoseDevice(FakeTaskbar taskbar)
+    {
+        using var lose = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.lose-device");
+        lose.Set();
+    }
+
     public static async Task<string> ReadLogAsync(string dataDir)
     {
         // The dock keeps the file open for appending.
         using var reader = new StreamReader(new FileStream(
             Path.Combine(dataDir, "logs", "dock.log"), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
         return await reader.ReadToEndAsync();
+    }
+
+    // Waits until the dock's log contains the text; false after the timeout.
+    public static async Task<bool> WaitForLogAsync(string dataDir, string text, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        do
+        {
+            if (File.Exists(Path.Combine(dataDir, "logs", "dock.log")) &&
+                (await ReadLogAsync(dataDir)).Contains(text, StringComparison.Ordinal))
+            {
+                return true;
+            }
+            await Task.Delay(50);
+        }
+        while (deadline.Elapsed < timeout);
+        return false;
     }
 
     public static void KillQuietly(int processId)

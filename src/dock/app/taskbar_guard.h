@@ -47,6 +47,8 @@ class TaskbarGuard
     static constexpr wchar_t kWindowClass[] = L"Harbor.Dock.Guard";
     // Posted to the state window (SetStateWindow): wParam = hidden (0/1), lParam = ipc::TaskbarBlock.
     static constexpr UINT kStateMessage = WM_APP + 20;
+    // Posted to the state window (the island) when hiding is asked for again after the panic hotkey hid it.
+    static constexpr UINT kShowIslandMessage = WM_APP + 21;
 
     struct Options
     {
@@ -79,8 +81,11 @@ class TaskbarGuard
     void PostLinkChanged(bool connected) noexcept;
     void PostPing() noexcept;
     void PostRequest(bool hidden) noexcept;
+    // Whether the island is on screen (GuardPolicy rule 7).
+    void PostPresentable(bool presentable) noexcept;
 
-    // Where kStateMessage goes whenever the state changes, and on every new connection.
+    // The island. kStateMessage goes there whenever the state changes, and on every new connection; the panic
+    // hotkey hides it (a way out of the dock, too) until hiding is asked for again.
     void SetStateWindow(HWND window) noexcept
     {
         m_stateWindow.store(window);
@@ -129,6 +134,7 @@ class TaskbarGuard
     bool m_sessionEnding = false;
     bool m_stopping = false;
     bool m_reported = false;
+    bool m_islandHiddenByPanic = false;
     HWINEVENTHOOK m_hook = nullptr;
     DWORD m_hookProcess = 0;
     UINT m_taskbarCreatedMessage = 0;

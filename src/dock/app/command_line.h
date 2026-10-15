@@ -25,6 +25,9 @@ struct DockOptions
     // --test-ping-timeout-ms <100-60000>: how long without a ping before the dock restores the taskbar
     // (normally 5 s), so tests don't wait. Only together with the three above.
     std::optional<std::uint32_t> testPingTimeoutMs;
+    // --test-orphan-timeout-ms <100-600000>: how long a test dock waits without a control connection before
+    // it exits (default 30 s; a normal dock waits forever). Only together with the three above.
+    std::optional<std::uint32_t> testOrphanTimeoutMs;
 };
 
 // Parses the arguments that follow the program name. Anything unknown, repeated, missing its value or

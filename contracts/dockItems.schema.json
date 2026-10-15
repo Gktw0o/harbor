@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:contract:dockItems",
+  "title": "dockItems v1",
+  "description": "Harbor.Shell to dock, on the control channel: the apps the dock shows, in order. Sent on every connect and whenever the list changes. The Shell resolves names and icons; the dock draws and launches. Lengths count Unicode characters (code points). The bounds keep the largest message under the 64 KiB line limit (fixtures/valid/dock-items-largest.json), so control characters, which JSON escapes in 6 bytes, are not allowed. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "dockItems" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "maxItems": 40,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "target", "name", "icon"],
+            "properties": {
+              "kind": {
+                "description": "app: target is an AppUserModelID, launched as shell:AppsFolder\\<target>. path: target is an absolute path to an .exe or .lnk.",
+                "enum": ["app", "path"]
+              },
+              "target": { "type": "string", "minLength": 1, "maxLength": 260, "pattern": "^[^\\x00-\\x1f]*$" },
+              "name": {
+                "description": "Display name, for people and screen readers.",
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[^\\x00-\\x1f]*$"
+              },
+              "icon": {
+                "description": "File name of the item's icon in the icons folder (format in contracts/README.md), or null if the Shell couldn't make one.",
+                "anyOf": [{ "type": "null" }, { "type": "string", "pattern": "^[0-9a-f]{16}\\.bgra$" }]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

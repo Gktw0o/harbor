@@ -6,9 +6,11 @@
 // takes effect without rebuilding.
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <nlohmann/json-schema.hpp>
@@ -16,6 +18,8 @@
 #include <sstream>
 
 #include "core/ipc/codec.h"
+#include "core/ipc/line_framer.h"
+#include "core/island/icon_file.h"
 #include "core/taskbar/restore_record.h"
 
 namespace harbor::ipc
@@ -145,7 +149,7 @@ TEST(Contracts, InvalidFixturesMatchNoSchemaAndAreRejected)
 }
 
 // State files: contracts/state/<name>.schema.json with fixtures in contracts/state/fixtures/<name>/.
-// Each name needs a decoder here; a new schema without one fails the test.
+// Each name the dock reads needs a decoder here; a new schema without one fails the test.
 std::optional<std::string> DecodeAndReencodeState(std::string_view name, std::string_view text)
 {
     if (name == "taskbar-restore")
@@ -155,6 +159,12 @@ std::optional<std::string> DecodeAndReencodeState(std::string_view name, std::st
     }
     ADD_FAILURE() << "no decoder for state file " << name;
     return std::nullopt;
+}
+
+// State files only Harbor Shell reads: here they are checked against their schema alone.
+bool IsReadByTheDock(std::string_view name)
+{
+    return name != "settings";
 }
 
 TEST(StateContracts, FixturesConformAndRoundTrip)
@@ -179,6 +189,10 @@ TEST(StateContracts, FixturesConformAndRoundTrip)
             SCOPED_TRACE(fixture.filename().string());
             const auto text = ReadLine(fixture);
             EXPECT_TRUE(Conforms(schema, json::parse(text))) << "schema rejects: " << text;
+            if (!IsReadByTheDock(name))
+            {
+                continue;
+            }
             const auto reencoded = DecodeAndReencodeState(name, text);
             ASSERT_TRUE(reencoded) << "decoder rejects: " << text;
             EXPECT_EQ(json::parse(*reencoded), json::parse(text)) << *reencoded;
@@ -195,8 +209,52 @@ TEST(StateContracts, FixturesConformAndRoundTrip)
             {
                 EXPECT_FALSE(Conforms(schema, document)) << "schema accepts: " << text;
             }
-            EXPECT_FALSE(DecodeAndReencodeState(name, text)) << "decoder accepts: " << text;
+            if (IsReadByTheDock(name))
+            {
+                EXPECT_FALSE(DecodeAndReencodeState(name, text)) << "decoder accepts: " << text;
+            }
         }
+    }
+}
+
+// Icon files (contracts/README.md): Harbor.Core.Tests checks the Shell writes the valid fixtures byte for
+// byte; here the dock's reader takes them and refuses the rest.
+std::vector<std::uint8_t> ReadBytes(const fs::path& path)
+{
+    std::ifstream file(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+TEST(IconContracts, ValidFixturesParse)
+{
+    const auto fixtures = ListFiles(ContractsDir() / "icons" / "fixtures" / "valid", ".bgra");
+    ASSERT_FALSE(fixtures.empty());
+    for (const auto& fixture : fixtures)
+    {
+        SCOPED_TRACE(fixture.filename().string());
+        const auto bytes = ReadBytes(fixture);
+        const auto icon = island::ParseIconFile(bytes);
+        ASSERT_TRUE(icon);
+        EXPECT_EQ(icon->pixels.size(), std::size_t{icon->width} * icon->height * 4);
+    }
+
+    const auto square = ReadBytes(ContractsDir() / "icons/fixtures/valid/square-2x2.bgra");
+    const auto icon = island::ParseIconFile(square);
+    ASSERT_TRUE(icon);
+    EXPECT_EQ(icon->width, 2u);
+    EXPECT_EQ(icon->height, 2u);
+    // The second pixel: half-transparent green, premultiplied.
+    EXPECT_EQ(std::vector<std::uint8_t>(icon->pixels.begin() + 4, icon->pixels.begin() + 8),
+              (std::vector<std::uint8_t>{0, 128, 0, 128}));
+}
+
+TEST(IconContracts, InvalidFixturesAreRejected)
+{
+    const auto fixtures = ListFiles(ContractsDir() / "icons" / "fixtures" / "invalid", ".bgra");
+    ASSERT_FALSE(fixtures.empty());
+    for (const auto& fixture : fixtures)
+    {
+        EXPECT_FALSE(island::ParseIconFile(ReadBytes(fixture))) << fixture.filename().string();
     }
 }
 
@@ -223,6 +281,30 @@ TEST(Contracts, EncodedTaskbarStateMatchesFixture)
     EXPECT_EQ(
         json::parse(Encode(TaskbarState{false, TaskbarBlock::PanicHotkey})),
         json::parse(ReadLine(ContractsDir() / "fixtures/valid/taskbar-state-blocked-panic-hotkey.json")));
+}
+
+TEST(Contracts, EncodedDockItemsMatchesFixture)
+{
+    const DockItems message{{
+        {DockItemKind::App, "Microsoft.Windows.Explorer", "File Explorer", "0123456789abcdef.bgra"},
+        {DockItemKind::Path, R"(C:\Tools\Ünïcødé ğ\app.exe)", "Ünïcødé \"app\" 𝔸", std::nullopt},
+    }};
+    EXPECT_EQ(json::parse(Encode(message)),
+              json::parse(ReadLine(ContractsDir() / "fixtures/valid/dock-items.json")));
+}
+
+// The largest dockItems the schema allows (40 items, every character four bytes) must fit one line, and the
+// encoder must write it byte for byte: an encoder that escaped non-ASCII text would need far more room.
+TEST(Contracts, LargestDockItemsFitsTheLineLimit)
+{
+    const auto line = ReadLine(ContractsDir() / "fixtures/valid/dock-items-largest.json");
+    EXPECT_LE(line.size(), LineFramer::kMaxLineBytes);
+
+    const auto decoded = Decode(line);
+    ASSERT_TRUE(std::holds_alternative<Message>(decoded));
+    const auto& items = std::get<DockItems>(std::get<Message>(decoded)).items;
+    EXPECT_EQ(items.size(), DockItems::kMaxItems);
+    EXPECT_EQ(Encode(std::get<Message>(decoded)), line);
 }
 
 } // namespace

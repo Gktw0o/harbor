@@ -3,7 +3,11 @@ find_package(wil CONFIG REQUIRED)
 
 # Pure domain logic: no Win32 headers, so it is testable on any machine.
 add_library(harbor_dock_core STATIC
+    core/appbar/appbar_state.cpp
     core/ipc/codec.cpp
+    core/island/appearance.cpp
+    core/island/icon_file.cpp
+    core/island/layout.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
     core/json/strict_json.cpp
@@ -19,26 +23,45 @@ target_link_libraries(harbor_dock_core
 
 # Win32 implementations of the ports.
 add_library(harbor_dock_adapters STATIC
+    adapters/app_launcher.cpp
+    adapters/composition_renderer.cpp
     adapters/data_dir.cpp
     adapters/file_log.cpp
+    adapters/icon_files.cpp
     adapters/named_pipe_client.cpp
     adapters/process_job.cpp
+    adapters/system_appearance.cpp
+    adapters/uia_island.cpp
+    adapters/win32_app_bar.cpp
     adapters/win32_taskbar.cpp
 )
-target_link_libraries(harbor_dock_adapters PUBLIC harbor_dock_core WIL::WIL)
+# Composition, Direct2D and the shell come with the Windows SDK and the OS (C++/WinRT headers included):
+# no packages.
+target_link_libraries(harbor_dock_adapters
+    PUBLIC harbor_dock_core WIL::WIL
+    PRIVATE windowsapp d3d11 d2d1 dxgi dwmapi CoreMessaging ole32 oleaut32 shell32 UIAutomationCore
+)
 
 # Application layer (windows, threads, wiring). A library so the tests can link it; main.cpp stays out.
 add_library(harbor_dock_app STATIC
+    app/appbar_worker.cpp
     app/command_line.cpp
     app/crash_guard.cpp
     app/dock_window.cpp
     app/explorer_worker.cpp
+    app/launcher.cpp
     app/taskbar_guard.cpp
 )
-target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters)
+target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore)
 
 add_executable(harbor-dock WIN32
     app/main.cpp
     app/harbor-dock.manifest
 )
-target_link_libraries(harbor-dock PRIVATE harbor_dock_app)
+target_link_libraries(harbor-dock PRIVATE harbor_dock_app delayimp)
+# UI Automation is loaded when a client first asks for the island, not at start (rule 4 budget). Through the
+# windowsapp umbrella library, its functions come from these API sets rather than UIAutomationCore.dll.
+target_link_options(harbor-dock PRIVATE
+    /DELAYLOAD:ext-ms-win-uiacore-l1-1-0.dll
+    /DELAYLOAD:ext-ms-win-uiacore-l1-1-1.dll
+)

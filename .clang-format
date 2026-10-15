@@ -10,8 +10,12 @@ IncludeCategories:
   # <windows.h> must precede every other Win32 header, so it gets its own first block.
   - Regex: '^<windows\.h>$'
     Priority: 1
-  - Regex: '^<'
+  # COM next: shell headers (exdisp.h...) need OLE declared, and WIL turns on its COM helpers only if objbase.h
+  # came first. A lean windows.h includes neither.
+  - Regex: '^<(objbase|ole2)\.h>$'
     Priority: 2
-  - Regex: '.*'
+  - Regex: '^<'
     Priority: 3
+  - Regex: '.*'
+    Priority: 4
 ...

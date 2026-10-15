@@ -1,7 +1,11 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <variant>
+#include <vector>
 
 namespace harbor::ipc
 {
@@ -53,6 +57,39 @@ struct TaskbarState
     friend bool operator==(const TaskbarState&, const TaskbarState&) = default;
 };
 
-using Message = std::variant<Ping, Pong, SetTaskbar, TaskbarState>;
+enum class DockItemKind
+{
+    // The target is an AppUserModelID, launched as shell:AppsFolder\<target>.
+    App,
+    // The target is an absolute path to an .exe or .lnk.
+    Path,
+};
+
+// One app on the dock. Text is UTF-8.
+struct DockItem
+{
+    DockItemKind kind = DockItemKind::App;
+    std::string target;
+    // Display name, for people and screen readers.
+    std::string name;
+    // File name of the item's icon in the icons folder (contracts/README.md), if the Shell could make one.
+    std::optional<std::string> icon;
+    friend bool operator==(const DockItem&, const DockItem&) = default;
+};
+
+// Harbor.Shell to dock: the apps the dock shows, in order (contracts/dockItems.schema.json, v1). Sent on
+// every connect and whenever the list changes.
+struct DockItems
+{
+    // Bounds that keep the largest message under the line limit. Lengths count Unicode characters.
+    static constexpr std::size_t kMaxItems = 40;
+    static constexpr std::size_t kMaxTargetLength = 260;
+    static constexpr std::size_t kMaxNameLength = 128;
+
+    std::vector<DockItem> items;
+    friend bool operator==(const DockItems&, const DockItems&) = default;
+};
+
+using Message = std::variant<Ping, Pong, SetTaskbar, TaskbarState, DockItems>;
 
 } // namespace harbor::ipc

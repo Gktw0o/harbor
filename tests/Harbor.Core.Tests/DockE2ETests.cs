@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using Harbor.Core.Apps;
+using Harbor.Core.Ipc;
 using Harbor.Core.Supervision;
 using Harbor.Core.Taskbar;
 
@@ -39,6 +41,244 @@ public sealed class DockE2ETests
             var log = await TestDock.ReadLogAsync(dataDir.Path);
             StringAssert.Contains(log, "harbor-dock starting");
             StringAssert.Contains(log, "control channel: connected to Harbor Shell");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    [TestMethod]
+    public async Task DockReceivesItsAppsOverTheControlPipe()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.App, "Microsoft.Windows.Explorer", "File Explorer", null),
+                new DockItem(DockItemKind.Path, @"C:\Ünïcødé\app.exe", "Ünïcødé \U0001D538", "0123456789abcdef.bgra"),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "dock items: 2 received", TimeSpan.FromSeconds(10)),
+                await TestDock.ReadLogAsync(dataDir.Path));
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // The island: a small topmost tool window that never takes focus, at the bottom of the primary monitor's
+    // work area (until the AppBar reserves its own strip), as wide as its items.
+    [TestMethod]
+    public async Task DockShowsItsIslandAtTheBottomOfThePrimaryMonitor()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", TimeSpan.FromSeconds(15)),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var window = IslandWindow.Find(dock.Id);
+            Assert.AreNotEqual((nint)0, window, "no island window");
+            Assert.IsTrue(IslandWindow.IsWindowVisible(window));
+            var style = IslandWindow.ExStyle(window);
+            foreach (var flag in new[] { IslandWindow.ExToolWindow, IslandWindow.ExTopmost, IslandWindow.ExNoActivate, IslandWindow.ExNoRedirectionBitmap })
+            {
+                Assert.AreEqual(flag, style & flag, $"extended style 0x{style:X} lacks 0x{flag:X}");
+            }
+            Assert.AreNotEqual(window, IslandWindow.GetForegroundWindow(), "the island took the focus");
+
+            var (monitor, work) = IslandWindow.PrimaryMonitor();
+            var empty = IslandWindow.Bounds(window);
+            Assert.IsTrue(empty.Left >= monitor.Left && empty.Right <= monitor.Right && empty.Bottom < work.Bottom &&
+                          empty.Bottom > work.Bottom - empty.Height, $"island {empty} in work area {work}");
+            // Centred.
+            Assert.IsLessThanOrEqualTo(1, Math.Abs((empty.Left - monitor.Left) - (monitor.Right - empty.Right)));
+
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.App, "A", "A", null),
+                new DockItem(DockItemKind.App, "B", "B", null),
+                new DockItem(DockItemKind.App, "C", "C", null),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 3 items", TimeSpan.FromSeconds(10)));
+            var three = IslandWindow.Bounds(window);
+            Assert.IsGreaterThan(empty.Width, three.Width);
+            Assert.AreEqual(empty.Height, three.Height);
+            Assert.AreEqual(empty.Bottom, three.Bottom);
+
+            // Its strip came from the AppBar worker (a test AppBar, which reserves nothing).
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), $"appbar: strip {monitor.Left},");
+            Assert.AreEqual(work.Bottom, IslandWindow.PrimaryMonitor().Work.Bottom, "a test dock changed the work area");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // The Shell's icon files reach the island; an item whose file is missing gets a placeholder.
+    [TestMethod]
+    public async Task DockDrawsTheIconFilesTheShellLeaves()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var icon = new IconStore(dataDir.Path, new CapturingLog()).Save(new IconImage(2, 2, [0, 0, 255, 255, 0, 128, 0, 128, 0, 0, 0, 0, 255, 255, 255, 255]));
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.App, "A", "A", icon),
+                new DockItem(DockItemKind.App, "B", "B", "0123456789abcdef.bgra"),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 2 items (1 icons)", TimeSpan.FromSeconds(10)),
+                await TestDock.ReadLogAsync(dataDir.Path));
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // A click on an item starts its app: through Explorer where it can, else with ShellExecuteEx (as on the ARM
+    // CI runner). Either way the route is logged.
+    [TestMethod]
+    public async Task AClickStartsThePinnedApp()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var app = TestDock.CopyMarkerApp(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems([new DockItem(DockItemKind.Path, app, "Marker", null)])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", TimeSpan.FromSeconds(10)));
+            var island = IslandWindow.Find(dock.Id);
+
+            // The only item's middle: the island is as tall as one item plus its padding.
+            var size = IslandWindow.Bounds(island).Height;
+            IslandWindow.Click(island, size / 2, size / 2);
+
+            var marker = app + ".launched";
+            var deadline = Stopwatch.StartNew();
+            while (!File.Exists(marker) && deadline.Elapsed < TimeSpan.FromSeconds(20))
+            {
+                await Task.Delay(50);
+            }
+            Assert.IsTrue(File.Exists(marker), await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "launch: item 0 started via", TimeSpan.FromSeconds(5)));
+            Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains("marker app", StringComparison.OrdinalIgnoreCase),
+                "the log names the user's app");
+        }
+        finally
+        {
+            await StopAsync(dock);
+            // The marker app may hold its file for a moment.
+            await Task.Delay(200);
+        }
+    }
+
+    // A screen reader (any UI Automation client) sees a tool bar of buttons named after the apps, and starting one
+    // through its Invoke pattern works like a click.
+    [TestMethod]
+    public async Task ScreenReadersSeeTheAppsAndCanStartOne()
+    {
+        const int ToolBar = 50021;
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var app = TestDock.CopyMarkerApp(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\missing.exe", "Ünïcødé \U0001D538", null),
+                new DockItem(DockItemKind.Path, app, "Marker", null),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 2 items", TimeSpan.FromSeconds(10)));
+            var island = IslandWindow.Find(dock.Id);
+
+            var (listed, tree) = await TestDock.RunUiaClientAsync(island, "list");
+            Assert.AreEqual(0, listed, tree);
+            CollectionAssert.AreEqual(
+                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tÜnïcødé \U0001D538", $"{Button}\tMarker" },
+                tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), tree);
+
+            var (invoked, _) = await TestDock.RunUiaClientAsync(island, "invoke", "Marker");
+            Assert.AreEqual(0, invoked);
+            var marker = app + ".launched";
+            var deadline = Stopwatch.StartNew();
+            while (!File.Exists(marker) && deadline.Elapsed < TimeSpan.FromSeconds(20))
+            {
+                await Task.Delay(50);
+            }
+            Assert.IsTrue(File.Exists(marker), await TestDock.ReadLogAsync(dataDir.Path));
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), "launch: item 1 (UI Automation)");
+
+            Assert.AreEqual(3, (await TestDock.RunUiaClientAsync(island, "invoke", "Nothing")).ExitCode);
+        }
+        finally
+        {
+            await StopAsync(dock);
+            await Task.Delay(200);
+        }
+    }
+
+    // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
+    [TestMethod]
+    public async Task TheDockExitsNormallyWhenItsWindowIsClosed()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", TimeSpan.FromSeconds(15)));
+            IslandWindow.Close(IslandWindow.Find(dock.Id));
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await dock.WaitForExitAsync(timeout.Token);
+            Assert.AreEqual(0, dock.ExitCode);
+            var log = await TestDock.ReadLogAsync(dataDir.Path);
+            StringAssert.Contains(log, "asked to close; exiting");
+            StringAssert.Contains(log, "harbor-dock exiting with code 0");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // A test dock whose test went away without ending it exits by itself, normally (taskbar restored).
+    [TestMethod]
+    public async Task TestDockExitsWhenNoShellConnects()
+    {
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start($"harbor.e2e.{Guid.NewGuid():N}", dataDir.Path, taskbar, "--test-orphan-timeout-ms", "500");
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await dock.WaitForExitAsync(timeout.Token);
+            Assert.AreEqual(0, dock.ExitCode);
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), "test dock: no connection to Harbor Shell for 500 ms; exiting");
         }
         finally
         {

@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "pinned": [
+    {
+      "app": "Microsoft.Windows.Explorer"
+    },
+    {
+      "app": "MSEdge"
+    },
+    {
+      "app": "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"
+    },
+    {
+      "app": "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"
+    }
+  ]
+}

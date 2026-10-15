@@ -21,6 +21,36 @@ public sealed record SetTaskbar(bool Hidden) : Message;
 /// </summary>
 public sealed record TaskbarState(bool Hidden, TaskbarBlock Blocked) : Message;
 
+/// <summary>
+/// Harbor.Shell to dock: the apps the dock shows, in order (contracts/dockItems.schema.json, v1). Sent on every
+/// connect and whenever the list changes. Compares by content.
+/// </summary>
+public sealed record DockItems(IReadOnlyList<DockItem> Items) : Message
+{
+    // Bounds that keep the largest message under the line limit. Lengths count Unicode characters (runes).
+    public const int MaxItems = 40;
+    public const int MaxTargetLength = 260;
+    public const int MaxNameLength = 128;
+
+    public bool Equals(DockItems? other) => other is not null && Items.SequenceEqual(other.Items);
+
+    public override int GetHashCode() => Items.Aggregate(0, (hash, item) => HashCode.Combine(hash, item));
+}
+
+/// <summary>One app on the dock.</summary>
+/// <param name="Name">Display name, for people and screen readers.</param>
+/// <param name="Icon">File name of the item's icon in the icons folder (contracts/README.md), or null.</param>
+public sealed record DockItem(DockItemKind Kind, string Target, string Name, string? Icon);
+
+public enum DockItemKind
+{
+    /// <summary>The target is an AppUserModelID, launched as <c>shell:AppsFolder\&lt;target&gt;</c>.</summary>
+    App,
+
+    /// <summary>The target is an absolute path to an .exe or .lnk.</summary>
+    Path,
+}
+
 /// <summary>Why the dock doesn't hide the taskbar although it was asked to. Must match the dock's TaskbarBlock.</summary>
 public enum TaskbarBlock
 {

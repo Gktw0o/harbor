@@ -33,6 +33,9 @@ handlers are best effort. Each one covers what the other can't see.
 5. A taskbar exists.
 6. The dock isn't in a kill-on-close job. Harbor Shell starts the dock with `CREATE_BREAKAWAY_FROM_JOB`
    when its own job allows it.
+7. (Added in M2, ADR 0008.) The island is on screen: drawn, visible, on the primary monitor. Without it the
+   user would have neither taskbar nor dock. Like an unproven watchdog, this is a reason not to hide, not a
+   block the user must clear.
 
 The dock also never hides while it is exiting, while the session is ending, or once a crash handler ran.
 

@@ -1,6 +1,7 @@
 #include "app/taskbar_guard.h"
 
 #include <format>
+#include <utility>
 
 #include "adapters/process_job.h"
 #include "app/crash_guard.h"
@@ -12,9 +13,10 @@ namespace
 {
 
 constexpr UINT kStopMessage = WM_APP + 1;
-constexpr UINT kLinkMessage = WM_APP + 2;    // wParam: connected
-constexpr UINT kPingMessage = WM_APP + 3;    //
-constexpr UINT kRequestMessage = WM_APP + 4; // wParam: hidden
+constexpr UINT kLinkMessage = WM_APP + 2;        // wParam: connected
+constexpr UINT kPingMessage = WM_APP + 3;        //
+constexpr UINT kRequestMessage = WM_APP + 4;     // wParam: hidden
+constexpr UINT kPresentableMessage = WM_APP + 5; // wParam: presentable
 constexpr UINT_PTR kCheckTimer = 1;
 // How often a silent watchdog is noticed; well under the ping timeout.
 constexpr UINT kCheckIntervalMs = 250;
@@ -71,6 +73,11 @@ void TaskbarGuard::PostPing() noexcept
 void TaskbarGuard::PostRequest(bool hidden) noexcept
 {
     Post(kRequestMessage, hidden);
+}
+
+void TaskbarGuard::PostPresentable(bool presentable) noexcept
+{
+    Post(kPresentableMessage, presentable);
 }
 
 ipc::TaskbarState TaskbarGuard::State() const noexcept
@@ -216,7 +223,16 @@ LRESULT TaskbarGuard::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPAR
         return 0;
     case kRequestMessage:
         m_policy.OnRequest(wParam != 0);
+        if (wParam != 0 && std::exchange(m_islandHiddenByPanic, false))
+        {
+            // Hiding is back on: so is the island (and with it on screen, the taskbar can go).
+            PostMessageW(m_stateWindow.load(), kShowIslandMessage, 0, 0);
+        }
         Reevaluate(wParam != 0 ? "Harbor Shell asked to hide it" : "Harbor Shell asked to show it");
+        return 0;
+    case kPresentableMessage:
+        m_policy.OnPresentable(wParam != 0);
+        Reevaluate(wParam != 0 ? "the island is on screen" : "the island isn't on screen");
         return 0;
     case WM_TIMER:
         Reevaluate("Harbor Shell's watchdog went quiet");
@@ -234,6 +250,19 @@ LRESULT TaskbarGuard::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPAR
             m_log.Warn("taskbar: panic hotkey pressed");
             m_policy.OnPanic();
             RestoreNow("of the panic hotkey", /*sessionEnding=*/false, /*wait=*/false);
+            // While hiding was on, the panic hotkey is also the way out of the dock: the island goes too,
+            // from this thread, so even a hung UI thread can't keep it up (unless its window is hung as
+            // well).
+            if (m_policy.Evaluate(Now()).blocked == ipc::TaskbarBlock::PanicHotkey)
+            {
+                if (const HWND island = m_stateWindow.load();
+                    island != nullptr && ShowWindowAsync(island, SW_HIDE))
+                {
+                    m_islandHiddenByPanic = true;
+                    m_log.Warn(
+                        "panic hotkey: the island is hidden until hiding the taskbar is turned on again");
+                }
+            }
             Reevaluate("panic hotkey", /*forceReport=*/true);
         }
         return 0;

@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json.Nodes;
 using Harbor.Core.Ipc;
+using Harbor.Core.Settings;
 using Harbor.Core.Taskbar;
 
 namespace Harbor.Core.Tests;
@@ -61,6 +62,7 @@ public sealed class ContractTests
     private static byte[]? DecodeAndReencodeState(string name, byte[] text) => name switch
     {
         "taskbar-restore" => RestoreRecord.TryDecode(text, out var record) ? RestoreRecord.Encode(record) : null,
+        "settings" => HarborSettings.TryDecode(text, out var settings, out _) ? HarborSettings.Encode(settings) : null,
         _ => throw new AssertFailedException($"no decoder for state file {name}"),
     };
 
@@ -119,6 +121,29 @@ public sealed class ContractTests
         Assert.IsTrue(JsonNode.DeepEquals(
             JsonNode.Parse(MessageCodec.Encode(new TaskbarState(Hidden: false, TaskbarBlock.PanicHotkey))),
             JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "taskbar-state-blocked-panic-hotkey.json")))));
+
+    [TestMethod]
+    public void EncodedDockItemsMatchesFixture() =>
+        Assert.IsTrue(JsonNode.DeepEquals(
+            JsonNode.Parse(MessageCodec.Encode(new DockItems(
+            [
+                new DockItem(DockItemKind.App, "Microsoft.Windows.Explorer", "File Explorer", "0123456789abcdef.bgra"),
+                new DockItem(DockItemKind.Path, @"C:\Tools\Ünïcødé ğ\app.exe", "Ünïcødé \"app\" \U0001D538", null),
+            ]))),
+            JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "dock-items.json")))));
+
+    // The largest dockItems the schema allows (40 items, every character four bytes) must fit one line, and the
+    // encoder must write it byte for byte: .NET's built-in encoders would escape each character in 12 bytes.
+    [TestMethod]
+    public void LargestDockItemsFitsTheLineLimit()
+    {
+        var line = ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "dock-items-largest.json"));
+        Assert.IsLessThanOrEqualTo(LineFramer.MaxLineBytes, line.Length);
+
+        Assert.IsTrue(MessageCodec.TryDecode(line, out var message, out var error), $"rejected ({error})");
+        Assert.HasCount(DockItems.MaxItems, ((DockItems)message).Items);
+        CollectionAssert.AreEqual(line, MessageCodec.Encode(message));
+    }
 
     // Every TaskbarBlock has a wire name, and a valid fixture uses it: an enum value added on one side
     // without the other fails here or in the fixtures.

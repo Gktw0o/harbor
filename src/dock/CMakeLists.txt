@@ -6,8 +6,12 @@ add_library(harbor_dock_core STATIC
     core/appbar/appbar_state.cpp
     core/ipc/codec.cpp
     core/island/appearance.cpp
+    core/island/click_policy.cpp
+    core/island/dock_model.cpp
     core/island/icon_file.cpp
     core/island/layout.cpp
+    core/island/menu_model.cpp
+    core/island/monitors.cpp
     core/island/on_screen.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
@@ -15,6 +19,8 @@ add_library(harbor_dock_core STATIC
     core/logging/log_line.cpp
     core/taskbar/guard_policy.cpp
     core/taskbar/restore_record.cpp
+    core/windows/app_windows.cpp
+    core/windows/eligibility.cpp
 )
 target_include_directories(harbor_dock_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(harbor_dock_core

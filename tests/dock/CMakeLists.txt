@@ -20,13 +20,17 @@ target_link_libraries(harbor_test_uia_client PRIVATE harbor_compiler_options WIL
 
 add_executable(harbor_dock_tests
     app_launcher_tests.cpp
+    app_windows_tests.cpp
     appbar_state_tests.cpp
     appbar_worker_tests.cpp
     appearance_tests.cpp
+    click_policy_tests.cpp
     codec_tests.cpp
     command_line_tests.cpp
     contract_tests.cpp
     crash_guard_tests.cpp
+    dock_model_tests.cpp
+    eligibility_tests.cpp
     environment_tests.cpp
     explorer_worker_tests.cpp
     file_log_tests.cpp
@@ -35,6 +39,8 @@ add_executable(harbor_dock_tests
     layout_tests.cpp
     line_framer_tests.cpp
     log_line_tests.cpp
+    menu_model_tests.cpp
+    monitors_tests.cpp
     named_pipe_client_tests.cpp
     on_screen_tests.cpp
     pipe_name_tests.cpp

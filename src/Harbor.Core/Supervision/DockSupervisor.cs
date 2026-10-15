@@ -80,6 +80,12 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     /// <summary>The dock's latest <see cref="TaskbarState"/>.</summary>
     public event Action<TaskbarState>? TaskbarStateChanged;
 
+    /// <summary>The dock asked about a running app (appLookup); answer with <see cref="SendToDock"/>.</summary>
+    public event Action<AppLookup>? AppLookupReceived;
+
+    /// <summary>The dock asked to pin or unpin an app (pinRequest).</summary>
+    public event Action<PinRequest>? PinRequestReceived;
+
     /// <summary>
     /// Whether hiding the taskbar is requested. It turns off by itself after the panic hotkey, when Explorer
     /// keeps showing the taskbar, and when the dock ends or hangs: the user turns it back on.
@@ -217,6 +223,20 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         });
     }
 
+    /// <summary>Sends a message to the connected dock, if any, after everything sent before it (dockItems first).</summary>
+    public void SendToDock(Message message)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        Post(_ =>
+        {
+            if (server.IsConnected)
+            {
+                server.TrySend(message);
+            }
+            return Task.CompletedTask;
+        });
+    }
+
     private void Post(Func<Session, Task> command) => _commands.Writer.TryWrite(command);
 
     private void OnLinkStatus(ControlLinkStatus status)
@@ -227,7 +247,15 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
 
     private void OnDockMessage(Message message) => Post(session =>
     {
-        if (message is TaskbarState state)
+        if (message is AppLookup lookup)
+        {
+            AppLookupReceived?.Invoke(lookup);
+        }
+        else if (message is PinRequest request)
+        {
+            PinRequestReceived?.Invoke(request);
+        }
+        else if (message is TaskbarState state)
         {
             TaskbarStateChanged?.Invoke(state);
             // The dock blocks hiding until it hears "show" (see GuardPolicy); turning the request off sends that.

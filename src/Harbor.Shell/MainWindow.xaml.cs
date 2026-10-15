@@ -55,6 +55,19 @@ public sealed partial class MainWindow : Window
         publisher.Built += _supervisor.SetDockItems;
         publisher.Built += items => DispatcherQueue.TryEnqueue(() => ShowPinned(items));
 
+        // Running apps: the dock asks (appLookup), the Shell names them (appInfo), after any new dockItems.
+        var apps = new AppLookupService(new ShellAppResolver(icons), log, icons);
+        _supervisor.AppLookupReceived += apps.Lookup;
+        _supervisor.LinkStatusChanged += status =>
+        {
+            if (!status.Connected)
+            {
+                apps.Disconnected();
+            }
+        };
+        publisher.Built += apps.SetPins;
+        apps.Answered += _supervisor.SendToDock;
+
         // Never disposed on purpose: it uses no timer or wait handle, and the supervisor may still observe the
         // token after the window closes.
         var shutdown = new CancellationTokenSource();
@@ -62,6 +75,7 @@ public sealed partial class MainWindow : Window
         _ = RunSupervisorAsync(shutdown.Token);
         _ = RunQuietlyAsync("settings", settings.RunAsync, shutdown.Token);
         _ = RunQuietlyAsync("dock items", publisher.RunAsync, shutdown.Token);
+        _ = RunQuietlyAsync("apps", apps.RunAsync, shutdown.Token);
     }
 
     // A background loop that ends with the window; a failure is logged, not thrown at the UI.

@@ -102,6 +102,24 @@ public sealed class IconStoreTests
         Assert.IsFalse(File.Exists(Path.Combine(store.Directory, first)));
     }
 
+    // A running app's icon (named in appInfo) stays while the dock that heard of it is connected, whatever the
+    // pinned list does (docs/adr/0010).
+    [TestMethod]
+    public void IconsHeldForRunningAppsSurvivePinChangesUntilReleased()
+    {
+        using var dataDir = new TempDirectory();
+        var store = new IconStore(dataDir.Path, new CapturingLog());
+        var running = store.Save(Pixel(4))!;
+        store.Hold(running);
+        store.KeepOnly([]);
+        store.KeepOnly([]);
+        Assert.IsTrue(File.Exists(Path.Combine(store.Directory, running)));
+
+        store.ReleaseHeld();
+        store.KeepOnly([]);
+        Assert.IsFalse(File.Exists(Path.Combine(store.Directory, running)));
+    }
+
     // The real shell: File Explorer's icon, in the dock's format.
     [TestMethod]
     public void TheShellResolverSavesAnInstalledAppsIcon()

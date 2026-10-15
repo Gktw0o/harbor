@@ -228,5 +228,96 @@ TEST(GuardPolicy, AShowRequestClearsTheFightingBlockAndItsHistory)
     EXPECT_FALSE(policy.OnRehide(1000ms));
 }
 
+// The tray button (docs/adr/0012): only while the taskbar is to be hidden; a peek never changes the decision.
+TEST(GuardPolicy, APeekOnlyBeginsWhileTheTaskbarIsHidden)
+{
+    GuardPolicy idle(kConfig);
+    EXPECT_FALSE(idle.OnPeek(0ms));
+    EXPECT_FALSE(idle.Peeking());
+
+    auto policy = Allowed();
+    policy.OnPresentable(false);
+    EXPECT_FALSE(policy.OnPeek(1000ms));
+    policy.OnPresentable(true);
+    EXPECT_TRUE(policy.OnPeek(1000ms));
+    EXPECT_TRUE(policy.Peeking());
+    EXPECT_EQ(policy.Evaluate(1000ms), kHide);
+}
+
+// Explorer showing the taskbar is what the user asked for: not a fight.
+TEST(GuardPolicy, WhilePeekingExplorerShowingTheTaskbarIsntCounted)
+{
+    auto policy = Allowed();
+    ASSERT_TRUE(policy.OnPeek(1000ms));
+    for (int i = 0; i < 10; ++i)
+    {
+        EXPECT_FALSE(policy.OnRehide(1100ms));
+    }
+    EXPECT_EQ(policy.Evaluate(1100ms), kHide);
+
+    // Over: counting starts from nothing.
+    policy.EndPeek();
+    for (int i = 0; i < 3; ++i)
+    {
+        EXPECT_FALSE(policy.OnRehide(1200ms));
+    }
+    EXPECT_TRUE(policy.OnRehide(1200ms));
+}
+
+TEST(GuardPolicy, APeekEndsOnceTheTaskbarSlidOutForAWhile)
+{
+    auto policy = Allowed();
+    ASSERT_TRUE(policy.OnPeek(1000ms));
+    EXPECT_FALSE(policy.OnTaskbarShowing(false, 1500ms)) << "Explorer takes a moment to slide it in";
+    EXPECT_FALSE(policy.OnTaskbarShowing(true, 2000ms));
+    // Shown for as long as the user stays on it.
+    EXPECT_FALSE(policy.OnTaskbarShowing(true, 60000ms));
+    EXPECT_FALSE(policy.OnTaskbarShowing(false, 60500ms));
+    EXPECT_TRUE(policy.Peeking());
+    EXPECT_TRUE(policy.OnTaskbarShowing(false, 61000ms));
+    EXPECT_FALSE(policy.Peeking());
+    EXPECT_FALSE(policy.OnTaskbarShowing(false, 62000ms)) << "it ends once";
+}
+
+TEST(GuardPolicy, APeekEndsWhenTheTaskbarNeverSlidIn)
+{
+    auto policy = Allowed();
+    ASSERT_TRUE(policy.OnPeek(1000ms));
+    EXPECT_FALSE(policy.OnTaskbarShowing(false, 3999ms));
+    EXPECT_TRUE(policy.OnTaskbarShowing(false, 4000ms));
+    EXPECT_FALSE(policy.Peeking());
+}
+
+// Clicking the button again while the taskbar slides out: it gets its time to come back.
+TEST(GuardPolicy, PeekingAgainStartsThePeekOver)
+{
+    auto policy = Allowed();
+    ASSERT_TRUE(policy.OnPeek(1000ms));
+    policy.OnTaskbarShowing(true, 1500ms);
+    ASSERT_TRUE(policy.OnPeek(2400ms));
+    EXPECT_FALSE(policy.OnTaskbarShowing(false, 2500ms))
+        << "1 s after it was last seen, but just asked again";
+    EXPECT_FALSE(policy.OnTaskbarShowing(false, 5399ms));
+    EXPECT_TRUE(policy.OnTaskbarShowing(false, 5400ms));
+}
+
+// Whatever gives the taskbar back ends the peek too.
+TEST(GuardPolicy, EveryRestoreEndsThePeek)
+{
+    for (const auto& end : std::initializer_list<void (*)(GuardPolicy&)>{
+             [](GuardPolicy& p) { p.OnRequest(false); },
+             [](GuardPolicy& p) { p.OnLinkDown(); },
+             [](GuardPolicy& p) { p.OnPanic(); },
+             [](GuardPolicy& p) { p.EndPeek(); },
+         })
+    {
+        auto policy = Allowed();
+        ASSERT_TRUE(policy.OnPeek(1000ms));
+        end(policy);
+        EXPECT_FALSE(policy.Peeking());
+        EXPECT_FALSE(policy.OnTaskbarShowing(false, 9000ms));
+    }
+}
+
 } // namespace
 } // namespace harbor::taskbar

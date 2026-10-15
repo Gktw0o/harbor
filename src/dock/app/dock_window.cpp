@@ -50,6 +50,7 @@ constexpr UINT kWindowsChanged = WM_APP + 12;
 constexpr UINT kOpenOverflowMessage = WM_APP + 17;
 // The "…" button's UI Automation key: no item has it.
 constexpr std::uint64_t kOverflowKey = std::numeric_limits<std::uint64_t>::max();
+constexpr std::uint64_t kTrayKey = kOverflowKey - 1;
 
 static_assert(sizeof(WPARAM) == 8 && sizeof(LPARAM) == 8, "two 32-bit coordinates go in each");
 
@@ -586,6 +587,11 @@ std::vector<island::ItemMarks> DockWindow::VisibleMarks() const
     const auto visible = m_layout ? std::min(m_layout->items.size(), m_model.slots.size()) : 0;
     for (std::size_t i = 0; i < visible; ++i)
     {
+        if (i == m_tray)
+        {
+            marks.push_back({});
+            continue;
+        }
         if (i == m_overflow)
         {
             // The "…" button: highlighted while one of the apps behind it needs attention.
@@ -628,9 +634,10 @@ void DockWindow::Refresh(bool force)
     const auto& monitor = host.monitor;
     const auto appearance = adapters::ReadSystemAppearance();
     const auto style = island::StyleFor(appearance);
-    const auto count = m_model.slots.size();
-    // A divider when running apps follow pinned items.
-    const bool divider = m_model.pinned > 0 && count > m_model.pinned;
+    const auto slots = m_model.slots.size();
+    // A divider when running apps follow pinned items; the tray button last while the taskbar is hidden.
+    const bool divider = m_model.pinned > 0 && slots > m_model.pinned;
+    const auto count = slots + (m_taskbarHidden ? 1 : 0);
     const auto metrics = island::MeasureFor(monitor.bounds.Width(), monitor.dpi, count, divider);
     // Every monitor keeps a strip as tall as the island would be there, so moving it reflows nothing. The
     // AppBars ask Explorer (it answers on kAppBarStrip); the same request again does nothing.
@@ -648,17 +655,20 @@ void DockWindow::Refresh(bool force)
     {
         return;
     }
-    // What doesn't fit goes behind a "…" button in the last place.
-    const std::optional<std::size_t> overflow = metrics.visibleCount < count && metrics.visibleCount > 0
-                                                    ? std::optional(metrics.visibleCount - 1)
-                                                    : std::nullopt;
-    if (overflow && (overflow != m_overflow || count != m_overflowCount))
+    // The tray button keeps the last place; what doesn't fit before it goes behind a "…" button.
+    const std::optional<std::size_t> tray =
+        m_taskbarHidden && metrics.visibleCount > 0 ? std::optional(metrics.visibleCount - 1) : std::nullopt;
+    const auto room = metrics.visibleCount - (tray ? 1 : 0);
+    const std::optional<std::size_t> overflow =
+        room < slots && room > 0 ? std::optional(room - 1) : std::nullopt;
+    if (overflow && (overflow != m_overflow || slots != m_overflowCount))
     {
         m_log.Info(
-            std::format("island: {} of {} items fit; the rest are in the overflow menu", *overflow, count));
+            std::format("island: {} of {} items fit; the rest are in the overflow menu", *overflow, slots));
     }
     m_overflow = overflow;
-    m_overflowCount = count;
+    m_overflowCount = slots;
+    m_tray = tray;
 
     const auto& island = layout.island;
     // Behind a full-screen app, above everything else.
@@ -689,19 +699,23 @@ void DockWindow::Refresh(bool force)
     // Read again on every redraw rather than kept, one at a time: decoded, 40 icons would hold 10 MB (rule
     // 4).
     std::size_t drawn = 0;
-    const auto& slots = m_model.slots;
+    const auto& items = m_model.slots;
     const auto& iconsDir = m_options.iconsDir;
     const adapters::CompositionRenderer::IconSource icons =
         [&](std::size_t index, std::vector<std::uint8_t>& file) -> std::optional<island::IconView> {
-        const auto& icon = slots[index].icon;
+        if (index >= items.size())
+        {
+            return std::nullopt;
+        }
+        const auto& icon = items[index].icon;
         file = icon ? adapters::ReadIconFile(iconsDir, *icon) : std::vector<std::uint8_t>{};
         auto view = island::ParseIconFile(file);
         drawn += view.has_value() ? 1 : 0;
         return view;
     };
 
-    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, m_overflow, kRenderCommitted,
-                          ++m_renderGeneration))
+    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, m_overflow, m_tray,
+                          kRenderCommitted, ++m_renderGeneration))
     {
         m_log.Info(std::format("island: {} items ({} icons), {}x{} at {},{} ({} dpi, {})",
                                m_layout->items.size(), drawn, island.Width(), island.Height(), island.left,
@@ -885,7 +899,16 @@ void DockWindow::OnClick(LPARAM position)
 
 bool DockWindow::ClickItem(std::size_t index, std::string_view how)
 {
-    if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size())
+    if (!m_layout || index >= m_layout->items.size())
+    {
+        return false;
+    }
+    if (index == m_tray)
+    {
+        PeekTaskbar(how);
+        return true;
+    }
+    if (index >= m_model.slots.size())
     {
         return false;
     }
@@ -949,6 +972,22 @@ void DockWindow::BringForward(windows::WindowId id, bool restore)
     SetForegroundWindow(window);
 }
 
+void DockWindow::PeekTaskbar(std::string_view how)
+{
+    const HWND taskbar = m_guard.Peek();
+    if (taskbar == nullptr)
+    {
+        m_log.Info(std::format("click: the tray button ({}): the taskbar isn't hidden", how));
+        return;
+    }
+    // From the thread that took the click, which may change the foreground (M3 spike). Explorer shows its
+    // taskbar when it gets the foreground, and slides it away when it loses it.
+    const bool forward = SetForegroundWindow(taskbar) != FALSE;
+    m_log.Info(
+        std::format("click: the tray button ({}): {}", how,
+                    forward ? "the taskbar comes forward" : "Windows didn't let the taskbar come forward"));
+}
+
 void DockWindow::OnRightClick(LPARAM position)
 {
     if (const auto item = ItemAtClient(position))
@@ -1000,7 +1039,9 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
 
 void DockWindow::OpenMenu(std::size_t index, std::string_view how)
 {
-    if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size() || m_menuOpen)
+    // The tray button has no menu.
+    if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size() || m_menuOpen ||
+        index == m_tray)
     {
         return;
     }
@@ -1144,6 +1185,10 @@ std::size_t DockWindow::ItemCount() const
 
 std::uint64_t DockWindow::ItemKey(std::size_t index) const
 {
+    if (index == m_tray)
+    {
+        return kTrayKey;
+    }
     if (index == m_overflow)
     {
         return kOverflowKey;
@@ -1157,8 +1202,13 @@ std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
     {
         return m_overflow;
     }
-    // Items behind the "…" button aren't on the island.
-    const auto visible = std::min(m_overflow.value_or(ItemCount()), m_itemKeys.size());
+    if (key == kTrayKey)
+    {
+        return m_tray;
+    }
+    // Items behind the "…" button aren't on the island, nor is anything from the tray button on.
+    const auto visible =
+        std::min({m_overflow.value_or(ItemCount()), m_tray.value_or(ItemCount()), m_itemKeys.size()});
     for (std::size_t i = 0; i < visible; ++i)
     {
         if (m_itemKeys[i] == key)
@@ -1186,6 +1236,10 @@ void DockWindow::CloseMenu()
 
 std::wstring DockWindow::ItemName(std::size_t index) const
 {
+    if (index == m_tray)
+    {
+        return L"Show taskbar";
+    }
     if (index == m_overflow)
     {
         return L"More apps";
@@ -1204,6 +1258,10 @@ std::wstring DockWindow::ItemName(std::size_t index) const
 
 std::wstring DockWindow::ItemStatus(std::size_t index) const
 {
+    if (index == m_tray)
+    {
+        return {};
+    }
     if (index == m_overflow)
     {
         return std::format(L"{} more apps", m_model.slots.size() - index);
@@ -1643,6 +1701,19 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         Sleep(INFINITE);
         return 0;
     case TaskbarGuard::kStateMessage:
+        if (const bool hidden = wParam != 0; hidden != m_taskbarHidden)
+        {
+            // The tray button comes or goes (docs/adr/0012), before Harbor Shell hears of the change. Redrawn
+            // in place: the island stays on screen.
+            m_taskbarHidden = hidden;
+            m_hovered.reset();
+            HideLabel();
+            Refresh(/*force=*/true);
+            if (m_accessibility)
+            {
+                m_accessibility->ItemsChanged();
+            }
+        }
         m_controlChannel.Send(ipc::TaskbarState{wParam != 0, static_cast<ipc::TaskbarBlock>(lParam)});
         return 0;
     case Launcher::kLaunchedMessage:

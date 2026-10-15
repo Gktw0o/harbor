@@ -85,6 +85,10 @@ class TaskbarGuard
     void PostRequest(bool hidden) noexcept;
     // Whether the island is on screen (GuardPolicy rule 7).
     void PostPresentable(bool presentable) noexcept;
+    // The user asked to see the hidden taskbar (the tray button, docs/adr/0012). Returns the taskbar window
+    // for the caller to bring forward (SetForegroundWindow, from the thread that took the click), Explorer
+    // then shows it; until the peek ends, the guard leaves it shown. nullptr when the taskbar isn't hidden.
+    HWND Peek() noexcept;
 
     // The island. kStateMessage goes there whenever the state changes, and on every new connection; the panic
     // hotkey hides it (a way out of the dock, too) until hiding is asked for again.
@@ -122,6 +126,11 @@ class TaskbarGuard
     void RestoreNow(std::string_view reason, bool sessionEnding, bool wait);
     void WatchForReshow(HWND taskbarWindow);
     void OnTaskbarShown(HWND window);
+    // Begins the peek Peek() asked for, if one is waiting.
+    void StartPeek();
+    // While peeking: ends the peek once Explorer slid the taskbar out (or never showed it), and hides it
+    // again.
+    void CheckPeek();
     void Report(ipc::TaskbarBlock blocked, bool force);
     static taskbar::Milliseconds Now() noexcept;
 
@@ -137,6 +146,7 @@ class TaskbarGuard
     bool m_stopping = false;
     bool m_reported = false;
     bool m_islandHiddenByPanic = false;
+    bool m_peekShowLogged = false;
     HWINEVENTHOOK m_hook = nullptr;
     DWORD m_hookProcess = 0;
     UINT m_taskbarCreatedMessage = 0;
@@ -147,6 +157,10 @@ class TaskbarGuard
     std::atomic<bool> m_hotkeyRegistered{false};
     std::atomic<bool> m_stateHidden{false};
     std::atomic<ipc::TaskbarBlock> m_stateBlocked{ipc::TaskbarBlock::None};
+    // The primary taskbar window while the dock hides it: what a peek brings forward.
+    std::atomic<HWND> m_peekTarget{nullptr};
+    // Peek() was called; the guard thread hasn't begun that peek yet.
+    std::atomic<bool> m_peekAsked{false};
     // Declared last: destroyed first, so its pending restore runs while everything above still exists.
     ExplorerWorker m_worker;
 };

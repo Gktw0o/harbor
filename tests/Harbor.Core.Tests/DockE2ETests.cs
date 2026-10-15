@@ -500,6 +500,59 @@ public sealed class DockE2ETests
         }
     }
 
+    // While the dock hides the taskbar, the island ends with a tray button (docs/adr/0012). It brings the taskbar
+    // forward; Explorer shows it (played here by the test), and the dock leaves it shown until Explorer slides it
+    // away, then hides it again.
+    [TestMethod]
+    public async Task TheTrayButtonLetsTheUserPeekAtTheHiddenTaskbar()
+    {
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.LastPongSeq is not null);
+            Assert.IsTrue(server.Server.TrySend(new DockItems([new DockItem(DockItemKind.Path, @"C:\Harbor test\idle.exe", "Idle", null)])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", timeout));
+            var island = IslandWindow.Find(dock.Id);
+            async Task<string[]> ItemsAsync() =>
+                (await TestDock.RunUiaClientAsync(island, "list")).Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[1..];
+            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle" }, await ItemsAsync());
+
+            Assert.IsTrue(server.Server.TrySend(new SetTaskbar(Hidden: true)));
+            await server.WaitForMessageAsync<TaskbarState>(s => s.Hidden);
+            Assert.IsTrue(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: false));
+            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle", $"{Button}\tShow taskbar" }, await ItemsAsync());
+
+            var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "Show taskbar");
+            Assert.AreEqual(0, code, output);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "taskbar: peek: the user asked", timeout));
+            FakeTaskbar.Show(taskbar.Primary);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "Explorer shows it for the peek", timeout));
+            // Shown while the user is on it (longer than the dock takes to hide it again otherwise).
+            Assert.IsFalse(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: false, TimeSpan.FromSeconds(1.5)));
+
+            FakeTaskbar.Move(taskbar.Primary, -30000, -30000);
+            Assert.IsTrue(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: false, timeout));
+            var log = await TestDock.ReadLogAsync(dataDir.Path);
+            StringAssert.Contains(log, "taskbar: the peek is over; hiding it again");
+            Assert.IsFalse(log.Contains("Explorer showed it again", StringComparison.Ordinal), log);
+
+            // The taskbar back: no tray button.
+            FakeTaskbar.Move(taskbar.Primary, 0, 0);
+            Assert.IsTrue(server.Server.TrySend(new SetTaskbar(Hidden: false)));
+            await server.WaitForMessageAsync<TaskbarState>(s => !s.Hidden);
+            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle" }, await ItemsAsync());
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // An app flashing a window's taskbar button asks for attention: its item gets a highlight and screen readers
     // hear it, until that window comes forward or goes.
     [TestMethod]

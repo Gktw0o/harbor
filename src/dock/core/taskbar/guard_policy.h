@@ -21,6 +21,10 @@ struct GuardPolicyConfig
     // More re-hides than this within fightWindow means Explorer keeps showing the taskbar: stop trying.
     int fightLimit = 10;
     Milliseconds fightWindow{10000};
+    // A peek (docs/adr/0012) ends this long after Explorer slid the taskbar back out...
+    Milliseconds peekAway{1000};
+    // ...or this long after it began, if the taskbar never slid in.
+    Milliseconds peekStart{3000};
 };
 
 struct GuardDecision
@@ -41,9 +45,12 @@ struct GuardDecision
 //   4. no panic or Explorer-fighting block is set (only a request to show the taskbar clears one);
 //   5. a taskbar exists;
 //   6. the dock isn't in a kill-on-close job;
-//   7. the island is on screen (drawn and visible on the primary monitor): without it, the user would have
-//      neither a taskbar nor a dock.
+//   7. the island is on screen (drawn, visible, not cloaked, inside one monitor; docs/adr/0011): without
+//      it, the user would have neither a taskbar nor a dock.
 // The caller adds its own vetoes (the process is crashing, the session is ending, the dock is exiting).
+//
+// While the taskbar is hidden, the user may peek at it (docs/adr/0012): Explorer shows it, and until the peek
+// ends that is neither undone nor counted toward the circuit breaker. A peek only ever shows the taskbar.
 class GuardPolicy
 {
   public:
@@ -63,8 +70,18 @@ class GuardPolicy
     // Whether the island is on screen. Off until the dock says so.
     void OnPresentable(bool presentable);
     // Explorer showed the hidden taskbar again and the dock hid it. True if that tripped the circuit
-    // breaker, which blocks hiding like the panic hotkey does.
+    // breaker, which blocks hiding like the panic hotkey does. Not counted while peeking.
     bool OnRehide(Milliseconds now);
+
+    // The user asked to see the taskbar (the dock's tray button). True if a peek began (or began again):
+    // only while the taskbar is to be hidden.
+    bool OnPeek(Milliseconds now);
+    // Whether Explorer shows the taskbar (slid in) now; checked regularly while peeking. True if this ended
+    // the peek: the taskbar slid out peekAway ago, or never slid in within peekStart.
+    bool OnTaskbarShowing(bool showing, Milliseconds now);
+    // The taskbar was given back (any restore): no peek outlives it.
+    void EndPeek();
+    bool Peeking() const;
 
     GuardDecision Evaluate(Milliseconds now) const;
 
@@ -80,6 +97,10 @@ class GuardPolicy
     bool m_presentable = false;
     ipc::TaskbarBlock m_latch = ipc::TaskbarBlock::None;
     std::deque<Milliseconds> m_rehides;
+    bool m_peeking = false;
+    Milliseconds m_peekSince{0};
+    bool m_slidIn = false;
+    Milliseconds m_lastShowing{0};
 };
 
 } // namespace harbor::taskbar

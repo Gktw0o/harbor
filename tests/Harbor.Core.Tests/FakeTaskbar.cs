@@ -68,6 +68,16 @@ internal sealed partial class FakeTaskbar : IDisposable
     // Hides a window the way Harbor will: from another thread.
     public static void Hide(nint window) => ShowWindow(window, SwHide);
 
+    // Shows a window the way Explorer shows its taskbar for a peek (docs/adr/0012).
+    public static void Show(nint window) => ShowWindow(window, SwShowNa);
+
+    // Moves a window: off the screen, as Explorer slides an auto-hidden taskbar away, or back.
+    public static void Move(nint window, int x, int y)
+    {
+        const uint NoSize = 0x0001, NoZOrder = 0x0004, NoActivate = 0x0010;
+        SetWindowPos(window, 0, x, y, 0, 0, NoSize | NoZOrder | NoActivate);
+    }
+
     public static bool IsVisible(nint window) => IsWindowVisible(window);
 
     // ShowWindowAsync completes on the window's thread, so poll.
@@ -197,6 +207,10 @@ internal sealed partial class FakeTaskbar : IDisposable
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static partial bool IsWindowVisible(nint window);
+
+    [LibraryImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool SetWindowPos(nint window, nint insertAfter, int x, int y, int width, int height, uint flags);
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

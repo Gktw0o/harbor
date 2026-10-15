@@ -160,12 +160,15 @@ class DockWindow : private adapters::IIslandAccess
     void SetHovered(std::optional<std::size_t> hovered);
     std::optional<std::size_t> ItemAtClient(LPARAM position) const;
     // A click or UI Automation's Invoke (docs/adr/0010): brings a window forward, minimizes one, or starts
-    // the item; the "…" button opens the overflow menu. how is for the log.
+    // the item; the "…" button opens the overflow menu, the tray button peeks at the taskbar. how is for the
+    // log.
     bool ClickItem(std::size_t index, std::string_view how);
     // The same for dock item index, on the island or behind the "…" button.
     bool ClickSlot(std::size_t index, std::string_view how);
     // The "…" button's menu of the items that didn't fit, with their icons.
     void OpenOverflowMenu(std::string_view how);
+    // The tray button (docs/adr/0012): brings the hidden taskbar forward for a look.
+    void PeekTaskbar(std::string_view how);
     // Starts a pinned item. False for anything else.
     bool LaunchItem(std::size_t index, std::string_view how);
     // Brings another app's window to the front (restoring it first), without waiting on the app.
@@ -270,6 +273,9 @@ class DockWindow : private adapters::IIslandAccess
     // items there were when that was logged.
     std::optional<std::size_t> m_overflow;
     std::size_t m_overflowCount = 0;
+    // The guard hides the taskbar (its last report): the island ends with the tray button, at this place.
+    bool m_taskbarHidden = false;
+    std::optional<std::size_t> m_tray;
     // The name label's window (null if composition can't draw it), and the item it shows, if shown.
     HWND m_label = nullptr;
     std::optional<std::size_t> m_labelItem;

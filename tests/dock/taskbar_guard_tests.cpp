@@ -91,6 +91,36 @@ class TaskbarGuardTest : public ::testing::Test
         return std::filesystem::exists(adapters::RestoreRecordPath(dir.Path()));
     }
 
+    // The user clicks the tray button, and Explorer, asked to show the taskbar, does (played here by the
+    // test).
+    bool Peek()
+    {
+        if (guard.Peek() != fake.Primary())
+        {
+            return false;
+        }
+        ShowWindow(fake.Primary(), SW_SHOWNA);
+        return WaitFor([&] { return log.Contains("Explorer shows it for the peek"); });
+    }
+
+    // Waits for condition while Harbor Shell keeps pinging (longer than the 3 s ping timeout, say).
+    bool WaitPinging(const std::function<bool()>& condition, std::chrono::milliseconds timeout = 5s)
+    {
+        return WaitFor(
+            [&] {
+                guard.PostPing();
+                return condition();
+            },
+            timeout);
+    }
+
+    // Explorer slides an auto-hidden taskbar off the screen when the user is done with it.
+    void SlideOut()
+    {
+        SetWindowPos(fake.Primary(), nullptr, -30000, -30000, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+
     test::TempDir dir;
     test::CapturingLogger log;
     FakeTaskbar fake{dir.Path()};
@@ -407,6 +437,129 @@ TEST_F(TaskbarGuardTest, StopRestoresTheTaskbar)
     EXPECT_FALSE(RecordExists());
     EXPECT_TRUE(FakeTaskbar::WaitUntilVisible(fake.Primary(), true));
     EXPECT_EQ(guard.Window(), nullptr);
+}
+
+// The tray button's peek (docs/adr/0012). The restore paths first: each still gives the taskbar back, with
+// auto-hide and the record, while the user peeks at it, and no peek ending later hides it again.
+
+TEST_F(TaskbarGuardTest, WhilePeekingThePanicHotkeyRestores)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    ASSERT_TRUE(Peek());
+
+    PostMessageW(guard.Window(), WM_HOTKEY, TaskbarGuard::kPanicHotkeyId, 0);
+    ASSERT_TRUE(WaitUntilRestored());
+    EXPECT_EQ(guard.State().blocked, TaskbarBlock::PanicHotkey);
+    SlideOut();
+    Sleep(1500);
+    EXPECT_TRUE(IsWindowVisible(fake.Primary()));
+    EXPECT_FALSE(log.Contains("the peek is over"));
+}
+
+TEST_F(TaskbarGuardTest, WhilePeekingLosingHarborShellRestores)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    ASSERT_TRUE(Peek());
+
+    guard.PostLinkChanged(false);
+    ASSERT_TRUE(WaitUntilRestored());
+    SlideOut();
+    Sleep(1500);
+    EXPECT_TRUE(IsWindowVisible(fake.Primary()));
+}
+
+TEST_F(TaskbarGuardTest, WhilePeekingASilentWatchdogRestores)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    ASSERT_TRUE(Peek());
+    // No more pings: the 3 s timeout runs out while the taskbar is shown for the peek.
+    EXPECT_TRUE(WaitUntilRestored());
+    EXPECT_TRUE(log.Contains("watchdog went quiet"));
+
+    // The watchdog back, the taskbar goes again: the old peek didn't outlive the restore, so Explorer showing
+    // it now is a re-show.
+    guard.PostPing();
+    ASSERT_TRUE(WaitUntilHidden());
+    ShowWindow(fake.Primary(), SW_SHOWNA);
+    EXPECT_TRUE(WaitPinging([&] { return log.Contains("Explorer showed it again"); }));
+    EXPECT_TRUE(WaitPinging([&] { return !IsWindowVisible(fake.Primary()); }));
+}
+
+TEST_F(TaskbarGuardTest, WhilePeekingStopRestores)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    ASSERT_TRUE(Peek());
+    guard.Stop();
+
+    EXPECT_EQ(fake.AutoHide(), 0u);
+    EXPECT_FALSE(RecordExists());
+    EXPECT_TRUE(FakeTaskbar::WaitUntilVisible(fake.Primary(), true));
+}
+
+// The crash handlers show the windows the dock hid: a peek never takes one off that list.
+TEST_F(TaskbarGuardTest, WhilePeekingTheCrashHandlersStillKnowTheTaskbar)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    ASSERT_TRUE(Peek());
+    bool listed = false;
+    hidden.ForEach([&](HWND window) { listed = listed || window == fake.Primary(); });
+    EXPECT_TRUE(listed);
+}
+
+// Explorer shows the taskbar for the user as often as it likes while they peek: no re-hide, no breaker
+// (the limit here is 3). Once it slides out, the dock hides it again; hiding is still on.
+TEST_F(TaskbarGuardTest, APeekLeavesTheTaskbarToExplorerUntilItSlidesOut)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    ASSERT_TRUE(Peek());
+    for (int i = 0; i < 5; ++i)
+    {
+        ShowWindow(fake.Secondaries()[0], SW_SHOWNA);
+        Sleep(50);
+    }
+    // Shown for as long as the user stays on it.
+    EXPECT_FALSE(WaitPinging([&] { return !IsWindowVisible(fake.Primary()); }, 1500ms));
+    EXPECT_TRUE(guard.State().hidden);
+    EXPECT_EQ(guard.State().blocked, TaskbarBlock::None);
+    EXPECT_FALSE(log.Contains("Explorer showed it again"));
+
+    SlideOut();
+    EXPECT_TRUE(WaitPinging([&] { return !IsWindowVisible(fake.Primary()); }));
+    EXPECT_TRUE(log.Contains("the peek is over"));
+    EXPECT_TRUE(guard.State().hidden);
+    EXPECT_EQ(fake.AutoHide(), 1u);
+
+    // Back to normal: Explorer showing it now is a re-show again.
+    SetWindowPos(fake.Primary(), nullptr, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    ShowWindow(fake.Primary(), SW_SHOWNA);
+    EXPECT_TRUE(WaitPinging([&] { return log.Contains("Explorer showed it again"); }));
+    EXPECT_TRUE(WaitPinging([&] { return !IsWindowVisible(fake.Primary()); }));
+}
+
+// Explorer never showed it (bringing it forward failed): the peek ends by itself (after 3 s).
+TEST_F(TaskbarGuardTest, APeekTheTaskbarNeverAnsweredEnds)
+{
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    ASSERT_EQ(guard.Peek(), fake.Primary());
+    EXPECT_TRUE(WaitPinging([&] { return log.Contains("the peek is over"); }));
+    EXPECT_TRUE(guard.State().hidden);
+}
+
+TEST_F(TaskbarGuardTest, NoPeekWhileTheTaskbarIsShown)
+{
+    EXPECT_EQ(guard.Peek(), nullptr);
+    ConnectAndRequestHide();
+    ASSERT_TRUE(WaitUntilHidden());
+    guard.PostRequest(false);
+    ASSERT_TRUE(WaitUntilRestored());
+    EXPECT_EQ(guard.Peek(), nullptr);
 }
 
 TEST(TaskbarGuard, AHotkeyAnotherAppHoldsBlocksHiding)

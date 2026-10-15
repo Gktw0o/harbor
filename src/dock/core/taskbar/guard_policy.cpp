@@ -16,6 +16,7 @@ void GuardPolicy::OnRequest(bool hidden)
     {
         m_latch = TaskbarBlock::None;
         m_rehides.clear();
+        EndPeek();
     }
 }
 
@@ -30,6 +31,7 @@ void GuardPolicy::OnLinkDown()
     m_linkUp = false;
     m_pingsOnThisLink = 0;
     m_requested = false;
+    EndPeek();
 }
 
 void GuardPolicy::OnPing(Milliseconds now)
@@ -53,6 +55,7 @@ void GuardPolicy::OnPanic()
     {
         m_latch = TaskbarBlock::PanicHotkey;
     }
+    EndPeek();
 }
 
 void GuardPolicy::OnKillOnCloseJob(bool inside)
@@ -72,6 +75,10 @@ void GuardPolicy::OnPresentable(bool presentable)
 
 bool GuardPolicy::OnRehide(Milliseconds now)
 {
+    if (m_peeking)
+    {
+        return false;
+    }
     while (!m_rehides.empty() && now - m_rehides.front() > m_config.fightWindow)
     {
         m_rehides.pop_front();
@@ -83,6 +90,52 @@ bool GuardPolicy::OnRehide(Milliseconds now)
     }
     m_latch = TaskbarBlock::ExplorerFighting;
     return true;
+}
+
+bool GuardPolicy::OnPeek(Milliseconds now)
+{
+    if (!Evaluate(now).hide)
+    {
+        return false;
+    }
+    // Again while peeking: the taskbar may be on its way out; it gets its time to come back.
+    m_peeking = true;
+    m_peekSince = now;
+    m_slidIn = false;
+    return true;
+}
+
+bool GuardPolicy::OnTaskbarShowing(bool showing, Milliseconds now)
+{
+    if (!m_peeking)
+    {
+        return false;
+    }
+    if (showing)
+    {
+        m_slidIn = true;
+        m_lastShowing = now;
+        return false;
+    }
+    // Explorer slides the taskbar out once the focus leaves it and its flyouts: the user is done.
+    const bool over =
+        m_slidIn ? now - m_lastShowing >= m_config.peekAway : now - m_peekSince >= m_config.peekStart;
+    if (over)
+    {
+        EndPeek();
+    }
+    return over;
+}
+
+void GuardPolicy::EndPeek()
+{
+    m_peeking = false;
+    m_slidIn = false;
+}
+
+bool GuardPolicy::Peeking() const
+{
+    return m_peeking;
 }
 
 GuardDecision GuardPolicy::Evaluate(Milliseconds now) const

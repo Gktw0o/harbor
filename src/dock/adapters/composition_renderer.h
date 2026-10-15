@@ -51,11 +51,13 @@ class CompositionRenderer
 
     // Rebuilds the island for layout (screen coordinates; the window covers layout.island) and style, with
     // the icons from icons and the marks as SetMarks would show them; item overflow, if any, is the "…"
-    // button. Posts committedMessage (wParam = tag) to the window once the frame has been committed for the
-    // screen. False if it failed.
+    // button, item tray the tray button (an upward chevron); icons isn't asked for either. Posts
+    // committedMessage (wParam = tag) to the window once the frame has been committed for the screen. False
+    // if it failed.
     bool Render(const island::Layout& layout, const island::IslandStyle& style, const IconSource& icons,
                 std::span<const island::ItemMarks> marks, std::optional<std::size_t> hovered,
-                std::optional<std::size_t> overflow, UINT committedMessage, WPARAM tag) noexcept;
+                std::optional<std::size_t> overflow, std::optional<std::size_t> tray, UINT committedMessage,
+                WPARAM tag) noexcept;
 
     // Moves the hover highlight; nullopt hides it.
     void SetHovered(std::optional<std::size_t> hovered) noexcept;

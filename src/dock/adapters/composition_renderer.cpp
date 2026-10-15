@@ -192,6 +192,29 @@ struct CompositionRenderer::Impl
         });
     }
 
+    // The tray button: an upward chevron, as on the taskbar's "show hidden icons" button.
+    wuc::CompositionSurfaceBrush TrayBrush(int size, island::Color color)
+    {
+        return DrawSurface(size, [&](ID2D1DeviceContext& context, const D2D1_RECT_F& area) {
+            winrt::com_ptr<ID2D1SolidColorBrush> brush;
+            winrt::check_hresult(context.CreateSolidColorBrush(ToD2D(color), brush.put()));
+            const float extent = area.right - area.left;
+            const float stroke = extent * 0.07f;
+            winrt::com_ptr<ID2D1Factory> factory;
+            context.GetFactory(factory.put());
+            winrt::com_ptr<ID2D1StrokeStyle> round;
+            winrt::check_hresult(factory->CreateStrokeStyle(
+                D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                                            D2D1_LINE_JOIN_ROUND),
+                nullptr, 0, round.put()));
+            const D2D1_POINT_2F left{area.left + extent * 0.32f, area.top + extent * 0.58f};
+            const D2D1_POINT_2F top{area.left + extent * 0.5f, area.top + extent * 0.4f};
+            const D2D1_POINT_2F right{area.left + extent * 0.68f, area.top + extent * 0.58f};
+            context.DrawLine(left, top, brush.get(), stroke, round.get());
+            context.DrawLine(top, right, brush.get(), stroke, round.get());
+        });
+    }
+
     // The Shell's icon, scaled down to size (high-quality cubic), centred if it isn't square.
     wuc::CompositionSurfaceBrush IconBrush(int size, const island::IconView& icon)
     {
@@ -361,7 +384,7 @@ catch (...)
 bool CompositionRenderer::Render(const island::Layout& layout, const island::IslandStyle& style,
                                  const IconSource& icons, std::span<const island::ItemMarks> marks,
                                  std::optional<std::size_t> hovered, std::optional<std::size_t> overflow,
-                                 UINT committedMessage, WPARAM tag) noexcept
+                                 std::optional<std::size_t> tray, UINT committedMessage, WPARAM tag) noexcept
 try
 {
     auto& impl = *m_impl;
@@ -438,6 +461,10 @@ try
         if (overflow == i)
         {
             visual.Brush(impl.OverflowBrush(metrics.icon, style.dot));
+        }
+        else if (tray == i)
+        {
+            visual.Brush(impl.TrayBrush(metrics.icon, style.dot));
         }
         else if (const auto icon = icons ? icons(i, file) : std::nullopt)
         {

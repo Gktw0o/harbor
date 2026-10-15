@@ -1,5 +1,6 @@
 #include "app/taskbar_guard.h"
 
+#include <dwmapi.h>
 #include <format>
 #include <utility>
 
@@ -17,6 +18,7 @@ constexpr UINT kLinkMessage = WM_APP + 2;        // wParam: connected
 constexpr UINT kPingMessage = WM_APP + 3;        //
 constexpr UINT kRequestMessage = WM_APP + 4;     // wParam: hidden
 constexpr UINT kPresentableMessage = WM_APP + 5; // wParam: presentable
+constexpr UINT kPeekMessage = WM_APP + 6;        //
 constexpr UINT_PTR kCheckTimer = 1;
 // How often a silent watchdog is noticed; well under the ping timeout.
 constexpr UINT kCheckIntervalMs = 250;
@@ -27,6 +29,28 @@ constexpr std::chrono::seconds kRestoreRetryDelay{1};
 
 // Out-of-context WinEvent callbacks run on the thread that set the hook: the guard's.
 thread_local TaskbarGuard* t_guard = nullptr;
+
+// Whether Explorer shows the taskbar: visible, not cloaked, with at least half of it on its monitor (an
+// auto-hidden taskbar slides off the screen but for a few pixels).
+bool SlidIn(HWND window) noexcept
+{
+    RECT rect{};
+    if (window == nullptr || !IsWindowVisible(window) || !GetWindowRect(window, &rect) ||
+        rect.bottom <= rect.top)
+    {
+        return false;
+    }
+    DWORD cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0)
+    {
+        return false;
+    }
+    MONITORINFO monitor{sizeof(monitor)};
+    RECT inside{};
+    return GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor) &&
+           IntersectRect(&inside, &rect, &monitor.rcMonitor) &&
+           2 * (inside.bottom - inside.top) >= rect.bottom - rect.top;
+}
 
 } // namespace
 
@@ -78,6 +102,18 @@ void TaskbarGuard::PostRequest(bool hidden) noexcept
 void TaskbarGuard::PostPresentable(bool presentable) noexcept
 {
     Post(kPresentableMessage, presentable);
+}
+
+HWND TaskbarGuard::Peek() noexcept
+{
+    const HWND target = m_peekTarget.load();
+    if (target != nullptr)
+    {
+        // Explorer may show the taskbar before this message arrives: OnTaskbarShown begins the peek then.
+        m_peekAsked.store(true);
+        Post(kPeekMessage);
+    }
+    return target;
 }
 
 ipc::TaskbarState TaskbarGuard::State() const noexcept
@@ -198,6 +234,8 @@ LRESULT TaskbarGuard::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPAR
             m_hookProcess = 0;
         }
         m_hidden = false;
+        m_peekTarget.store(nullptr);
+        m_policy.EndPeek();
         Reevaluate("Explorer restarted");
         return 0;
     }
@@ -234,8 +272,12 @@ LRESULT TaskbarGuard::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPAR
         m_policy.OnPresentable(wParam != 0);
         Reevaluate(wParam != 0 ? "the island is on screen" : "the island isn't on screen");
         return 0;
+    case kPeekMessage:
+        StartPeek();
+        return 0;
     case WM_TIMER:
         Reevaluate("Harbor Shell's watchdog went quiet");
+        CheckPeek();
         return 0;
     case WM_DISPLAYCHANGE:
         // A new monitor brings a new secondary taskbar.
@@ -339,6 +381,8 @@ void TaskbarGuard::Hide()
         return;
     }
     WatchForReshow(windows.front().hwnd);
+    // The primary taskbar comes first.
+    m_peekTarget.store(windows.front().hwnd);
     if (!m_hidden)
     {
         m_log.Info("taskbar: hiding it (Harbor Shell asked, and every safety rule holds)");
@@ -386,6 +430,16 @@ void TaskbarGuard::OnTaskbarShown(HWND window)
     {
         return;
     }
+    StartPeek();
+    if (m_policy.Peeking())
+    {
+        // What the user asked for: left shown, and not a fight.
+        if (!std::exchange(m_peekShowLogged, true))
+        {
+            m_log.Info("taskbar: Explorer shows it for the peek");
+        }
+        return;
+    }
     ShowWindowAsync(window, SW_HIDE);
     m_hiddenWindows.Add(window);
     // Kept in the log to learn what makes Explorer show it (Start, notifications...); the circuit breaker
@@ -400,10 +454,53 @@ void TaskbarGuard::OnTaskbarShown(HWND window)
     }
 }
 
+void TaskbarGuard::StartPeek()
+{
+    if (!m_peekAsked.exchange(false))
+    {
+        return;
+    }
+    if (m_hidden && m_policy.OnPeek(Now()))
+    {
+        m_peekShowLogged = false;
+        m_log.Info("taskbar: peek: the user asked to see it; leaving it to Explorer until it slides out");
+    }
+    else
+    {
+        m_log.Info("taskbar: no peek: the taskbar isn't hidden");
+    }
+}
+
+void TaskbarGuard::CheckPeek()
+{
+    if (!m_policy.Peeking() || !m_policy.OnTaskbarShowing(SlidIn(m_peekTarget.load()), Now()))
+    {
+        return;
+    }
+    m_log.Info("taskbar: the peek is over; hiding it again");
+    if (m_hidden)
+    {
+        // Auto-hide stayed on: only the windows go again. A restore posted after this shows them again.
+        m_worker.Post([this] {
+            if (crash_guard::IsDying())
+            {
+                return;
+            }
+            for (const HWND window : m_taskbar.HideWindows())
+            {
+                m_hiddenWindows.Add(window);
+            }
+        });
+    }
+}
+
 void TaskbarGuard::RestoreNow(std::string_view reason, bool sessionEnding, bool wait)
 {
     m_log.Info(std::format("taskbar: restoring because {}", reason));
     m_hidden = false;
+    m_policy.EndPeek();
+    m_peekTarget.store(nullptr);
+    m_peekAsked.store(false);
     // Visible at once, without waiting on Explorer.
     m_hiddenWindows.ForEach([](HWND window) { ShowWindowAsync(window, SW_SHOWNA); });
     m_hiddenWindows.Clear();

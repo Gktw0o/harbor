@@ -374,6 +374,17 @@ try
                                     hoverRadius);
     island.Children().InsertAtTop(impl.hover);
 
+    if (layout.divider)
+    {
+        const auto& divider = *layout.divider;
+        auto line = impl.compositor.CreateSpriteVisual();
+        line.Size(Size(divider));
+        line.Offset({static_cast<float>(divider.left - layout.island.left),
+                     static_cast<float>(divider.top - layout.island.top), 0});
+        line.Brush(impl.compositor.CreateColorBrush(ToWinRt(style.divider)));
+        island.Children().InsertAtTop(line);
+    }
+
     impl.items.clear();
     impl.dots.clear();
     impl.highlights.clear();

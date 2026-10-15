@@ -7,6 +7,8 @@
 // harbor_test_uia_client <island window> hold <name>
 //     Finds the child button with that name and prints "found". After a line on standard input, asks that
 //     same element for its name again and prints "alive\t<name>", or "gone" if it is no longer available.
+// harbor_test_uia_client <island window> status <name>
+//     Prints "status\t<item status>" for the child button with that name (empty if it has none).
 //
 // Exit codes: 0 done, 1 bad arguments, 2 UI Automation failed, 3 no such button, 4 Invoke failed, 5 gone.
 
@@ -68,7 +70,7 @@ int Hold(IUIAutomationElement& element)
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc < 3 || ((std::wstring(argv[2]) == L"invoke" || std::wstring(argv[2]) == L"hold") && argc < 4))
+    if (argc < 3 || (std::wstring(argv[2]) != L"list" && argc < 4))
     {
         return 1;
     }
@@ -120,6 +122,16 @@ int wmain(int argc, wchar_t** argv)
             if (command == L"hold")
             {
                 return Hold(*child);
+            }
+            if (command == L"status")
+            {
+                wil::unique_bstr status;
+                if (FAILED(child->get_CurrentItemStatus(&status)))
+                {
+                    return 2;
+                }
+                PrintLine(L"status", status.get());
+                return 0;
             }
             wil::com_ptr_nothrow<IUIAutomationInvokePattern> invoke;
             if (FAILED(child->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&invoke))) || !invoke)

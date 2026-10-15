@@ -330,6 +330,122 @@ public sealed class DockE2ETests
         }
     }
 
+    // Running apps get a dot: a pinned one on its pin (here by AppUserModelID, without waiting for the Shell),
+    // the others as items after the pinned ones, under their file name once the Shell had its chance to name
+    // them. Screen readers hear how many windows each has.
+    [TestMethod]
+    public async Task RunningAppsShowOnTheirPinOrAfterThePinnedItems()
+    {
+        const int ToolBar = 50021;
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var pinned = $"Harbor.Test.{taskbar.Id}.Pinned";
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\idle.exe", "Idle", null),
+                new DockItem(DockItemKind.App, pinned, "Pinned app", null),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 2 items", timeout));
+
+            await windows.SendAsync($"new 1 {pinned}");
+            await windows.SendAsync("new 2");
+            await windows.SendAsync("new 3");
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 3 items", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+
+            var (listed, tree) = await TestDock.RunUiaClientAsync(island, "list");
+            Assert.AreEqual(0, listed, tree);
+            CollectionAssert.AreEqual(
+                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tIdle", $"{Button}\tPinned app", $"{Button}\tharbor_test_windows" },
+                tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), tree);
+            async Task<string> StatusAsync(string name) =>
+                (await TestDock.RunUiaClientAsync(island, "status", name)).Output.TrimEnd('\r', '\n');
+            Assert.AreEqual("status\t", await StatusAsync("Idle"));
+            Assert.AreEqual("status\trunning, 1 window", await StatusAsync("Pinned app"));
+            Assert.AreEqual("status\trunning, 2 windows", await StatusAsync("harbor_test_windows"));
+
+            // Their windows gone, the running app's item goes; the pinned items stay.
+            var from = await TestDock.LogLengthAsync(dataDir.Path);
+            await windows.SendAsync("close 1");
+            await windows.SendAsync("close 2");
+            await windows.SendAsync("close 3");
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "island: 2 items", timeout));
+            Assert.AreEqual("status\t", await StatusAsync("Pinned app"));
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // A click on a running app (here UI Automation's Invoke, which does the same) brings its most recent window
+    // forward; again, its next window in turn; with one window in front, minimizes it; and brings a minimized
+    // one back.
+    [TestMethod]
+    public async Task ClickingARunningAppCyclesItsWindowsAndMinimizesTheOnlyOne()
+    {
+        TestDock.RequireForegroundTests();
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            await windows.SendAsync("new 1");
+            await windows.SendAsync("new 2");
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+
+            async Task ClickAsync()
+            {
+                var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "harbor_test_windows");
+                Assert.AreEqual(0, code, output);
+            }
+            Task<bool> InFrontAsync(int window) => TestDock.WaitUntilAsync(
+                async () => await windows.SendAsync("foreground") == $"ok {window}", timeout);
+            Task<bool> MinimizedAsync(int window, bool minimized) => TestDock.WaitUntilAsync(
+                async () => await windows.SendAsync($"minimized {window}") == (minimized ? "ok 1" : "ok 0"), timeout);
+
+            // Neither was in front yet: the newer one comes forward.
+            await ClickAsync();
+            Assert.IsTrue(await InFrontAsync(2), "window 2 didn't come to the front");
+            await ClickAsync();
+            Assert.IsTrue(await InFrontAsync(1), "window 1 didn't come next");
+            await ClickAsync();
+            Assert.IsTrue(await InFrontAsync(2), "the cycle didn't start over");
+
+            var from = await TestDock.LogLengthAsync(dataDir.Path);
+            await windows.SendAsync("close 1");
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "windows: 1 apps, 1 windows", timeout));
+            await ClickAsync();
+            Assert.IsTrue(await MinimizedAsync(2, true), "the only window in front wasn't minimized");
+            await ClickAsync();
+            Assert.IsTrue(await MinimizedAsync(2, false), "the minimized window wasn't restored");
+            Assert.IsTrue(await InFrontAsync(2), "the restored window isn't in front");
+
+            var log = await TestDock.ReadLogAsync(dataDir.Path);
+            StringAssert.Contains(log, "click: item 0 (UI Automation): its window is minimized");
+            StringAssert.Contains(log, "click: item 0 (UI Automation): a window comes forward, restored");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
     [TestMethod]
     public async Task TheDockExitsNormallyWhenItsWindowIsClosed()

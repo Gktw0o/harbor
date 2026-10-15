@@ -40,6 +40,33 @@ internal static partial class TestDock
         return copy;
     }
 
+    // Tests that bring windows to the front move the keyboard focus away from whatever the person at this PC
+    // is typing in: they run in CI, and locally only with HARBOR_FOREGROUND_TESTS=1.
+    public static void RequireForegroundTests()
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase) &&
+            Environment.GetEnvironmentVariable("HARBOR_FOREGROUND_TESTS") != "1")
+        {
+            Assert.Inconclusive("Changes the foreground: runs in CI, or set HARBOR_FOREGROUND_TESTS=1.");
+        }
+    }
+
+    // Polls until check() holds; false after the timeout.
+    public static async Task<bool> WaitUntilAsync(Func<Task<bool>> check, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        do
+        {
+            if (await check())
+            {
+                return true;
+            }
+            await Task.Delay(50);
+        }
+        while (deadline.Elapsed < timeout);
+        return false;
+    }
+
     // Runs tests/dock/uia_client.cpp against the island: a UI Automation client in its own process, as a screen
     // reader is. Returns its exit code and output.
     public static async Task<(int ExitCode, string Output)> RunUiaClientAsync(nint island, params string[] arguments)

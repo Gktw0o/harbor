@@ -16,6 +16,7 @@ IslandStyle StyleFor(const SystemAppearance& appearance) noexcept
             .placeholder = appearance.highContrastText,
             .dot = appearance.highContrastText,
             .attention = appearance.highContrastHighlight,
+            .divider = appearance.highContrastText,
         };
     }
     // Like Windows' own flyouts: blur with a translucent tint, or the tint made opaque when transparency is
@@ -32,6 +33,7 @@ IslandStyle StyleFor(const SystemAppearance& appearance) noexcept
             .placeholder = {255, 96, 96, 96},
             .dot = {204, 255, 255, 255},
             .attention = {110, 255, 176, 32},
+            .divider = {72, 255, 255, 255},
         };
     }
     return {
@@ -42,6 +44,7 @@ IslandStyle StyleFor(const SystemAppearance& appearance) noexcept
         .placeholder = {255, 200, 200, 200},
         .dot = {178, 0, 0, 0},
         .attention = {96, 255, 140, 0},
+        .divider = {56, 0, 0, 0},
     };
 }
 

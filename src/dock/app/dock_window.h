@@ -22,6 +22,7 @@
 #include "app/taskbar_guard.h"
 #include "app/window_watcher.h"
 #include "core/island/appearance.h"
+#include "core/island/dock_model.h"
 #include "core/island/layout.h"
 #include "ports/ipc_channel.h"
 #include "ports/logger.h"
@@ -108,6 +109,13 @@ class DockWindow : private adapters::IIslandAccess
     void OnDockItems();
     // The window watcher has a new snapshot.
     void OnWindowsChanged();
+    // Builds the dock model again from the pinned items and the running apps; redraws if the items changed
+    // (always if forced), or only shows the new marks.
+    void RebuildModel(bool force);
+    // The marks of the visible items.
+    std::vector<island::ItemMarks> VisibleMarks() const;
+    // The windows of every app an item stands for.
+    std::vector<windows::AppWindows::Window> WindowsOf(const island::DockSlot& slot) const;
     // Reads the monitor, work area and appearance again and redraws if anything changed (or if forced).
     void Refresh(bool force);
     void OnCommitted(WPARAM generation);
@@ -121,7 +129,10 @@ class DockWindow : private adapters::IIslandAccess
     void OnLaunched(LaunchReport* report);
     void SetHovered(std::optional<std::size_t> hovered);
     std::optional<std::size_t> ItemAtClient(LPARAM position) const;
-    // A click or UI Automation's Invoke. how is for the log.
+    // A click or UI Automation's Invoke (docs/adr/0010): brings a window forward, minimizes one, or starts
+    // the item. how is for the log.
+    bool ClickItem(std::size_t index, std::string_view how);
+    // Starts a pinned item. False for anything else.
     bool LaunchItem(std::size_t index, std::string_view how);
     void UpdatePresentable();
 
@@ -134,6 +145,7 @@ class DockWindow : private adapters::IIslandAccess
     std::uint64_t ItemKey(std::size_t index) const override;
     std::optional<std::size_t> IndexOfKey(std::uint64_t key) const override;
     std::wstring ItemName(std::size_t index) const override;
+    std::wstring ItemStatus(std::size_t index) const override;
     RECT ItemBounds(std::size_t index) const override;
     std::optional<std::size_t> ItemAt(POINT screenPoint) const override;
     bool InvokeItem(std::size_t index) override;
@@ -145,10 +157,14 @@ class DockWindow : private adapters::IIslandAccess
     Options m_options;
     // From the channel's thread to this one.
     LatestValue<ipc::DockItems> m_receivedItems;
-    // What the dock shows. Kept while the Shell is away.
+    // The pinned items. Kept while the Shell is away.
     ipc::DockItems m_items;
-    // Each item's UI Automation key, and the keys by item identity (kind, target, and how many times the same
-    // pin came before it) for the next list.
+    // What the dock shows: the pinned items, then the running apps that aren't.
+    island::DockModel m_model;
+    // When the dock first saw each running app: its wait for Harbor Shell's answer starts then.
+    std::map<windows::AppId, std::chrono::milliseconds> m_appsSeen;
+    // Each item's UI Automation key, and the keys by item identity (a pin's kind, target, and how many times
+    // the same pin came before it; a running app's id) for the next list.
     std::vector<std::uint64_t> m_itemKeys;
     std::map<std::string, std::uint64_t> m_keysByIdentity;
     std::uint64_t m_nextItemKey = 1;

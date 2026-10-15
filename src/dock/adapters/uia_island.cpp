@@ -97,6 +97,12 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
         case UIA_AutomationIdPropertyId:
             SetString(value, (L"HarborDockItem." + std::to_wstring(m_key)).c_str());
             break;
+        case UIA_ItemStatusPropertyId:
+            if (const auto status = m_state->island->ItemStatus(*index); !status.empty())
+            {
+                SetString(value, status.c_str());
+            }
+            break;
         case UIA_IsKeyboardFocusablePropertyId:
             // The island never takes the focus.
             value->vt = VT_BOOL;

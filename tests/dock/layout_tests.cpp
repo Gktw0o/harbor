@@ -118,6 +118,35 @@ TEST(Layout, EveryPointOfTheIslandHitsTheNearestItem)
     EXPECT_FALSE(HitTest(layout, {layout.island.right, items[0].top}));
 }
 
+TEST(Layout, ADividerSeparatesPinnedItemsFromRunningApps)
+{
+    const auto metrics = MeasureFor(1920, k100Percent, 4, /*divider=*/true);
+    EXPECT_EQ(metrics.divider, 13);
+    const auto layout = Arrange({0, 1000, 1920, 1080}, metrics, 2);
+
+    // 8 + 4 * 48 + 3 * 6 + 7 more for the divider + 8 = 233 wide.
+    EXPECT_EQ(layout.island, (Rect{843, 1008, 1076, 1072}));
+    EXPECT_EQ(layout.items[1], (Rect{905, 1016, 953, 1064}));
+    EXPECT_EQ(layout.items[2], (Rect{966, 1016, 1014, 1064}));
+    // A 1 px line in the middle of the 13 px between them, 9 px shorter than the icons at each end.
+    EXPECT_EQ(layout.divider, (Rect{959, 1025, 960, 1055}));
+    EXPECT_EQ(layout.items[3].right + 8, layout.island.right);
+
+    // The divider's room belongs to the items either side, split in the middle.
+    EXPECT_EQ(HitTest(layout, {958, 1040}), 1u);
+    EXPECT_EQ(HitTest(layout, {960, 1040}), 2u);
+}
+
+TEST(Layout, NoDividerWithoutItemsOnBothSides)
+{
+    const auto metrics = MeasureFor(1920, k100Percent, 3, /*divider=*/true);
+    EXPECT_FALSE(Arrange({0, 1000, 1920, 1080}, metrics, 0).divider);
+    EXPECT_FALSE(Arrange({0, 1000, 1920, 1080}, metrics, 3).divider);
+    const auto plain = Arrange({0, 1000, 1920, 1080}, MeasureFor(1920, k100Percent, 3), 1);
+    EXPECT_FALSE(plain.divider);
+    EXPECT_EQ(plain.island.Width(), 8 + 3 * 48 + 2 * 6 + 8);
+}
+
 TEST(Layout, TheRunningDotSitsCentredInThePaddingBelowTheIcon)
 {
     const auto layout = Arrange({0, 1000, 1920, 1080}, MeasureFor(1920, k100Percent, 4));

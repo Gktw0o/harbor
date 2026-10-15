@@ -17,6 +17,8 @@ inline constexpr int kPaddingDip = 8;
 inline constexpr int kGapDip = 6;
 inline constexpr int kMarginDip = 8;
 inline constexpr int kCornerRadiusDip = 18;
+// Between the pinned items and the running apps after them, in place of a gap: a line with room either side.
+inline constexpr int kDividerDip = 13;
 
 // DIPs to physical pixels at dpi (96 = 100 %), rounded to the nearest pixel.
 int Scale(int dip, unsigned dpi) noexcept;
@@ -30,6 +32,8 @@ struct Metrics
     // Between the island and the screen's bottom edge, and above the island inside the reserved strip.
     int margin = 0;
     int cornerRadius = 0;
+    // The space a divider takes between two items (instead of a gap); 0: no divider.
+    int divider = 0;
     // Items that fit; the rest aren't shown.
     std::size_t visibleCount = 0;
 
@@ -42,7 +46,8 @@ struct Metrics
     friend bool operator==(const Metrics&, const Metrics&) = default;
 };
 
-Metrics MeasureFor(int monitorWidth, unsigned dpi, std::size_t itemCount) noexcept;
+// divider: the items include a divider (its room is kept).
+Metrics MeasureFor(int monitorWidth, unsigned dpi, std::size_t itemCount, bool divider = false) noexcept;
 
 struct Layout
 {
@@ -51,14 +56,17 @@ struct Layout
     geometry::Rect island;
     // One icon rectangle per visible item, left to right.
     std::vector<geometry::Rect> items;
+    // The divider's line, if one is shown.
+    std::optional<geometry::Rect> divider;
 };
 
-// Places the island and its items in the strip the AppBar got. With no items, the island is one empty slot
-// wide, so the dock never disappears.
-Layout Arrange(const geometry::Rect& strip, const Metrics& metrics);
+// Places the island and its items in the strip the AppBar got, with a divider after the first dividerAfter
+// items if metrics has room for one and items are visible on both sides. With no items, the island is one
+// empty slot wide, so the dock never disappears.
+Layout Arrange(const geometry::Rect& strip, const Metrics& metrics, std::size_t dividerAfter = 0);
 
-// The item under a point. Every point of the island belongs to the nearest item, gaps and padding included,
-// so there's nowhere on it a click does nothing.
+// The item under a point. Every point of the island belongs to the nearest item, gaps, padding and the
+// divider included, so there's nowhere on it a click does nothing.
 std::optional<std::size_t> HitTest(const Layout& layout, geometry::Point point) noexcept;
 
 // What an item shows besides its icon.

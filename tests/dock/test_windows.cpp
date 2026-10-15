@@ -10,6 +10,8 @@
 //     aumid <n> <aumid>  sets its AppUserModelID later ("-" clears it)
 //     show <n>, hide <n>, minimize <n>, restore <n>, cloak <n>, uncloak <n>, flash <n>, close <n>
 //     activate <n>       SetForegroundWindow; answers "ok 1" if it took
+//     minimized <n>      answers "ok 1" if it is minimized, "ok 0" if not
+//     foreground         answers "ok <n>" for the window in front, "ok 0" if it isn't one of these
 //     hang <ms>          the windows' thread sleeps (a hung app)
 //     quit
 
@@ -112,6 +114,18 @@ class Windows
             Sleep(static_cast<DWORD>(number));
             return "ok";
         }
+        if (command == "foreground")
+        {
+            const HWND foreground = GetForegroundWindow();
+            for (const auto& [n, window] : m_windows)
+            {
+                if (window == foreground)
+                {
+                    return "ok " + std::to_string(n);
+                }
+            }
+            return "ok 0";
+        }
         if (!(words >> number))
         {
             return "error bad command";
@@ -174,6 +188,10 @@ class Windows
         if (command == "activate")
         {
             return SetForegroundWindow(window) ? "ok 1" : "ok 0";
+        }
+        if (command == "minimized")
+        {
+            return IsIconic(window) ? "ok 1" : "ok 0";
         }
         if (command == "close")
         {

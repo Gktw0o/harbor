@@ -17,6 +17,7 @@
 #include "adapters/win32_app_bar.h"
 #include "adapters/win32_window_system.h"
 #include "app/exit_codes.h"
+#include "core/island/click_policy.h"
 #include "core/island/icon_file.h"
 #include "core/island/on_screen.h"
 
@@ -58,6 +59,8 @@ std::pair<int, int> UnpackPair(std::uint64_t packed) noexcept
 
 constexpr UINT_PTR kOrphanTimer = 1;
 constexpr UINT_PTR kDeviceRetryTimer = 2;
+// A running app waits for Harbor Shell's answer: build the model again when its wait ends.
+constexpr UINT_PTR kModelTimer = 3;
 constexpr UINT kDeviceRetryMs = 2000;
 // Failed attempts at a new graphics device before the dock gives up (and Harbor Shell restores the taskbar).
 constexpr int kDeviceAttempts = 5;
@@ -72,6 +75,41 @@ struct MonitorFacts
 geometry::Rect FromRect(const RECT& rect) noexcept
 {
     return {rect.left, rect.top, rect.right, rect.bottom};
+}
+
+HWND ToHwnd(windows::WindowId id) noexcept
+{
+    return reinterpret_cast<HWND>(static_cast<std::uintptr_t>(id));
+}
+
+windows::WindowId ToId(HWND hwnd) noexcept
+{
+    return static_cast<windows::WindowId>(reinterpret_cast<std::uintptr_t>(hwnd));
+}
+
+std::chrono::milliseconds SteadyNow() noexcept
+{
+    return std::chrono::milliseconds(GetTickCount64());
+}
+
+// The same items in the same order, looking the same: only their marks, or the apps behind them, may differ.
+bool SameItems(const island::DockModel& a, const island::DockModel& b)
+{
+    if (a.pinned != b.pinned || a.slots.size() != b.slots.size())
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < a.slots.size(); ++i)
+    {
+        const auto& x = a.slots[i];
+        const auto& y = b.slots[i];
+        if (x.kind != y.kind || x.pin != y.pin || x.name != y.name || x.icon != y.icon ||
+            (x.kind == island::DockSlot::Kind::App && x.apps != y.apps))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 // The monitor the island is on: the primary until the dock follows the mouse (docs/adr/0011).
@@ -304,16 +342,9 @@ void DockWindow::OnDockItems()
     if (auto items = m_receivedItems.Take(); items && *items != m_items)
     {
         m_items = std::move(*items);
-        AssignItemKeys();
         // Only the count: the names are the user's business.
         m_log.Info(std::format("dock items: {} received", m_items.items.size()));
-        m_hovered.reset();
-        Refresh(/*force=*/true);
-        if (m_accessibility)
-        {
-            // Names and order may differ: UI Automation clients must look again.
-            m_accessibility->ItemsChanged();
-        }
+        RebuildModel(/*force=*/true);
     }
 }
 
@@ -324,8 +355,79 @@ void DockWindow::OnWindowsChanged()
         if (auto snapshot = m_watcher->TakeSnapshot())
         {
             m_windows = std::move(*snapshot);
+            RebuildModel(/*force=*/false);
         }
     }
+}
+
+void DockWindow::RebuildModel(bool force)
+{
+    const auto now = SteadyNow();
+    std::vector<island::RunningApp> running;
+    std::map<windows::AppId, std::chrono::milliseconds> seen;
+    for (const auto& app : m_windows.apps)
+    {
+        const auto known = m_appsSeen.find(app.id);
+        const auto when = known != m_appsSeen.end() ? known->second : now;
+        seen.emplace(app.id, when);
+        running.push_back({.id = app.id,
+                           .identity = app.identity,
+                           .fallbackName = island::FallbackName(app.aumid, app.exe),
+                           .seen = when});
+    }
+    m_appsSeen = std::move(seen);
+
+    auto model = island::BuildDockModel(m_items.items, running, now);
+    KillTimer(m_hwnd, kModelTimer);
+    if (model.rebuildAt)
+    {
+        const auto delay = std::max<long long>((*model.rebuildAt - now).count(), 1);
+        SetTimer(m_hwnd, kModelTimer, static_cast<UINT>(delay), nullptr);
+    }
+    if (!force && model == m_model)
+    {
+        return;
+    }
+    const bool sameItems = !force && SameItems(model, m_model);
+    m_model = std::move(model);
+    AssignItemKeys();
+    if (sameItems)
+    {
+        // Only the dots, the attention marks or the windows behind the items changed: nothing to redraw.
+        m_renderer.SetMarks(VisibleMarks());
+        return;
+    }
+    m_hovered.reset();
+    Refresh(/*force=*/true);
+    if (m_accessibility)
+    {
+        // Names and order may differ: UI Automation clients must look again.
+        m_accessibility->ItemsChanged();
+    }
+}
+
+std::vector<island::ItemMarks> DockWindow::VisibleMarks() const
+{
+    std::vector<island::ItemMarks> marks;
+    const auto visible = m_layout ? std::min(m_layout->items.size(), m_model.slots.size()) : 0;
+    for (std::size_t i = 0; i < visible; ++i)
+    {
+        marks.push_back(m_model.slots[i].marks);
+    }
+    return marks;
+}
+
+std::vector<windows::AppWindows::Window> DockWindow::WindowsOf(const island::DockSlot& slot) const
+{
+    std::vector<windows::AppWindows::Window> windows;
+    for (const auto& app : m_windows.apps)
+    {
+        if (std::find(slot.apps.begin(), slot.apps.end(), app.id) != slot.apps.end())
+        {
+            windows.insert(windows.end(), app.windows.begin(), app.windows.end());
+        }
+    }
+    return windows;
 }
 
 void DockWindow::Refresh(bool force)
@@ -337,7 +439,10 @@ void DockWindow::Refresh(bool force)
     }
     const auto monitor = ReadMonitor(DockMonitor());
     const auto style = island::StyleFor(adapters::ReadSystemAppearance());
-    const auto metrics = island::MeasureFor(monitor.monitor.Width(), monitor.dpi, m_items.items.size());
+    const auto count = m_model.slots.size();
+    // A divider when running apps follow pinned items.
+    const bool divider = m_model.pinned > 0 && count > m_model.pinned;
+    const auto metrics = island::MeasureFor(monitor.monitor.Width(), monitor.dpi, count, divider);
     // The AppBar asks Explorer for the strip (and it answers on kAppBarStrip); same request, nothing happens.
     if (m_appBar)
     {
@@ -348,17 +453,17 @@ void DockWindow::Refresh(bool force)
     const geometry::Rect strip =
         m_strip.value_or(geometry::Rect{monitor.monitor.left, monitor.workArea.bottom - metrics.StripHeight(),
                                         monitor.monitor.right, monitor.workArea.bottom});
-    auto layout = island::Arrange(strip, metrics);
+    auto layout = island::Arrange(strip, metrics, m_model.pinned);
 
     if (!force && m_layout && layout.island == m_layout->island && layout.items == m_layout->items &&
-        style == m_style && monitor.dpi == m_dpi)
+        layout.divider == m_layout->divider && style == m_style && monitor.dpi == m_dpi)
     {
         return;
     }
-    if (metrics.visibleCount < m_items.items.size())
+    if (metrics.visibleCount < count)
     {
-        m_log.Warn(std::format("island: {} of {} items fit on the dock's monitor", metrics.visibleCount,
-                               m_items.items.size()));
+        m_log.Warn(
+            std::format("island: {} of {} items fit on the dock's monitor", metrics.visibleCount, count));
     }
 
     const auto& island = layout.island;
@@ -386,18 +491,19 @@ void DockWindow::Refresh(bool force)
     // Read again on every redraw rather than kept, one at a time: decoded, 40 icons would hold 10 MB (rule
     // 4).
     std::size_t drawn = 0;
-    const auto& items = m_items.items;
+    const auto& slots = m_model.slots;
     const auto& iconsDir = m_options.iconsDir;
     const adapters::CompositionRenderer::IconSource icons =
         [&](std::size_t index, std::vector<std::uint8_t>& file) -> std::optional<island::IconView> {
-        const auto& icon = items[index].icon;
+        const auto& icon = slots[index].icon;
         file = icon ? adapters::ReadIconFile(iconsDir, *icon) : std::vector<std::uint8_t>{};
         auto view = island::ParseIconFile(file);
         drawn += view.has_value() ? 1 : 0;
         return view;
     };
 
-    if (m_renderer.Render(*m_layout, m_style, icons, {}, m_hovered, kRenderCommitted, ++m_renderGeneration))
+    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, kRenderCommitted,
+                          ++m_renderGeneration))
     {
         m_log.Info(std::format("island: {} items ({} icons), {}x{} at {},{} ({} dpi, {})",
                                m_layout->items.size(), drawn, island.Width(), island.Height(), island.left,
@@ -506,21 +612,65 @@ void DockWindow::OnClick(LPARAM position)
 {
     if (const auto item = ItemAtClient(position))
     {
-        LaunchItem(*item, "click");
+        ClickItem(*item, "click");
     }
+}
+
+bool DockWindow::ClickItem(std::size_t index, std::string_view how)
+{
+    if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size())
+    {
+        return false;
+    }
+    // Which window is in front now, not when the last snapshot came.
+    std::optional<windows::WindowId> front;
+    if (const HWND foreground = GetForegroundWindow(); foreground != nullptr)
+    {
+        front = ToId(GetAncestor(foreground, GA_ROOTOWNER));
+    }
+    const auto action = island::DecideClick(WindowsOf(m_model.slots[index]), front);
+    // Never SendMessage to another app's window: a hung one would stall this thread (docs/adr/0010).
+    const HWND window = ToHwnd(action.window);
+    switch (action.kind)
+    {
+    case island::ClickAction::Kind::Launch:
+        return LaunchItem(index, how);
+    case island::ClickAction::Kind::Activate: {
+        DWORD process = 0;
+        GetWindowThreadProcessId(window, &process);
+        // The click gave the dock the right to change the foreground: pass it on to the app.
+        AllowSetForegroundWindow(process);
+        if (action.restore)
+        {
+            // Posted, unlike ShowWindowAsync it also works on an elevated app's window.
+            PostMessageW(window, WM_SYSCOMMAND, SC_RESTORE, 0);
+        }
+        SetForegroundWindow(window);
+        m_log.Info(std::format("click: item {} ({}): a window comes forward{}", index, how,
+                               action.restore ? ", restored" : ""));
+        return true;
+    }
+    case island::ClickAction::Kind::Minimize:
+        PostMessageW(window, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+        m_log.Info(std::format("click: item {} ({}): its window is minimized", index, how));
+        return true;
+    }
+    return false;
 }
 
 bool DockWindow::LaunchItem(std::size_t index, std::string_view how)
 {
-    if (!m_layout || index >= m_layout->items.size() || index >= m_items.items.size() || !m_launcher)
+    if (index >= m_model.slots.size() || m_model.slots[index].kind != island::DockSlot::Kind::Pin ||
+        !m_launcher)
     {
+        // Until Harbor Shell says how, only pinned items can be started.
         return false;
     }
     // The user asked: whatever starts may take the foreground (Explorer starts it, not the dock).
     AllowSetForegroundWindow(ASFW_ANY);
     // Which item, not which app: the pinned list is the user's business.
     m_log.Info(std::format("launch: item {} ({})", index, how));
-    m_launcher->Launch(index, m_items.items[index]);
+    m_launcher->Launch(index, m_items.items[m_model.slots[index].pin]);
     return true;
 }
 
@@ -528,10 +678,14 @@ void DockWindow::AssignItemKeys()
 {
     std::map<std::string, std::uint64_t> keys;
     m_itemKeys.clear();
-    for (const auto& item : m_items.items)
+    for (const auto& slot : m_model.slots)
     {
-        // The same pin twice is two items: each later one's identity gets another line ending.
-        auto identity = std::format("{}\n{}\n", static_cast<int>(item.kind), item.target);
+        // A pin by what it starts (the same pin twice is two items: each later one's identity gets another
+        // line ending); a running app by its id.
+        auto identity = slot.kind == island::DockSlot::Kind::Pin
+                            ? std::format("pin\n{}\n{}\n", static_cast<int>(m_items.items[slot.pin].kind),
+                                          m_items.items[slot.pin].target)
+                            : std::format("app\n{}\n", slot.apps.front());
         while (keys.contains(identity))
         {
             identity.push_back('\n');
@@ -569,16 +723,35 @@ std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
 
 std::wstring DockWindow::ItemName(std::size_t index) const
 {
-    if (index >= m_items.items.size())
+    if (index >= m_model.slots.size())
     {
         return {};
     }
-    const auto& name = m_items.items[index].name;
+    const auto& name = m_model.slots[index].name;
     const int length =
         MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
     std::wstring wide(static_cast<std::size_t>(std::max(length, 0)), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), wide.data(), length);
     return wide;
+}
+
+std::wstring DockWindow::ItemStatus(std::size_t index) const
+{
+    if (index >= m_model.slots.size())
+    {
+        return {};
+    }
+    const auto windows = WindowsOf(m_model.slots[index]).size();
+    if (windows == 0)
+    {
+        return {};
+    }
+    std::wstring status = windows == 1 ? L"running, 1 window" : std::format(L"running, {} windows", windows);
+    if (m_model.slots[index].marks.attention)
+    {
+        status += L", needs attention";
+    }
+    return status;
 }
 
 RECT DockWindow::ItemBounds(std::size_t index) const
@@ -598,7 +771,7 @@ std::optional<std::size_t> DockWindow::ItemAt(POINT screenPoint) const
 
 bool DockWindow::InvokeItem(std::size_t index)
 {
-    return LaunchItem(index, "UI Automation");
+    return ClickItem(index, "UI Automation");
 }
 
 void DockWindow::OnAppBarNotification(WPARAM notification, LPARAM lParam)
@@ -759,6 +932,12 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
             KillTimer(m_hwnd, kDeviceRetryTimer);
             OnDeviceLost();
+            return 0;
+        }
+        if (wParam == kModelTimer)
+        {
+            KillTimer(m_hwnd, kModelTimer);
+            RebuildModel(/*force=*/false);
             return 0;
         }
         return DefWindowProcW(m_hwnd, message, wParam, lParam);

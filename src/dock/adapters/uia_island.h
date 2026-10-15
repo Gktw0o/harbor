@@ -24,6 +24,8 @@ class IIslandAccess
     // Where the item with this key is now; nullopt once it's gone.
     virtual std::optional<std::size_t> IndexOfKey(std::uint64_t key) const = 0;
     virtual std::wstring ItemName(std::size_t index) const = 0;
+    // UI Automation's ItemStatus: "running, 2 windows", "needs attention"... Empty: nothing to say.
+    virtual std::wstring ItemStatus(std::size_t index) const = 0;
     // Screen coordinates, physical pixels.
     virtual RECT ItemBounds(std::size_t index) const = 0;
     virtual std::optional<std::size_t> ItemAt(POINT screenPoint) const = 0;

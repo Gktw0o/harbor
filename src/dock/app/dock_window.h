@@ -25,6 +25,7 @@
 #include "core/island/appearance.h"
 #include "core/island/dock_model.h"
 #include "core/island/layout.h"
+#include "core/island/monitors.h"
 #include "ports/ipc_channel.h"
 #include "ports/logger.h"
 
@@ -111,6 +112,7 @@ class DockWindow : private adapters::IIslandAccess
     static constexpr UINT kTestHideLabelMessage = WM_APP + 16;
 
   private:
+    struct MonitorHost;
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void StartControlChannel();
@@ -135,7 +137,22 @@ class DockWindow : private adapters::IIslandAccess
     void OnDeviceLost();
     void OnMouseMove(LPARAM position);
     void OnClick(LPARAM position);
-    void OnAppBarNotification(WPARAM notification, LPARAM lParam);
+    // The monitors' hosts (MonitorHost), made or let go to match the connected monitors.
+    static LRESULT CALLBACK HostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
+    void SyncHosts();
+    void StopHost(MonitorHost& host) noexcept;
+    // Which host's monitor the island is on.
+    std::size_t DockHost() const;
+    // A host's granted strip, or until there is one, the bottom height pixels of its work area.
+    geometry::Rect StripOf(const MonitorHost& host, int height) const;
+    // Shows each other monitor's edge trigger (or hides it: the dock's own monitor, a full-screen app,
+    // panic).
+    void PlaceTriggers();
+    void OnHostMouseMove(std::size_t index);
+    void OnEdgeTimer();
+    // The island goes to host index's monitor, in one move (docs/adr/0011).
+    void MoveDock(std::size_t index);
+    void OnAppBarNotification(std::size_t index, WPARAM notification, LPARAM lParam);
     // Ends the message loop with exitCode; the window stays until Shutdown.
     void RequestExit(int exitCode);
     // Takes ownership of report.
@@ -159,7 +176,9 @@ class DockWindow : private adapters::IIslandAccess
     void HideLabel();
     // The item's right-click menu (docs/adr/0010): blocks in the menu's loop, then carries out the choice.
     void OpenMenu(std::size_t index, std::string_view how);
-    void UpdatePresentable();
+    // Tells the guard whether the island is on screen (rule 7). recheck: the second look after a display
+    // change.
+    void UpdatePresentable(bool recheck = false);
 
     // Gives every item in m_items its UI Automation key: the one it had in the previous list, if it was
     // there.
@@ -204,11 +223,26 @@ class DockWindow : private adapters::IIslandAccess
     std::map<std::string, std::uint64_t> m_keysByIdentity;
     std::uint64_t m_nextItemKey = 1;
     HWND m_hwnd = nullptr;
-    std::optional<AppBarWorker> m_appBar;
-    // The strip Explorer granted; until then the island sits at the bottom of the work area.
-    std::optional<geometry::Rect> m_strip;
-    // A full-screen app covers the monitor: the island is behind it.
-    bool m_fullScreen = false;
+    // One per connected monitor (docs/adr/0011): a never-activated window that holds the monitor's AppBar
+    // strip (each with its own worker thread) and is its edge trigger.
+    struct MonitorHost
+    {
+        island::MonitorInfo monitor;
+        HWND window = nullptr;
+        std::unique_ptr<AppBarWorker> appBar;
+        // The strip Explorer granted; until then, the bottom of the work area.
+        std::optional<geometry::Rect> strip;
+        // A full-screen app covers this monitor.
+        bool fullScreen = false;
+    };
+    std::vector<MonitorHost> m_hosts;
+    HINSTANCE m_instance = nullptr;
+    // The bounds of the monitor the island is on; nullopt: the primary.
+    std::optional<geometry::Rect> m_dockMonitor;
+    // The edge triggers answer (off after the panic hotkey, until hiding is turned on again).
+    bool m_triggersOn = true;
+    // The host whose trigger the cursor reached, while the rest before moving runs.
+    std::optional<std::size_t> m_triggerHost;
     std::optional<Launcher> m_launcher;
     // Follows the app windows on its own thread; its newest snapshot is m_windows.
     std::unique_ptr<WindowWatcher> m_watcher;

@@ -342,6 +342,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             if (session.Dock is not null && status.ClientProcessId == session.Dock.Id)
             {
                 session.Island = DockWindows.FindIsland(session.Dock.Id);
+                session.AppBars = DockWindows.FindAppBars(session.Dock.Id);
                 session.LaunchedAt = null;
             }
             // Every connection hears the current request (the dock forgets it when a connection drops).
@@ -519,13 +520,15 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     // The taskbar first, then the strip: Explorer frees a dead window's strip by itself, so this is only a backup.
     private async Task ReleaseAppBarAsync(Session session)
     {
-        var island = session.Island;
+        var appBars = session.AppBars;
         session.Island = 0;
+        session.AppBars = [];
         try
         {
-            if (await Task.Run(() => restorer.ReleaseAppBar(island)).WaitAsync(options.RestoreTimeout).ConfigureAwait(false))
+            var released = await Task.Run(() => appBars.Count(restorer.ReleaseAppBar)).WaitAsync(options.RestoreTimeout).ConfigureAwait(false);
+            if (released > 0)
             {
-                log.Info("watchdog: released the dock's screen strip");
+                log.Info($"watchdog: released the dock's {released} screen strip(s)");
             }
         }
         catch (TimeoutException)
@@ -599,6 +602,9 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
 
         /// <summary>The supervised dock's island window, once it connected.</summary>
         public nint Island { get; set; }
+
+        /// <summary>The windows holding its screen strips (one per monitor), once it connected.</summary>
+        public IReadOnlyList<nint> AppBars { get; set; } = [];
 
         public void Dispose() => Dock?.Dispose();
     }

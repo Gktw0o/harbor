@@ -26,14 +26,17 @@ The spike (M3 step 0) measured on two monitors (ARM64, 192 and 96 dpi) and on bo
 ## Decision
 
 **A strip on every monitor; only the island moves.**
-- Every monitor gets a hidden-looking host window that never activates and holds that monitor's AppBar strip
-  (`app/appbar_worker` runs one `AppBarState` per monitor). The strips stay while the island is elsewhere, so
-  moving the dock never changes a work area.
-- Each host is also its monitor's edge trigger: a 1 px row at the bottom of the strip, raised above
-  Explorer's 2 px when the user's auto-hide taskbar is there. When the cursor reaches it and stays at or
-  below it on that monitor for 400 ms, the island moves there. Not while a mouse button is down, a window is
-  being moved or resized, or a full-screen app is in front on that monitor (the trigger hides there). A
-  monitor whose bottom edge touches another monitor has no trigger: the cursor can't rest there.
+- Every monitor gets a host window (`Harbor.Dock.Host`) that never activates and holds that monitor's AppBar
+  strip, each with its own `AppBarWorker` thread; hosts come and go with the monitors. The strips stay while
+  the island is elsewhere, so moving the dock never changes a work area. Each strip is as tall as the island
+  would be on that monitor. Harbor Shell's watchdog releases every host's strip after a dock ends.
+- Each other monitor's host is also its edge trigger: nearly transparent (alpha 1, so it still takes the
+  cursor), from a row 2 px above the bottom of the strip (above Explorer's auto-hidden taskbar, when there is
+  one) down to the monitor's edge, so a cursor that jumps past the row still lands on it. When the cursor
+  reaches it and is still at or below that row on that monitor 400 ms later, the island moves there. Not
+  while a mouse button is down, a window is being moved or resized, a menu is open, or a full-screen app is in
+  front on that monitor (the trigger hides there). A monitor whose bottom edge touches another monitor has no
+  trigger: the cursor can't rest there.
 - The island moves with **one** `SetWindowPos` (position and size; no hide or show in between), after laying
   itself out at the target monitor's DPI. A move never shows an island the panic hotkey hid.
 - Monitor geometry (stacked monitors, negative coordinates, mixed DPI) and the trigger areas are pure code

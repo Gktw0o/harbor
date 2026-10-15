@@ -76,16 +76,18 @@ constexpr UINT kLabelDelayMs = 400;
 constexpr UINT_PTR kLabelReleaseTimer = 5;
 constexpr UINT kLabelReleaseMs = 60'000;
 constexpr wchar_t kLabelClass[] = L"Harbor.Dock.Label";
+// A monitor's host (its AppBar strip and edge trigger), and the trigger's rest before the dock moves there
+// (docs/adr/0011).
+constexpr wchar_t kHostClass[] = L"Harbor.Dock.Host";
+constexpr UINT_PTR kEdgeTimer = 6;
+constexpr UINT kEdgeRestMs = 400;
+// Explorer's auto-hidden taskbar keeps a monitor's last 2 px: the trigger row sits above them.
+constexpr int kTriggerRaise = 2;
+// Posted to look at the island's place again after a display change was handled (see UpdatePresentable).
+constexpr UINT kRecheckPresentable = WM_APP + 18;
 constexpr UINT kDeviceRetryMs = 2000;
 // Failed attempts at a new graphics device before the dock gives up (and Harbor Shell restores the taskbar).
 constexpr int kDeviceAttempts = 5;
-
-struct MonitorFacts
-{
-    geometry::Rect monitor;
-    geometry::Rect workArea;
-    unsigned dpi = USER_DEFAULT_SCREEN_DPI;
-};
 
 geometry::Rect FromRect(const RECT& rect) noexcept
 {
@@ -163,28 +165,38 @@ bool SameItems(const island::DockModel& a, const island::DockModel& b)
     return true;
 }
 
-// The monitor the island is on: the primary until the dock follows the mouse (docs/adr/0011).
-HMONITOR DockMonitor() noexcept
+// Every connected monitor: bounds, work area, DPI, and whether it is the primary.
+std::vector<island::MonitorInfo> ReadMonitors()
 {
-    return MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
-}
-
-MonitorFacts ReadMonitor(HMONITOR monitor) noexcept
-{
-    MonitorFacts result;
-    MONITORINFO info{sizeof(info)};
-    if (GetMonitorInfoW(monitor, &info))
-    {
-        result.monitor = FromRect(info.rcMonitor);
-        result.workArea = FromRect(info.rcWork);
-    }
-    UINT dpiX = 0;
-    UINT dpiY = 0;
-    if (SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)) && dpiX != 0)
-    {
-        result.dpi = dpiX;
-    }
-    return result;
+    std::vector<island::MonitorInfo> monitors;
+    EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR monitor, HDC, LPRECT, LPARAM context) -> BOOL {
+            try
+            {
+                MONITORINFO info{sizeof(info)};
+                if (!GetMonitorInfoW(monitor, &info))
+                {
+                    return TRUE;
+                }
+                UINT dpiX = 0;
+                UINT dpiY = 0;
+                const unsigned dpi =
+                    SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY)) && dpiX != 0
+                        ? dpiX
+                        : USER_DEFAULT_SCREEN_DPI;
+                reinterpret_cast<std::vector<island::MonitorInfo>*>(context)->push_back(
+                    {FromRect(info.rcMonitor), FromRect(info.rcWork), dpi,
+                     (info.dwFlags & MONITORINFOF_PRIMARY) != 0});
+                return TRUE;
+            }
+            catch (...)
+            {
+                return FALSE;
+            }
+        },
+        reinterpret_cast<LPARAM>(&monitors));
+    return monitors;
 }
 
 // Every connected monitor's rectangle.
@@ -245,12 +257,12 @@ void DockWindow::Shutdown() noexcept
 {
     // Its callbacks use this object.
     m_controlChannel.Stop();
-    // The AppBar goes before the window does, waiting for Explorer a moment at most.
-    if (m_appBar)
+    // The strips go before their windows do, waiting for Explorer a moment at most.
+    for (auto& host : m_hosts)
     {
-        m_appBar->Stop();
-        m_appBar.reset();
+        StopHost(host);
     }
+    m_hosts.clear();
     // A launch stuck in Explorer is left behind, and so is a watcher stuck in another app.
     m_launcher.reset();
     m_watcher.reset();
@@ -316,22 +328,17 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
         m_log.Warn(std::format("island: no cloak notifications ({})", GetLastError()));
     }
 
-    // Test docks reserve nothing: tests never change the user's work area.
-    std::unique_ptr<appbar::IAppBar> appBar;
-    if (m_options.testAppBar)
-    {
-        appBar = std::make_unique<adapters::TestAppBar>();
-    }
-    else
-    {
-        appBar = std::make_unique<adapters::Win32AppBar>(m_hwnd, kAppBarCallback);
-    }
-    const HWND hwnd = m_hwnd;
-    m_appBar.emplace(std::move(appBar), [hwnd](const geometry::Rect& strip) {
-        PostMessageW(hwnd, kAppBarStrip, PackPair(strip.left, strip.top),
-                     static_cast<LPARAM>(PackPair(strip.right, strip.bottom)));
-    });
+    // A host per monitor holds its strip, so the island can move without the strips moving (docs/adr/0011).
+    WNDCLASSEXW hostClass{};
+    hostClass.cbSize = sizeof(hostClass);
+    hostClass.lpfnWndProc = &DockWindow::HostProc;
+    hostClass.hInstance = instance;
+    hostClass.lpszClassName = kHostClass;
+    RegisterClassExW(&hostClass);
+    m_instance = instance;
+    SyncHosts();
     Refresh(/*force=*/true);
+    const HWND hwnd = m_hwnd;
     m_launcher.emplace(m_hwnd);
     m_watcher = std::make_unique<WindowWatcher>(std::make_unique<adapters::Win32WindowSystem>(),
                                                 m_options.windowClassPrefix, m_log,
@@ -599,24 +606,28 @@ void DockWindow::Refresh(bool force)
         // Nothing can be drawn now; getting a new device redraws everything.
         return;
     }
-    const auto monitor = ReadMonitor(DockMonitor());
+    if (m_hosts.empty())
+    {
+        return;
+    }
+    const auto& host = m_hosts[DockHost()];
+    const auto& monitor = host.monitor;
     const auto appearance = adapters::ReadSystemAppearance();
     const auto style = island::StyleFor(appearance);
     const auto count = m_model.slots.size();
     // A divider when running apps follow pinned items.
     const bool divider = m_model.pinned > 0 && count > m_model.pinned;
-    const auto metrics = island::MeasureFor(monitor.monitor.Width(), monitor.dpi, count, divider);
-    // The AppBar asks Explorer for the strip (and it answers on kAppBarStrip); same request, nothing happens.
-    if (m_appBar)
+    const auto metrics = island::MeasureFor(monitor.bounds.Width(), monitor.dpi, count, divider);
+    // Every monitor keeps a strip as tall as the island would be there, so moving it reflows nothing. The
+    // AppBars ask Explorer (it answers on kAppBarStrip); the same request again does nothing.
+    for (auto& each : m_hosts)
     {
-        m_appBar->SetWant({monitor.monitor, metrics.StripHeight()});
+        const auto there = island::MeasureFor(each.monitor.bounds.Width(), each.monitor.dpi, count, divider);
+        each.appBar->SetWant({each.monitor.bounds, there.StripHeight()});
     }
-    // Until Explorer answers (or if it never does): the bottom of the work area, above a visible taskbar.
-    // That is usually where the strip goes too.
-    const geometry::Rect strip =
-        m_strip.value_or(geometry::Rect{monitor.monitor.left, monitor.workArea.bottom - metrics.StripHeight(),
-                                        monitor.monitor.right, monitor.workArea.bottom});
+    const geometry::Rect strip = StripOf(host, metrics.StripHeight());
     auto layout = island::Arrange(strip, metrics, m_model.pinned);
+    PlaceTriggers();
 
     if (!force && m_layout && layout.island == m_layout->island && layout.items == m_layout->items &&
         layout.divider == m_layout->divider && style == m_style && monitor.dpi == m_dpi)
@@ -637,8 +648,9 @@ void DockWindow::Refresh(bool force)
 
     const auto& island = layout.island;
     // Behind a full-screen app, above everything else.
-    SetWindowPos(m_hwnd, m_fullScreen ? HWND_BOTTOM : HWND_TOPMOST, island.left, island.top, island.Width(),
-                 island.Height(), SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    // One call, never a hide and a show: the island must stay on screen while it moves (docs/adr/0011).
+    SetWindowPos(m_hwnd, host.fullScreen ? HWND_BOTTOM : HWND_TOPMOST, island.left, island.top,
+                 island.Width(), island.Height(), SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     // Clicks on the transparent corners go to the window below.
     const int diameter = 2 * metrics.cornerRadius;
     SetWindowRgn(m_hwnd,
@@ -697,6 +709,7 @@ void DockWindow::OnCommitted(WPARAM generation)
         m_shown = true;
         // Nothing was visible before the first frame: no flash of an empty window.
         ShowWindow(m_hwnd, SW_SHOWNA);
+        PlaceTriggers();
     }
     UpdatePresentable();
 }
@@ -728,7 +741,7 @@ void DockWindow::OnDeviceLost()
     Refresh(/*force=*/true);
 }
 
-void DockWindow::UpdatePresentable()
+void DockWindow::UpdatePresentable(bool recheck)
 {
     // On screen: drawn, visible, not cloaked, and inside one connected monitor (docs/adr/0011).
     island::WindowFacts facts{.committed = m_committed && m_layout.has_value(),
@@ -741,6 +754,14 @@ void DockWindow::UpdatePresentable()
         facts.window = FromRect(window);
     }
     const bool presentable = island::IsOnScreen(facts, ConnectedMonitors());
+    if (!presentable && m_presentable && !recheck && facts.committed && facts.visible && !facts.cloaked)
+    {
+        // Only its place is off: a monitor came or went, and Windows moved the island before this thread
+        // heard of it. Look again once the display change (sent, so ahead of this post) has put it back on
+        // its strip, rather than showing the taskbar for that moment.
+        PostMessageW(m_hwnd, kRecheckPresentable, 0, 0);
+        return;
+    }
     if (presentable != m_presentable)
     {
         m_presentable = presentable;
@@ -800,7 +821,7 @@ void DockWindow::ShowLabel(std::size_t index)
     }
     // Centred above the item, inside its monitor.
     const auto& item = m_layout->items[index];
-    const auto monitor = ReadMonitor(DockMonitor()).monitor;
+    const auto monitor = m_hosts.empty() ? m_layout->island : m_hosts[DockHost()].monitor.bounds;
     const int width = static_cast<int>(size->cx);
     const int height = static_cast<int>(size->cy);
     const int x = std::clamp((item.left + item.right - width) / 2, monitor.left,
@@ -1210,28 +1231,204 @@ bool DockWindow::InvokeItem(std::size_t index)
     return ClickItem(index, "UI Automation");
 }
 
-void DockWindow::OnAppBarNotification(WPARAM notification, LPARAM lParam)
+void DockWindow::SyncHosts()
 {
+    const auto monitors = ReadMonitors();
+    // A host whose monitor went, or changed size, goes (with its strip).
+    for (auto it = m_hosts.begin(); it != m_hosts.end();)
+    {
+        if (std::none_of(monitors.begin(), monitors.end(), [&](const island::MonitorInfo& monitor) {
+                return monitor.bounds == it->monitor.bounds;
+            }))
+        {
+            StopHost(*it);
+            it = m_hosts.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+    for (const auto& monitor : monitors)
+    {
+        const auto known = std::find_if(m_hosts.begin(), m_hosts.end(), [&](const MonitorHost& host) {
+            return host.monitor.bounds == monitor.bounds;
+        });
+        if (known != m_hosts.end())
+        {
+            // Its work area, DPI or primary-ness may have changed.
+            known->monitor = monitor;
+            continue;
+        }
+        MonitorHost host{.monitor = monitor};
+        // Never activated; nearly transparent rather than invisible, so the cursor still hits it.
+        host.window =
+            CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED, kHostClass,
+                            L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, m_instance, this);
+        if (host.window == nullptr)
+        {
+            m_log.Warn(std::format("appbar: no host window for a monitor ({})", GetLastError()));
+            continue;
+        }
+        SetLayeredWindowAttributes(host.window, 0, 1, LWA_ALPHA);
+        // Test docks reserve nothing: tests never change the user's work area.
+        std::unique_ptr<appbar::IAppBar> appBar;
+        if (m_options.testAppBar)
+        {
+            appBar = std::make_unique<adapters::TestAppBar>();
+        }
+        else
+        {
+            appBar = std::make_unique<adapters::Win32AppBar>(host.window, kAppBarCallback);
+        }
+        const HWND window = host.window;
+        host.appBar =
+            std::make_unique<AppBarWorker>(std::move(appBar), [window](const geometry::Rect& strip) {
+                PostMessageW(window, kAppBarStrip, PackPair(strip.left, strip.top),
+                             static_cast<LPARAM>(PackPair(strip.right, strip.bottom)));
+            });
+        m_hosts.push_back(std::move(host));
+    }
+    m_log.Info(std::format("appbar: {} monitors, a strip on each", m_hosts.size()));
+}
+
+void DockWindow::StopHost(MonitorHost& host) noexcept
+{
+    if (host.appBar)
+    {
+        host.appBar->Stop();
+        host.appBar.reset();
+    }
+    if (host.window != nullptr)
+    {
+        DestroyWindow(host.window);
+        host.window = nullptr;
+    }
+}
+
+std::size_t DockWindow::DockHost() const
+{
+    std::vector<island::MonitorInfo> monitors;
+    for (const auto& host : m_hosts)
+    {
+        monitors.push_back(host.monitor);
+    }
+    return island::DockMonitor(monitors, m_dockMonitor).value_or(0);
+}
+
+geometry::Rect DockWindow::StripOf(const MonitorHost& host, int height) const
+{
+    // Until Explorer answers (or if it never does): the bottom of the work area, above a visible taskbar.
+    // That is usually where the strip goes too.
+    return host.strip.value_or(geometry::Rect{host.monitor.bounds.left, host.monitor.work.bottom - height,
+                                              host.monitor.bounds.right, host.monitor.work.bottom});
+}
+
+void DockWindow::PlaceTriggers()
+{
+    std::vector<island::MonitorInfo> monitors;
+    for (const auto& host : m_hosts)
+    {
+        monitors.push_back(host.monitor);
+    }
+    const auto dock = DockHost();
+    for (std::size_t i = 0; i < m_hosts.size(); ++i)
+    {
+        auto& host = m_hosts[i];
+        // Not on the dock's own monitor, not while off (panic), not over a full-screen app.
+        std::vector<geometry::Rect> triggers;
+        if (i != dock && m_triggersOn && !host.fullScreen && m_shown)
+        {
+            const auto height = static_cast<int>(island::Scale(
+                island::kIconDip + 2 * island::kPaddingDip + 2 * island::kMarginDip, host.monitor.dpi));
+            triggers = island::EdgeTriggers(monitors, i, StripOf(host, height), kTriggerRaise);
+        }
+        if (triggers.empty())
+        {
+            ShowWindow(host.window, SW_HIDE);
+            continue;
+        }
+        // The widest stretch of the edge; the window reaches from the trigger row down to the monitor's edge,
+        // so a cursor that jumps past the row still lands on it.
+        const auto widest =
+            *std::max_element(triggers.begin(), triggers.end(),
+                              [](const auto& a, const auto& b) { return a.Width() < b.Width(); });
+        SetWindowPos(host.window, HWND_TOPMOST, widest.left, widest.top, widest.Width(),
+                     host.monitor.bounds.bottom - widest.top, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+}
+
+void DockWindow::OnHostMouseMove(std::size_t index)
+{
+    if (!m_triggersOn || index == DockHost() || m_windows.movingOrSizing || m_menuOpen ||
+        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0)
+    {
+        return;
+    }
+    if (m_triggerHost != index)
+    {
+        // The cursor must rest there a moment: passing by on the way to another monitor doesn't count.
+        m_triggerHost = index;
+        SetTimer(m_hwnd, kEdgeTimer, kEdgeRestMs, nullptr);
+    }
+}
+
+void DockWindow::OnEdgeTimer()
+{
+    KillTimer(m_hwnd, kEdgeTimer);
+    const auto index = std::exchange(m_triggerHost, std::nullopt);
+    if (!index || *index >= m_hosts.size() || !m_triggersOn || m_windows.movingOrSizing ||
+        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0)
+    {
+        return;
+    }
+    POINT cursor{};
+    RECT trigger{};
+    const auto& host = m_hosts[*index];
+    if (!GetCursorPos(&cursor) || !GetWindowRect(host.window, &trigger) ||
+        !island::RestsOnTrigger(FromRect(trigger), host.monitor, {cursor.x, cursor.y}))
+    {
+        return;
+    }
+    MoveDock(*index);
+}
+
+void DockWindow::MoveDock(std::size_t index)
+{
+    m_dockMonitor = m_hosts[index].monitor.bounds;
+    HideLabel();
+    // Which monitor in the list, not where: positions say little, and nothing about the user.
+    m_log.Info(std::format("island: moves to monitor {} of {}", index + 1, m_hosts.size()));
+    m_hovered.reset();
+    Refresh(/*force=*/true);
+}
+
+void DockWindow::OnAppBarNotification(std::size_t index, WPARAM notification, LPARAM lParam)
+{
+    auto& host = m_hosts[index];
     switch (notification)
     {
     case ABN_POSCHANGED:
         // Explorer sends these in bursts; the worker coalesces them.
-        if (m_appBar)
-        {
-            m_appBar->PositionMayHaveChanged();
-        }
+        host.appBar->PositionMayHaveChanged();
         break;
     case ABN_FULLSCREENAPP:
-        // A full-screen app opened (or closed) on this monitor: step behind it, like the taskbar does. The
-        // island stays on screen in GuardPolicy's sense, as the hidden taskbar would have been covered too.
-        if (m_fullScreen != (lParam != 0))
+        if (host.fullScreen == (lParam != 0))
         {
-            m_fullScreen = lParam != 0;
-            m_log.Info(m_fullScreen ? "appbar: a full-screen app opened; the island steps behind it"
-                                    : "appbar: the full-screen app closed; the island is on top again");
-            SetWindowPos(m_hwnd, m_fullScreen ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
+            break;
+        }
+        host.fullScreen = lParam != 0;
+        if (index == DockHost())
+        {
+            // On the island's monitor: step behind it, like the taskbar does. The island stays on screen in
+            // GuardPolicy's sense, as the hidden taskbar would have been covered too.
+            m_log.Info(host.fullScreen ? "appbar: a full-screen app opened; the island steps behind it"
+                                       : "appbar: the full-screen app closed; the island is on top again");
+            SetWindowPos(m_hwnd, host.fullScreen ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         }
+        // Elsewhere: that monitor's trigger goes rather than cover the app (a game, say).
+        PlaceTriggers();
         break;
     case ABN_STATECHANGE:
         // The taskbar's auto-hide or always-on-top changed. Harbor sets auto-hide itself while it hides the
@@ -1240,6 +1437,51 @@ void DockWindow::OnAppBarNotification(WPARAM notification, LPARAM lParam)
         break;
     default:
         break;
+    }
+}
+
+LRESULT CALLBACK DockWindow::HostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    if (message == WM_NCCREATE)
+    {
+        SetWindowLongPtrW(
+            hwnd, GWLP_USERDATA,
+            reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams));
+    }
+    auto* self = reinterpret_cast<DockWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (self == nullptr)
+    {
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    const auto host = std::find_if(self->m_hosts.begin(), self->m_hosts.end(),
+                                   [hwnd](const MonitorHost& each) { return each.window == hwnd; });
+    if (host == self->m_hosts.end())
+    {
+        // Being made or going away.
+        return message == WM_MOUSEACTIVATE ? MA_NOACTIVATE : DefWindowProcW(hwnd, message, wParam, lParam);
+    }
+    const auto index = static_cast<std::size_t>(host - self->m_hosts.begin());
+    switch (message)
+    {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_MOUSEMOVE:
+        self->OnHostMouseMove(index);
+        return 0;
+    case kAppBarStrip: {
+        const auto [left, top] = UnpackPair(wParam);
+        const auto [right, bottom] = UnpackPair(static_cast<std::uint64_t>(lParam));
+        host->strip = geometry::Rect{left, top, right, bottom};
+        self->m_log.Info(
+            std::format("appbar: monitor {} strip {},{} to {},{}", index + 1, left, top, right, bottom));
+        self->Refresh(/*force=*/false);
+        return 0;
+    }
+    case kAppBarCallback:
+        self->OnAppBarNotification(index, wParam, lParam);
+        return 0;
+    default:
+        return DefWindowProcW(hwnd, message, wParam, lParam);
     }
 }
 
@@ -1295,9 +1537,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     if (message == m_taskbarCreatedMessage && message != 0)
     {
         // Explorer restarted (forgetting every AppBar), or the primary monitor's DPI changed.
-        if (m_appBar)
+        for (auto& host : m_hosts)
         {
-            m_appBar->TaskbarCreated();
+            host.appBar->TaskbarCreated();
         }
         if (m_watcher)
         {
@@ -1334,9 +1576,12 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         UpdatePresentable();
         return 0;
     case TaskbarGuard::kPanicMessage:
-        // Nothing of Harbor's may stay in the way.
+        // Nothing of Harbor's may stay in the way: menus, the label, the edge triggers (until hiding is
+        // turned on again).
         EndMenu();
         HideLabel();
+        m_triggersOn = false;
+        PlaceTriggers();
         return 0;
     case kTestShowLabelMessage:
         ShowLabel(wParam);
@@ -1385,12 +1630,14 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         OnLaunched(reinterpret_cast<LaunchReport*>(lParam));
         return 0;
     case TaskbarGuard::kShowIslandMessage:
-        // The panic hotkey hid the island; hiding the taskbar was turned on again.
+        // The panic hotkey hid the island; hiding the taskbar was turned on again: so are the edge triggers.
         if (m_shown)
         {
             m_log.Info("island: shown again");
             ShowWindow(m_hwnd, SW_SHOWNA);
         }
+        m_triggersOn = true;
+        PlaceTriggers();
         return 0;
     case WM_TIMER:
         if (wParam == kOrphanTimer)
@@ -1405,6 +1652,11 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
             KillTimer(m_hwnd, kDeviceRetryTimer);
             OnDeviceLost();
+            return 0;
+        }
+        if (wParam == kEdgeTimer)
+        {
+            OnEdgeTimer();
             return 0;
         }
         if (wParam == kLabelTimer)
@@ -1445,16 +1697,8 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         // Not Windows' suggested rectangle: the layout follows the dock's monitor, wherever this window is.
         Refresh(/*force=*/false);
         return 0;
-    case kAppBarStrip: {
-        const auto [left, top] = UnpackPair(wParam);
-        const auto [right, bottom] = UnpackPair(static_cast<std::uint64_t>(lParam));
-        m_strip = geometry::Rect{left, top, right, bottom};
-        m_log.Info(std::format("appbar: strip {},{} to {},{}", left, top, right, bottom));
-        Refresh(/*force=*/false);
-        return 0;
-    }
-    case kAppBarCallback:
-        OnAppBarNotification(wParam, lParam);
+    case kRecheckPresentable:
+        UpdatePresentable(/*recheck=*/true);
         return 0;
     case WM_CLOSE:
         // Harbor Shell's "Stop dock", or anyone else: a normal exit.
@@ -1463,12 +1707,21 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
-        // Monitors or the work area changed: so may the strip.
-        if (m_appBar && (message == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA))
+        // Monitors or the work area changed: so may the strips. A monitor that came gets a host, one that
+        // went takes its host along, and the island goes back to the primary if its monitor went.
+        if (message == WM_DISPLAYCHANGE)
         {
-            m_appBar->PositionMayHaveChanged();
+            SyncHosts();
+        }
+        if (message == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA)
+        {
+            for (auto& host : m_hosts)
+            {
+                host.appBar->PositionMayHaveChanged();
+            }
         }
         Refresh(/*force=*/false);
+        UpdatePresentable();
         return DefWindowProcW(m_hwnd, message, wParam, lParam);
     case WM_THEMECHANGED:
     case WM_SYSCOLORCHANGE:

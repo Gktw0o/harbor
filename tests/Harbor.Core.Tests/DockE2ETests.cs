@@ -115,8 +115,12 @@ public sealed class DockE2ETests
             Assert.AreEqual(empty.Height, three.Height);
             Assert.AreEqual(empty.Bottom, three.Bottom);
 
-            // Its strip came from the AppBar worker (a test AppBar, which reserves nothing).
-            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), $"appbar: strip {monitor.Left},");
+            // Its strip came from its monitor's AppBar worker (a test AppBar, which reserves nothing); every monitor
+            // has one (docs/adr/0011).
+            var log = await TestDock.ReadLogAsync(dataDir.Path);
+            StringAssert.Contains(log, $" strip {monitor.Left},");
+            StringAssert.Contains(log, "monitors, a strip on each");
+            Assert.IsNotEmpty(DockWindows.FindAppBars((uint)dock.Id), "no host window holds a strip");
             Assert.AreEqual(work.Bottom, IslandWindow.PrimaryMonitor().Work.Bottom, "a test dock changed the work area");
         }
         finally
@@ -732,11 +736,18 @@ public sealed class DockE2ETests
             var island = IslandWindow.Find(dock.Id);
             Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(island, "invoke", "More apps")).ExitCode);
 
-            var (code, items) = await TestDock.UseMenuAsync(island, "harbor_test_windows");
-            Assert.AreEqual(0, code, string.Join("\n", items));
-            Assert.HasCount(total - visible, items.Where(item => item.StartsWith($"{MenuItem}\t", StringComparison.Ordinal)), string.Join("\n", items));
-            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "(overflow menu): a window comes forward", TimeSpan.FromSeconds(10)),
+            var (listed, items) = await TestDock.UseMenuAsync(island);
+            Assert.AreEqual(0, listed, string.Join("\n", items));
+            var names = items.Where(item => item.StartsWith($"{MenuItem}\t", StringComparison.Ordinal)).Select(item => item[6..]).ToArray();
+            Assert.HasCount(total - visible, names, string.Join("\n", items));
+
+            // The first one: a long menu scrolls on a small screen, and items out of view can't be invoked.
+            var (code, _) = await TestDock.UseMenuAsync(island, names[0]);
+            Assert.AreEqual(0, code);
+            // Item `visible` is the first that didn't fit; choosing it does what clicking it would.
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, $"item {visible} chosen", TimeSpan.FromSeconds(10)),
                 await TestDock.ReadLogAsync(dataDir.Path));
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), $"item {visible} (overflow menu)");
         }
         finally
         {

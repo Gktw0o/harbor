@@ -67,6 +67,8 @@ public sealed partial class MainWindow : Window
         };
         publisher.Built += apps.SetPins;
         apps.Answered += _supervisor.SendToDock;
+        // Pin and unpin from the dock's menu: settings.json changes, and the settings watcher sends the new list.
+        _supervisor.PinRequestReceived += request => _ = ApplyPinRequestAsync(request);
 
         // Never disposed on purpose: it uses no timer or wait handle, and the supervisor may still observe the
         // token after the window closes.
@@ -131,6 +133,19 @@ public sealed partial class MainWindow : Window
         PinnedText.Text = items.Items.Count == 0
             ? "None. Add some with \"Edit pinned apps…\"."
             : string.Join("\n", items.Items.Select(item => item.Name));
+
+    // A refused request is shown (it may need the user to fix settings.json); one that worked shows in the list.
+    private async Task ApplyPinRequestAsync(PinRequest request)
+    {
+        var result = await PinChanges.ApplyAsync(_settingsFile, request, _log);
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            PinRequestText.Text = result.Written
+                ? ""
+                : $"Couldn't {(request.Action == PinAction.Pin ? "pin" : "unpin")} that app: {result.Outcome}.";
+            PinRequestText.Visibility = result.Written ? Visibility.Collapsed : Visibility.Visible;
+        });
+    }
 
     private void ShowSettingsProblem(string? problem)
     {

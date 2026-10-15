@@ -177,6 +177,29 @@ internal static partial class TestDock
         hook.Set();
     }
 
+    // The test hooks that open the first item's right-click menu and close an open menu (see
+    // DockWindow::kTestOpenMenuMessage).
+    public static void OpenMenu(FakeTaskbar taskbar)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.open-menu");
+        hook.Set();
+    }
+
+    public static void CloseMenu(FakeTaskbar taskbar)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.close-menu");
+        hook.Set();
+    }
+
+    // The open menu's items as a screen reader sees them ("<control type>\t<name>"), invoking the one named.
+    public static async Task<(int ExitCode, string[] Items)> UseMenuAsync(nint island, string? invoke = null)
+    {
+        var (code, output) = invoke is null
+            ? await RunUiaClientAsync(island, "menu")
+            : await RunUiaClientAsync(island, "menu", invoke);
+        return (code, output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries));
+    }
+
     public static async Task<string> ReadLogAsync(string dataDir)
     {
         // The dock keeps the file open for appending.

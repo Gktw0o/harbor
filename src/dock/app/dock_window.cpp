@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "adapters/icon_files.h"
+#include "adapters/popup_menu.h"
 #include "adapters/system_appearance.h"
 #include "adapters/win32_app_bar.h"
 #include "adapters/win32_window_system.h"
@@ -21,6 +22,7 @@
 #include "core/ipc/codec.h"
 #include "core/island/click_policy.h"
 #include "core/island/icon_file.h"
+#include "core/island/menu_model.h"
 #include "core/island/on_screen.h"
 
 namespace harbor::dock
@@ -92,6 +94,42 @@ windows::WindowId ToId(HWND hwnd) noexcept
 std::chrono::milliseconds SteadyNow() noexcept
 {
     return std::chrono::milliseconds(GetTickCount64());
+}
+
+// A window's title as UTF-8. GetWindowText reads the title Windows keeps for another process's window rather
+// than asking the window, so a hung app can't block it.
+std::string TitleOf(HWND window)
+{
+    std::wstring title(512, L'\0');
+    title.resize(static_cast<std::size_t>(std::max(GetWindowTextW(window, title.data(), 512), 0)));
+    const int length = WideCharToMultiByte(CP_UTF8, 0, title.data(), static_cast<int>(title.size()), nullptr,
+                                           0, nullptr, nullptr);
+    std::string utf8(static_cast<std::size_t>(std::max(length, 0)), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, title.data(), static_cast<int>(title.size()), utf8.data(), length,
+                        nullptr, nullptr);
+    return utf8;
+}
+
+const char* Describe(island::MenuCommand command) noexcept
+{
+    switch (command)
+    {
+    case island::MenuCommand::Title:
+        return "nothing";
+    case island::MenuCommand::Window:
+        return "a window comes forward";
+    case island::MenuCommand::Launch:
+        return "start";
+    case island::MenuCommand::Pin:
+        return "pin";
+    case island::MenuCommand::Unpin:
+        return "unpin";
+    case island::MenuCommand::CloseWindow:
+        return "close its window";
+    case island::MenuCommand::CloseAll:
+        return "close all its windows";
+    }
+    return "?";
 }
 
 // The same items in the same order, looking the same: only their marks, or the apps behind them, may differ.
@@ -522,7 +560,8 @@ void DockWindow::Refresh(bool force)
         return;
     }
     const auto monitor = ReadMonitor(DockMonitor());
-    const auto style = island::StyleFor(adapters::ReadSystemAppearance());
+    const auto appearance = adapters::ReadSystemAppearance();
+    const auto style = island::StyleFor(appearance);
     const auto count = m_model.slots.size();
     // A divider when running apps follow pinned items.
     const bool divider = m_model.pinned > 0 && count > m_model.pinned;
@@ -560,6 +599,7 @@ void DockWindow::Refresh(bool force)
                  CreateRoundRectRgn(0, 0, island.Width() + 1, island.Height() + 1, diameter, diameter), TRUE);
 
     m_style = style;
+    m_highContrast = appearance.highContrast;
     m_dpi = monitor.dpi;
     const bool countChanged = !m_layout || m_layout->items.size() != layout.items.size();
     m_layout = std::move(layout);
@@ -719,27 +759,133 @@ bool DockWindow::ClickItem(std::size_t index, std::string_view how)
     {
     case island::ClickAction::Kind::Launch:
         return LaunchItem(index, how);
-    case island::ClickAction::Kind::Activate: {
-        DWORD process = 0;
-        GetWindowThreadProcessId(window, &process);
-        // The click gave the dock the right to change the foreground: pass it on to the app.
-        AllowSetForegroundWindow(process);
-        if (action.restore)
-        {
-            // Posted, unlike ShowWindowAsync it also works on an elevated app's window.
-            PostMessageW(window, WM_SYSCOMMAND, SC_RESTORE, 0);
-        }
-        SetForegroundWindow(window);
+    case island::ClickAction::Kind::Activate:
+        BringForward(action.window, action.restore);
         m_log.Info(std::format("click: item {} ({}): a window comes forward{}", index, how,
                                action.restore ? ", restored" : ""));
         return true;
-    }
     case island::ClickAction::Kind::Minimize:
         PostMessageW(window, WM_SYSCOMMAND, SC_MINIMIZE, 0);
         m_log.Info(std::format("click: item {} ({}): its window is minimized", index, how));
         return true;
     }
     return false;
+}
+
+void DockWindow::BringForward(windows::WindowId id, bool restore)
+{
+    const HWND window = ToHwnd(id);
+    DWORD process = 0;
+    GetWindowThreadProcessId(window, &process);
+    // A click gave the dock the right to change the foreground: pass it on to the app.
+    AllowSetForegroundWindow(process);
+    if (restore)
+    {
+        // Posted: unlike ShowWindowAsync it also works on an elevated app's window.
+        PostMessageW(window, WM_SYSCOMMAND, SC_RESTORE, 0);
+    }
+    SetForegroundWindow(window);
+}
+
+void DockWindow::OnRightClick(LPARAM position)
+{
+    if (const auto item = ItemAtClient(position))
+    {
+        OpenMenu(*item, "right-click");
+    }
+}
+
+void DockWindow::OpenMenu(std::size_t index, std::string_view how)
+{
+    if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size() || m_menuOpen)
+    {
+        return;
+    }
+    // Copies: the model can change while the menu is open (its loop keeps handling this window's messages).
+    const auto slot = m_model.slots[index];
+    auto windows = WindowsOf(slot);
+    std::sort(windows.begin(), windows.end(), [](const auto& a, const auto& b) { return a.seen < b.seen; });
+    std::optional<ipc::DockItem> pin;
+    if (slot.kind == island::DockSlot::Kind::Pin)
+    {
+        pin = m_items.items[slot.pin];
+    }
+    // What the Shell said about the app: how to start it, and what pinning it pins.
+    std::optional<ipc::AppTarget> launch;
+    for (const auto app : slot.apps)
+    {
+        if (const auto info = m_appInfo.find(app); info != m_appInfo.end() && info->second.launch)
+        {
+            launch = info->second.launch;
+            break;
+        }
+    }
+    island::MenuFacts facts{.name = slot.name,
+                            .pinned = pin.has_value(),
+                            .pinnable = pin.has_value() || launch.has_value(),
+                            .launchable = pin.has_value() || launch.has_value()};
+    for (const auto& window : windows)
+    {
+        // Read now, never logged.
+        facts.windows.push_back({window.id, TitleOf(ToHwnd(window.id))});
+    }
+    const auto menu = island::BuildAppMenu(facts);
+
+    const auto& item = m_layout->items[index];
+    const auto& island = m_layout->island;
+    m_menuOpen = true;
+    const auto chosen =
+        adapters::PopupMenu::Show(m_hwnd, menu, {(item.left + item.right) / 2, island.top},
+                                  {island.left, island.top, island.right, island.bottom},
+                                  {.style = m_style, .dpi = m_dpi, .highContrast = m_highContrast});
+    m_menuOpen = false;
+    if (!chosen)
+    {
+        return;
+    }
+
+    const auto& command = menu[*chosen];
+    // Which item and what was done, never which app or window.
+    m_log.Info(std::format("menu: item {} ({}): {}", index, how, Describe(command.command)));
+    switch (command.command)
+    {
+    case island::MenuCommand::Title:
+        break;
+    case island::MenuCommand::Window:
+        for (const auto& window : windows)
+        {
+            if (window.id == command.window)
+            {
+                BringForward(window.id, window.minimized);
+            }
+        }
+        break;
+    case island::MenuCommand::Launch:
+        if (m_launcher)
+        {
+            AllowSetForegroundWindow(ASFW_ANY);
+            m_launcher->Launch(
+                index, pin ? *pin : ipc::DockItem{launch->kind, launch->target, slot.name, std::nullopt});
+        }
+        break;
+    case island::MenuCommand::Pin:
+        // Nothing changes here until Harbor Shell sends the new list.
+        m_controlChannel.Send(ipc::PinRequest{ipc::PinAction::Pin, *launch});
+        break;
+    case island::MenuCommand::Unpin:
+        m_controlChannel.Send(ipc::PinRequest{ipc::PinAction::Unpin, {pin->kind, pin->target}});
+        break;
+    case island::MenuCommand::CloseWindow:
+        // Posted: the app asks about unsaved work as it would for its own close button.
+        PostMessageW(ToHwnd(command.window), WM_CLOSE, 0, 0);
+        break;
+    case island::MenuCommand::CloseAll:
+        for (const auto& window : windows)
+        {
+            PostMessageW(ToHwnd(window.id), WM_CLOSE, 0, 0);
+        }
+        break;
+    }
 }
 
 bool DockWindow::LaunchItem(std::size_t index, std::string_view how)
@@ -977,6 +1123,33 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case kCloakChangedMessage:
         UpdatePresentable();
+        return 0;
+    case TaskbarGuard::kPanicMessage:
+        // Nothing of Harbor's may stay in the way.
+        EndMenu();
+        return 0;
+    case kTestOpenMenuMessage:
+        OpenMenu(wParam, "test hook");
+        return 0;
+    case kTestCloseMenuMessage:
+        EndMenu();
+        return 0;
+    case WM_MEASUREITEM:
+        return adapters::PopupMenu::OnMeasureItem(*reinterpret_cast<MEASUREITEMSTRUCT*>(lParam))
+                   ? TRUE
+                   : DefWindowProcW(m_hwnd, message, wParam, lParam);
+    case WM_DRAWITEM:
+        return adapters::PopupMenu::OnDrawItem(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam))
+                   ? TRUE
+                   : DefWindowProcW(m_hwnd, message, wParam, lParam);
+    case WM_MENUCHAR:
+        if (const auto result = adapters::PopupMenu::OnMenuChar(wParam, lParam))
+        {
+            return *result;
+        }
+        return DefWindowProcW(m_hwnd, message, wParam, lParam);
+    case WM_RBUTTONUP:
+        OnRightClick(lParam);
         return 0;
     case kTestCloakMessage: {
         // Only the cloak hook notices: that is what the test checks.

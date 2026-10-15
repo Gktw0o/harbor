@@ -49,6 +49,8 @@ class TaskbarGuard
     static constexpr UINT kStateMessage = WM_APP + 20;
     // Posted to the state window (the island) when hiding is asked for again after the panic hotkey hid it.
     static constexpr UINT kShowIslandMessage = WM_APP + 21;
+    // Posted to the state window when the panic hotkey is pressed: close menus and anything else in the way.
+    static constexpr UINT kPanicMessage = WM_APP + 22;
 
     struct Options
     {

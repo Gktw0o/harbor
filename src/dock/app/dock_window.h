@@ -102,6 +102,11 @@ class DockWindow : private adapters::IIslandAccess
     // would, so tests can check a cloaked island brings the taskbar back.
     static constexpr UINT kTestCloakMessage = WM_APP + 11;
 
+    // Test docks only: opens the right-click menu of item wParam, or closes an open menu, so tests can reach
+    // it without moving the user's mouse.
+    static constexpr UINT kTestOpenMenuMessage = WM_APP + 13;
+    static constexpr UINT kTestCloseMenuMessage = WM_APP + 14;
+
   private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -139,6 +144,11 @@ class DockWindow : private adapters::IIslandAccess
     bool ClickItem(std::size_t index, std::string_view how);
     // Starts a pinned item. False for anything else.
     bool LaunchItem(std::size_t index, std::string_view how);
+    // Brings another app's window to the front (restoring it first), without waiting on the app.
+    void BringForward(windows::WindowId window, bool restore);
+    void OnRightClick(LPARAM position);
+    // The item's right-click menu (docs/adr/0010): blocks in the menu's loop, then carries out the choice.
+    void OpenMenu(std::size_t index, std::string_view how);
     void UpdatePresentable();
 
     // Gives every item in m_items its UI Automation key: the one it had in the previous list, if it was
@@ -203,6 +213,9 @@ class DockWindow : private adapters::IIslandAccess
     unsigned m_dpi = 0;
     std::optional<std::size_t> m_hovered;
     bool m_trackingMouse = false;
+    bool m_highContrast = false;
+    // A menu's loop is running (one at a time).
+    bool m_menuOpen = false;
     // Each Render's number; only the latest one's commit counts.
     WPARAM m_renderGeneration = 0;
     // The latest frame is committed (and nothing was lost since).

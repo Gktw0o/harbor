@@ -250,6 +250,8 @@ LRESULT TaskbarGuard::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPAR
             m_log.Warn("taskbar: panic hotkey pressed");
             m_policy.OnPanic();
             RestoreNow("of the panic hotkey", /*sessionEnding=*/false, /*wait=*/false);
+            // Nothing of Harbor's may stay in the way: the UI thread closes its menus (docs/adr/0011).
+            PostMessageW(m_stateWindow.load(), kPanicMessage, 0, 0);
             // While hiding was on, the panic hotkey is also the way out of the dock: the island goes too,
             // from this thread, so even a hung UI thread can't keep it up (unless its window is hung as
             // well).

@@ -9,8 +9,12 @@
 //     same element for its name again and prints "alive\t<name>", or "gone" if it is no longer available.
 // harbor_test_uia_client <island window> status <name>
 //     Prints "status\t<item status>" for the child button with that name (empty if it has none).
+// harbor_test_uia_client <island window> menu [<name>]
+//     Waits up to 5 s for the island's process to show a popup menu, prints "<control type id>\t<name>" for
+//     each of its items, then invokes the item with that name, if one is given.
 //
-// Exit codes: 0 done, 1 bad arguments, 2 UI Automation failed, 3 no such button, 4 Invoke failed, 5 gone.
+// Exit codes: 0 done, 1 bad arguments, 2 UI Automation failed, 3 no such button, 4 Invoke failed, 5 gone,
+// 6 no menu.
 
 #include <windows.h>
 
@@ -44,6 +48,90 @@ void PrintLine(int controlType, const wchar_t* name)
     PrintLine(std::to_wstring(controlType), name);
 }
 
+// The popup menu (class "#32768") a process shows, if any.
+HWND FindMenuOf(DWORD process)
+{
+    struct Search
+    {
+        DWORD process;
+        HWND found;
+    } search{process, nullptr};
+    EnumWindows(
+        [](HWND window, LPARAM context) -> BOOL {
+            auto& search = *reinterpret_cast<Search*>(context);
+            wchar_t name[16]{};
+            DWORD owner = 0;
+            GetWindowThreadProcessId(window, &owner);
+            if (owner == search.process && IsWindowVisible(window) && GetClassNameW(window, name, 16) != 0 &&
+                std::wstring(name) == L"#32768")
+            {
+                search.found = window;
+                return FALSE;
+            }
+            return TRUE;
+        },
+        reinterpret_cast<LPARAM>(&search));
+    return search.found;
+}
+
+// The menu command: lists the open menu's items as UI Automation sees them, and invokes one.
+int Menu(IUIAutomation& automation, HWND island, const wchar_t* invoke)
+{
+    DWORD process = 0;
+    GetWindowThreadProcessId(island, &process);
+    HWND menu = nullptr;
+    for (int attempt = 0; attempt < 100 && (menu = FindMenuOf(process)) == nullptr; ++attempt)
+    {
+        Sleep(50);
+    }
+    if (menu == nullptr)
+    {
+        return 6;
+    }
+    wil::com_ptr_nothrow<IUIAutomationElement> element;
+    wil::com_ptr_nothrow<IUIAutomationCondition> all;
+    wil::com_ptr_nothrow<IUIAutomationElementArray> items;
+    if (FAILED(automation.ElementFromHandle(menu, &element)) || !element ||
+        FAILED(automation.CreateTrueCondition(&all)) ||
+        FAILED(element->FindAll(TreeScope_Children, all.get(), &items)) || !items)
+    {
+        return 2;
+    }
+    int count = 0;
+    items->get_Length(&count);
+    wil::com_ptr_nothrow<IUIAutomationElement> chosen;
+    for (int i = 0; i < count; ++i)
+    {
+        wil::com_ptr_nothrow<IUIAutomationElement> item;
+        CONTROLTYPEID type = 0;
+        wil::unique_bstr name;
+        if (FAILED(items->GetElement(i, &item)) || FAILED(item->get_CurrentControlType(&type)) ||
+            FAILED(item->get_CurrentName(&name)))
+        {
+            return 2;
+        }
+        PrintLine(type, name.get());
+        if (invoke != nullptr && name && std::wstring(name.get()) == invoke)
+        {
+            chosen = item;
+        }
+    }
+    if (invoke == nullptr)
+    {
+        return 0;
+    }
+    if (!chosen)
+    {
+        return 3;
+    }
+    wil::com_ptr_nothrow<IUIAutomationInvokePattern> pattern;
+    if (FAILED(chosen->GetCurrentPatternAs(UIA_InvokePatternId, IID_PPV_ARGS(&pattern))) || !pattern)
+    {
+        return 4;
+    }
+    return SUCCEEDED(pattern->Invoke()) ? 0 : 4;
+}
+
 // The hold command, once the button is found: waits for a line, then asks the same element again.
 int Hold(IUIAutomationElement& element)
 {
@@ -70,7 +158,7 @@ int Hold(IUIAutomationElement& element)
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc < 3 || (std::wstring(argv[2]) != L"list" && argc < 4))
+    if (argc < 3 || (std::wstring(argv[2]) != L"list" && std::wstring(argv[2]) != L"menu" && argc < 4))
     {
         return 1;
     }
@@ -83,6 +171,13 @@ int wmain(int argc, wchar_t** argv)
     wil::com_ptr_nothrow<IUIAutomationElement> root;
     wil::com_ptr_nothrow<IUIAutomationCondition> all;
     wil::com_ptr_nothrow<IUIAutomationElementArray> children;
+    if (command == L"menu")
+    {
+        return SUCCEEDED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
+                                          IID_PPV_ARGS(&automation)))
+                   ? Menu(*automation, island, argc > 3 ? argv[3] : nullptr)
+                   : 2;
+    }
     if (FAILED(CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&automation))) ||
         FAILED(automation->ElementFromHandle(island, &root)) || !root ||

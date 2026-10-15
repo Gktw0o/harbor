@@ -52,23 +52,26 @@ std::vector<std::wstring> CommandLineArguments()
     return arguments;
 }
 
-// Test docks only: signaling the named event "Local\Harbor.Test.<id>.<name>" posts a message to the dock
-// window (once), so tests can make the dock fail in ways that are hard to cause from outside.
+// Test docks only: each signal of the named event "Local\Harbor.Test.<id>.<name>" posts a message to the dock
+// window, so tests can make the dock fail in ways that are hard to cause from outside, or reach what only the
+// mouse would.
 class TestHook
 {
   public:
     TestHook(const std::wstring& testId, const wchar_t* name, HWND window, UINT message, WPARAM wParam = 0)
         : m_window(window), m_message(message), m_wParam(wParam)
     {
-        if (FAILED(m_event.create(wil::EventOptions::ManualReset,
+        // Auto-reset: the wait is armed again after each signal.
+        if (FAILED(m_event.create(wil::EventOptions::None,
                                   (L"Local\\Harbor.Test." + testId + L"." + name).c_str())))
         {
             return;
         }
         m_wait.reset(CreateThreadpoolWait(
-            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
+            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT wait, TP_WAIT_RESULT) {
                 const auto* self = static_cast<const TestHook*>(context);
                 PostMessageW(self->m_window, self->m_message, self->m_wParam, 0);
+                SetThreadpoolWait(wait, self->m_event.get(), nullptr);
             },
             this, nullptr));
         if (m_wait)
@@ -214,6 +217,9 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     std::optional<TestHook> loseDevice;
     std::optional<TestHook> cloakIsland;
     std::optional<TestHook> uncloakIsland;
+    // "open-menu" opens the first item's right-click menu; "close-menu" closes it.
+    std::optional<TestHook> openMenu;
+    std::optional<TestHook> closeMenu;
     if (testMode)
     {
         hangUi.emplace(*options.testTaskbarId, L"hang-ui", window.Hwnd(),
@@ -224,6 +230,10 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
                             harbor::dock::DockWindow::kTestCloakMessage, 1);
         uncloakIsland.emplace(*options.testTaskbarId, L"uncloak-island", window.Hwnd(),
                               harbor::dock::DockWindow::kTestCloakMessage, 0);
+        openMenu.emplace(*options.testTaskbarId, L"open-menu", window.Hwnd(),
+                         harbor::dock::DockWindow::kTestOpenMenuMessage, 0);
+        closeMenu.emplace(*options.testTaskbarId, L"close-menu", window.Hwnd(),
+                          harbor::dock::DockWindow::kTestCloseMenuMessage);
     }
 
     MSG message{};

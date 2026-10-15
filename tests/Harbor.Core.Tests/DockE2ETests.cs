@@ -494,6 +494,115 @@ public sealed class DockE2ETests
         }
     }
 
+    // The right-click menu: the app's name, its windows by title, and what can be done; screen readers read it
+    // (owner-drawn items carry their text for them). "Close all windows" asks each window to close.
+    [TestMethod]
+    public async Task TheMenuListsAnAppsWindowsAndClosesThemAll()
+    {
+        TestDock.RequireForegroundTests();
+        const int MenuItem = 50011;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            await windows.SendAsync("new 1");
+            await windows.SendAsync("new 2");
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", timeout));
+            var island = IslandWindow.Find(dock.Id);
+
+            var from = await TestDock.LogLengthAsync(dataDir.Path);
+            TestDock.OpenMenu(taskbar);
+            var (code, items) = await TestDock.UseMenuAsync(island, "Close all windows");
+            Assert.AreEqual(0, code, string.Join("\n", items));
+            var names = items.Where(item => item.StartsWith($"{MenuItem}\t", StringComparison.Ordinal)).Select(item => item[6..]).ToArray();
+            CollectionAssert.AreEqual(new[] { "harbor_test_windows", "Test 1", "Test 2", "Close all windows" }, names, string.Join("\n", items));
+
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "windows: 0 apps, 0 windows", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var log = await TestDock.ReadLogAsync(dataDir.Path);
+            StringAssert.Contains(log, "menu: item 0 (test hook): close all its windows");
+            Assert.IsFalse(log.Contains("Test 1", StringComparison.Ordinal), "the log names a window");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // "Pin to dock" asks Harbor Shell (pinRequest) to pin what the Shell said starts the app; the dock itself
+    // changes nothing until the new list comes.
+    [TestMethod]
+    public async Task PinningFromTheMenuAsksHarborShell()
+    {
+        TestDock.RequireForegroundTests();
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var aumid = $"Harbor.Test.{taskbar.Id}.Pinnable";
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            await windows.SendAsync($"new 1 {aumid}");
+            var lookup = await server.WaitForMessageAsync<AppLookup>(l => l.Aumid == aumid);
+            var launch = new AppTarget(DockItemKind.App, aumid);
+            Assert.IsTrue(server.Server.TrySend(new AppInfo(lookup.Id, "Pinnable", null, null, launch)));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", TimeSpan.FromSeconds(10)));
+            var island = IslandWindow.Find(dock.Id);
+
+            TestDock.OpenMenu(taskbar);
+            var (code, items) = await TestDock.UseMenuAsync(island, "Pin to dock");
+            Assert.AreEqual(0, code, string.Join("\n", items));
+            var request = await server.WaitForMessageAsync<PinRequest>(_ => true);
+            Assert.AreEqual(new PinRequest(PinAction.Pin, launch), request);
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // An open menu runs its own loop on the island's thread; pongs (proof the thread is alive) must keep coming
+    // while it stays open, and the panic hotkey closes it.
+    [TestMethod]
+    public async Task PongsKeepComingWhileAMenuIsOpenAndPanicClosesIt()
+    {
+        TestDock.RequireForegroundTests();
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            await windows.SendAsync("new 1");
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", TimeSpan.FromSeconds(10)));
+            var island = IslandWindow.Find(dock.Id);
+
+            TestDock.OpenMenu(taskbar);
+            Assert.AreEqual(0, (await TestDock.UseMenuAsync(island)).ExitCode, "the menu didn't open");
+            var before = (await server.WaitForAsync(s => s.LastPongSeq is not null)).LastPongSeq!.Value;
+            await Task.Delay(TimeSpan.FromSeconds(12));
+            var after = (await server.WaitForAsync(s => s.LastPongSeq > before + 50)).LastPongSeq!.Value;
+            Assert.IsTrue(after > before + 50, $"pongs {before} -> {after}");
+            Assert.AreEqual(0, (await TestDock.UseMenuAsync(island)).ExitCode, "the menu closed by itself");
+
+            TestDock.PressPanicHotkey(server.PipeName);
+            Assert.AreEqual(6, (await TestDock.UseMenuAsync(island)).ExitCode, "the panic hotkey left the menu open");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
     [TestMethod]
     public async Task TheDockExitsNormallyWhenItsWindowIsClosed()

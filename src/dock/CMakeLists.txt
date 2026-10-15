@@ -36,6 +36,7 @@ add_library(harbor_dock_adapters STATIC
     adapters/file_log.cpp
     adapters/icon_files.cpp
     adapters/named_pipe_client.cpp
+    adapters/popup_menu.cpp
     adapters/process_job.cpp
     adapters/system_appearance.cpp
     adapters/uia_island.cpp

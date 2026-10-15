@@ -522,19 +522,33 @@ void DockWindow::RebuildModel(bool force)
     const auto now = SteadyNow();
     std::vector<island::RunningApp> running;
     std::map<windows::AppId, std::chrono::milliseconds> seen;
+    std::set<windows::AppId> attending;
     for (const auto& app : m_windows.apps)
     {
         const auto known = m_appsSeen.find(app.id);
         const auto when = known != m_appsSeen.end() ? known->second : now;
         seen.emplace(app.id, when);
         const auto info = m_appInfo.find(app.id);
+        const bool attention = std::any_of(app.windows.begin(), app.windows.end(),
+                                           [](const auto& window) { return window.attention; });
+        if (attention && !m_attention.contains(app.id))
+        {
+            // Which app id, never which app.
+            m_log.Info(std::format("attention: app {} asks for attention", app.id));
+        }
+        if (attention)
+        {
+            attending.insert(app.id);
+        }
         running.push_back({.id = app.id,
                            .identity = app.identity,
                            .fallbackName = island::FallbackName(app.aumid, app.exe),
+                           .attention = attention,
                            .info = info != m_appInfo.end() ? std::optional(info->second) : std::nullopt,
                            .seen = when});
     }
     m_appsSeen = std::move(seen);
+    m_attention = std::move(attending);
 
     auto model = island::BuildDockModel(m_items.items, running, now);
     KillTimer(m_hwnd, kModelTimer);
@@ -918,6 +932,11 @@ bool DockWindow::ClickSlot(std::size_t index, std::string_view how)
 void DockWindow::BringForward(windows::WindowId id, bool restore)
 {
     const HWND window = ToHwnd(id);
+    // Windows may flash a window it restores this way: that isn't the app asking for attention.
+    if (m_watcher)
+    {
+        m_watcher->NoteActivation(id);
+    }
     DWORD process = 0;
     GetWindowThreadProcessId(window, &process);
     // A click gave the dock the right to change the foreground: pass it on to the app.

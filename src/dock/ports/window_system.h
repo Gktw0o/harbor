@@ -25,6 +25,8 @@ struct WindowEvent
         // The user started or stopped moving or sizing it.
         MoveSizeStart,
         MoveSizeEnd,
+        // It flashed its taskbar button: it wants attention (the shell hook's HSHELL_FLASH, docs/adr/0011).
+        Flash,
     };
     Kind kind = Kind::Changed;
     WindowId window = 0;
@@ -64,6 +66,8 @@ class IWindowSystem
     virtual std::optional<WindowFacts> FactsOf(WindowId window) = 0;
     virtual std::optional<WindowApp> AppOf(WindowId window) = 0;
     virtual bool IsMinimized(WindowId window) = 0;
+    // Its app stopped responding (IsHungAppWindow): Windows may show a ghost in its place and hide it.
+    virtual bool IsHung(WindowId window) = 0;
     // The window at the root of window's owner chain (itself if unowned).
     virtual WindowId RootOwner(WindowId window) = 0;
 };

@@ -43,6 +43,9 @@ class WindowWatcher
     std::optional<Snapshot> TakeSnapshot();
     // Thread-safe. Explorer restarted: look at every window again.
     void Rescan();
+    // Thread-safe. The dock is about to bring window forward: the flash Windows may raise for it isn't the
+    // app asking for attention (WindowTracker::NoteDockActivation).
+    void NoteActivation(windows::WindowId window);
     // Ends the thread, waiting at most `wait`; a thread still stuck after that is abandoned. Safe to call
     // more than once.
     void Stop(std::chrono::milliseconds wait = std::chrono::seconds(2)) noexcept;

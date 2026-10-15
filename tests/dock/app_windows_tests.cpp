@@ -141,6 +141,26 @@ TEST(AppWindows, RemembersWhichWindowWasInFrontLast)
     EXPECT_GT(windows[1].active, 0u);
 }
 
+TEST(AppWindows, AFlashLastsUntilTheAppComesForward)
+{
+    AppWindows apps;
+    apps.Upsert(Window(1, "C:\\chat.exe", 100));
+    apps.Upsert(Window(2, "C:\\chat.exe", 100));
+    apps.Upsert(Window(3, "C:\\other.exe", 200));
+    apps.Flash(2);
+    apps.Flash(99);
+    EXPECT_TRUE(apps.Apps()[0].windows[1].attention);
+    const auto revision = apps.Revision();
+    apps.Flash(2);
+    EXPECT_EQ(apps.Revision(), revision);
+
+    // Another app coming forward changes nothing; this app's other window coming forward clears it.
+    apps.Activated(3);
+    EXPECT_TRUE(apps.Apps()[0].windows[1].attention);
+    apps.Activated(1);
+    EXPECT_FALSE(apps.Apps()[0].windows[1].attention);
+}
+
 TEST(AppWindows, OnlyChangesBumpTheRevision)
 {
     AppWindows apps;

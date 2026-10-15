@@ -58,14 +58,17 @@ that monitor's DPI. `WM_DPICHANGED`'s suggested rectangle is still ignored.
 another monitor, it only hides that monitor's trigger.
 
 **Attention marks.** The window watcher's thread registers a shell hook window
-(`RegisterShellHookWindow`) and listens for:
-- `HSHELL_FLASH`: the window's app gets a mark on the dock, cleared when one of its windows comes forward.
-  A flash for the foreground window, or for a window the dock brought forward in the last second, is ignored
-  (the spike's restore case).
-- `HSHELL_WINDOWREPLACED`: a hung window's ghost replaced it, or the other way round; the group keeps the
-  window.
+(`RegisterShellHookWindow`) and listens for `HSHELL_FLASH`: the window's app gets a mark on the dock, cleared
+when one of its windows comes forward or the window that flashed goes. A flash for the foreground window, or
+for a window the dock brought forward in the last second, is ignored (the spike's restore case). The window
+is mapped to its root owner first, as for the foreground.
 
-UI Automation reports the mark in the item's `ItemStatus` ("needs attention").
+**Hung windows.** When a window stops answering, Windows hides it behind a `Ghost` window. Ghosts are left
+out (ADR 0010), and a known window that turns invisible stays while `IsHungAppWindow` says it is hung, so
+the app keeps its item. (`HSHELL_WINDOWREPLACED`, considered in the plan, isn't needed for that.)
+
+UI Automation reports the mark in the item's `ItemStatus` ("needs attention"). The log says which app id asks,
+never which app.
 
 ## Alternatives considered
 

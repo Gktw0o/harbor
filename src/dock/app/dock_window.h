@@ -217,6 +217,8 @@ class DockWindow : private adapters::IIslandAccess
     island::DockModel m_model;
     // When the dock first saw each running app: its wait for Harbor Shell's answer starts then.
     std::map<windows::AppId, std::chrono::milliseconds> m_appsSeen;
+    // The running apps asking for attention now (to log each once).
+    std::set<windows::AppId> m_attention;
     // Each item's UI Automation key, and the keys by item identity (a pin's kind, target, and how many times
     // the same pin came before it; a running app's id) for the next list.
     std::vector<std::uint64_t> m_itemKeys;

@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <map>
+#include <set>
 #include <vector>
 
 #include "app/window_tracker.h"
@@ -65,6 +66,10 @@ class FakeWindowSystem final : public windows::IWindowSystem
     {
         return windows.contains(id) && windows[id].minimized;
     }
+    bool IsHung(WindowId id) override
+    {
+        return hung.contains(id);
+    }
     WindowId RootOwner(WindowId id) override
     {
         while (windows.contains(id) && windows[id].owner != 0)
@@ -77,8 +82,24 @@ class FakeWindowSystem final : public windows::IWindowSystem
     std::map<WindowId, Window> windows;
     // Front to back.
     std::vector<WindowId> zOrder;
+    std::set<WindowId> hung;
     int appReads = 0;
 };
+
+bool Attention(const windows::AppWindows& apps, WindowId id)
+{
+    for (const auto& app : apps.Apps())
+    {
+        for (const auto& window : app.windows)
+        {
+            if (window.id == id)
+            {
+                return window.attention;
+            }
+        }
+    }
+    return false;
+}
 
 std::vector<WindowId> AllWindows(const windows::AppWindows& apps)
 {
@@ -203,6 +224,65 @@ TEST(WindowTracker, KnowsWhenAWindowIsBeingMovedOrSized)
     // A window destroyed while being moved doesn't leave the flag set.
     tracker.OnEvents({{Kind::MoveSizeStart, 4}, {Kind::Destroyed, 4}}, 0ms);
     EXPECT_FALSE(tracker.MovingOrSizing());
+}
+
+TEST(WindowTracker, AFlashAsksForAttentionUntilTheAppComesForward)
+{
+    FakeWindowSystem system;
+    system.Add(1, "C:\\chat.exe");
+    system.Add(2, "C:\\editor.exe", 200);
+    WindowTracker tracker(system, "");
+    tracker.Rescan(0ms);
+    tracker.OnEvents({{Kind::Foreground, 2}}, 0ms);
+
+    tracker.OnEvents({{Kind::Flash, 1}}, 10ms);
+    EXPECT_TRUE(Attention(tracker.Apps(), 1));
+    tracker.OnEvents({{Kind::Foreground, 1}}, 20ms);
+    EXPECT_FALSE(Attention(tracker.Apps(), 1));
+
+    // In front already: the user sees it.
+    tracker.OnEvents({{Kind::Flash, 1}}, 30ms);
+    EXPECT_FALSE(Attention(tracker.Apps(), 1));
+}
+
+TEST(WindowTracker, AFlashForAWindowTheDockJustBroughtForwardIsWindows)
+{
+    FakeWindowSystem system;
+    system.Add(1, "C:\\chat.exe");
+    system.Add(2, "C:\\editor.exe", 200);
+    WindowTracker tracker(system, "");
+    tracker.Rescan(0ms);
+    tracker.OnEvents({{Kind::Foreground, 2}}, 0ms);
+
+    // Restoring a minimized window made Windows flash it (M3 spike).
+    tracker.NoteDockActivation(1, 100ms);
+    tracker.OnEvents({{Kind::Flash, 1}}, 600ms);
+    EXPECT_FALSE(Attention(tracker.Apps(), 1));
+    // A second later, it's the app's own.
+    tracker.OnEvents({{Kind::Flash, 1}}, 1200ms);
+    EXPECT_TRUE(Attention(tracker.Apps(), 1));
+}
+
+TEST(WindowTracker, AWindowOfAnAppThatStoppedRespondingStays)
+{
+    FakeWindowSystem system;
+    system.Add(1, "C:\\hung.exe");
+    system.Add(2, "C:\\hidden.exe");
+    system.windows[2].facts.visible = false;
+    WindowTracker tracker(system, "");
+    tracker.Rescan(0ms);
+
+    // Windows hides it behind a ghost: still on the dock.
+    system.hung = {1, 2};
+    system.windows[1].facts.visible = false;
+    tracker.OnEvents({{Kind::Changed, 1}, {Kind::Changed, 2}}, 0ms);
+    // A hung app's hidden window that was never on the dock doesn't come along.
+    EXPECT_EQ(AllWindows(tracker.Apps()), (std::vector<WindowId>{1}));
+
+    // Responding again and still hidden: it goes.
+    system.hung.clear();
+    tracker.OnEvents({{Kind::Changed, 1}}, 0ms);
+    EXPECT_TRUE(AllWindows(tracker.Apps()).empty());
 }
 
 TEST(WindowTracker, ARescanForgetsWindowsThatWentQuietly)

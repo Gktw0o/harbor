@@ -35,6 +35,7 @@ class Win32WindowSystem final : public windows::IWindowSystem
     std::optional<windows::WindowFacts> FactsOf(windows::WindowId window) override;
     std::optional<windows::WindowApp> AppOf(windows::WindowId window) override;
     bool IsMinimized(windows::WindowId window) override;
+    bool IsHung(windows::WindowId window) override;
     windows::WindowId RootOwner(windows::WindowId window) override;
 
     // Events queued beyond this are dropped (and TakeEvents reports it).
@@ -50,11 +51,14 @@ class Win32WindowSystem final : public windows::IWindowSystem
 
     static void CALLBACK OnEvent(HWINEVENTHOOK hook, DWORD event, HWND hwnd, LONG object, LONG child,
                                  DWORD thread, DWORD time);
+    static LRESULT CALLBACK ShellHookProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     void Queue(windows::WindowEvent event);
     // Facts about the process, cached by its id and start time; nullopt if it can't be opened.
     std::optional<ProcessFacts> FactsOfProcess(DWORD processId);
 
     std::vector<wil::unique_hwineventhook> m_hooks;
+    HWND m_shellHookWindow = nullptr;
+    UINT m_shellHookMessage = 0;
     std::function<void()> m_wake;
     std::vector<windows::WindowEvent> m_events;
     bool m_overflowed = false;

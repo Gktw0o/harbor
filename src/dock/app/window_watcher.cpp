@@ -25,6 +25,7 @@ constexpr wchar_t kWindowClass[] = L"Harbor.Dock.WindowWatcher";
 constexpr UINT kEventsMessage = WM_APP + 1;
 constexpr UINT kRescanMessage = WM_APP + 2;
 constexpr UINT kStopMessage = WM_APP + 3;
+constexpr UINT kActivationMessage = WM_APP + 4; // wParam: the window the dock brings forward
 constexpr UINT_PTR kRecheckTimer = 1;
 
 std::chrono::milliseconds Now() noexcept
@@ -89,6 +90,12 @@ LRESULT CALLBACK WindowWatcher::Shared::WndProc(HWND hwnd, UINT message, WPARAM 
     case WM_TIMER:
         shared->timerDue = true;
         shared->Work();
+        return 0;
+    case kActivationMessage:
+        if (shared->tracker)
+        {
+            shared->tracker->NoteDockActivation(static_cast<windows::WindowId>(wParam), Now());
+        }
         return 0;
     case kStopMessage:
         PostQuitMessage(0);
@@ -207,6 +214,12 @@ std::optional<WindowWatcher::Snapshot> WindowWatcher::TakeSnapshot()
 void WindowWatcher::Rescan()
 {
     PostMessageW(m_shared->window, kRescanMessage, 0, 0);
+}
+
+void WindowWatcher::NoteActivation(windows::WindowId window)
+{
+    static_assert(sizeof(WPARAM) >= sizeof(windows::WindowId));
+    PostMessageW(m_shared->window, kActivationMessage, static_cast<WPARAM>(window), 0);
 }
 
 void WindowWatcher::Stop(std::chrono::milliseconds wait) noexcept

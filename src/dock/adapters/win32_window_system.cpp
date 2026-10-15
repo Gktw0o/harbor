@@ -182,11 +182,33 @@ bool Win32WindowSystem::Start(std::function<void()> wake)
         }
         m_hooks.push_back(std::move(hook));
     }
+    // The shell hook, for flashes (attention): documented, but "not intended for general use" (ADR 0011).
+    // Without it, everything but attention marks still works.
+    WNDCLASSEXW shellHookClass{};
+    shellHookClass.cbSize = sizeof(shellHookClass);
+    shellHookClass.lpfnWndProc = &Win32WindowSystem::ShellHookProc;
+    shellHookClass.hInstance = GetModuleHandleW(nullptr);
+    shellHookClass.lpszClassName = L"Harbor.Dock.ShellHook";
+    RegisterClassExW(&shellHookClass);
+    m_shellHookMessage = RegisterWindowMessageW(L"SHELLHOOK");
+    // A hidden top-level window: shell hook messages go to top-level windows.
+    m_shellHookWindow = CreateWindowExW(WS_EX_TOOLWINDOW, shellHookClass.lpszClassName, L"", WS_POPUP, 0, 0,
+                                        0, 0, nullptr, nullptr, shellHookClass.hInstance, nullptr);
+    if (m_shellHookWindow != nullptr)
+    {
+        RegisterShellHookWindow(m_shellHookWindow);
+    }
     return true;
 }
 
 void Win32WindowSystem::Stop() noexcept
 {
+    if (m_shellHookWindow != nullptr)
+    {
+        DeregisterShellHookWindow(m_shellHookWindow);
+        DestroyWindow(m_shellHookWindow);
+        m_shellHookWindow = nullptr;
+    }
     // On the thread that set them, as UnhookWinEvent requires.
     m_hooks.clear();
     if (t_system == this)
@@ -337,6 +359,25 @@ std::optional<windows::WindowApp> Win32WindowSystem::AppOf(windows::WindowId id)
 bool Win32WindowSystem::IsMinimized(windows::WindowId window)
 {
     return IsIconic(ToHwnd(window)) != FALSE;
+}
+
+bool Win32WindowSystem::IsHung(windows::WindowId window)
+{
+    // Looks at how long the window's thread hasn't taken messages; sends it none.
+    return IsHungAppWindow(ToHwnd(window)) != FALSE;
+}
+
+LRESULT CALLBACK Win32WindowSystem::ShellHookProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    auto* self = t_system;
+    // HSHELL_FLASH (HSHELL_REDRAW with the high bit): the window flashed its taskbar button (docs/adr/0011).
+    if (self != nullptr && message == self->m_shellHookMessage && message != 0 && wParam == HSHELL_FLASH &&
+        lParam != 0)
+    {
+        self->Queue({windows::WindowEvent::Kind::Flash, ToId(reinterpret_cast<HWND>(lParam))});
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
 windows::WindowId Win32WindowSystem::RootOwner(windows::WindowId window)

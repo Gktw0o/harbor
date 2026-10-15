@@ -491,6 +491,58 @@ public sealed class DockE2ETests
             var log = await TestDock.ReadLogAsync(dataDir.Path);
             StringAssert.Contains(log, "click: item 0 (UI Automation): its window is minimized");
             StringAssert.Contains(log, "click: item 0 (UI Automation): a window comes forward, restored");
+            // Windows flashes a window restored this way (M3 spike): that isn't the app asking for attention.
+            Assert.IsFalse(log.Contains("asks for attention", StringComparison.Ordinal), log);
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // An app flashing a window's taskbar button asks for attention: its item gets a highlight and screen readers
+    // hear it, until that window comes forward or goes.
+    [TestMethod]
+    public async Task AFlashingWindowMarksItsAppUntilItGoes()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            await windows.SendAsync("new 1");
+            await windows.SendAsync("new 2");
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "windows: 1 apps, 2 windows", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+            async Task<string> StatusAsync() =>
+                (await TestDock.RunUiaClientAsync(island, "status", "harbor_test_windows")).Output.TrimEnd('\r', '\n');
+            Assert.AreEqual("status\trunning, 2 windows", await StatusAsync());
+
+            await windows.SendAsync("flash 1");
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "asks for attention", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.AreEqual("status\trunning, 2 windows, needs attention", await StatusAsync());
+
+            // The other window doesn't settle it; the one that flashed going does.
+            var from = await TestDock.LogLengthAsync(dataDir.Path);
+            await windows.SendAsync("close 2");
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "windows: 1 apps, 1 windows", timeout));
+            Assert.AreEqual("status\trunning, 1 window, needs attention", await StatusAsync());
+            from = await TestDock.LogLengthAsync(dataDir.Path);
+            await windows.SendAsync("new 3");
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "windows: 1 apps, 2 windows", timeout));
+            from = await TestDock.LogLengthAsync(dataDir.Path);
+            await windows.SendAsync("close 1");
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "windows: 1 apps, 1 windows", timeout));
+            Assert.IsTrue(await TestDock.WaitUntilAsync(async () => await StatusAsync() == "status\trunning, 1 window", timeout),
+                await StatusAsync());
         }
         finally
         {

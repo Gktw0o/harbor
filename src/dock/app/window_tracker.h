@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -45,9 +46,16 @@ class WindowTracker
         return !m_moving.empty();
     }
 
+    // The dock is about to bring window forward: a flash for it in the next kDockActivationGrace isn't the
+    // app asking for attention.
+    void NoteDockActivation(windows::WindowId window, Milliseconds now);
+    static constexpr Milliseconds kDockActivationGrace{1000};
+
   private:
     // Reads the window's facts and app again: adds, updates, moves or removes it.
     void Consider(windows::WindowId window, Milliseconds now);
+    // A window flashed: its app asks for attention, unless it is in front or the dock just brought it there.
+    void OnFlash(windows::WindowId window, Milliseconds now);
 
     windows::IWindowSystem& m_system;
     std::string m_classPrefix;
@@ -55,6 +63,10 @@ class WindowTracker
     // (when, which window) second looks, in no order.
     std::vector<std::pair<Milliseconds, windows::WindowId>> m_rechecks;
     std::set<windows::WindowId> m_moving;
+    // The window in front (root owner), from the last foreground event.
+    windows::WindowId m_foreground = 0;
+    // Windows the dock brought forward, and when: their flashes are Windows', not the app's.
+    std::map<windows::WindowId, Milliseconds> m_dockActivated;
 };
 
 } // namespace harbor::dock

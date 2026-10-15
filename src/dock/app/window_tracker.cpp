@@ -54,10 +54,14 @@ void WindowTracker::OnEvents(const std::vector<windows::WindowEvent>& events, Mi
         case Kind::Foreground: {
             // The app may have changed its AppUserModelID since: read it again.
             const auto root = m_system.RootOwner(event.window);
+            m_foreground = root;
             Consider(root, now);
             m_apps.Activated(root);
             break;
         }
+        case Kind::Flash:
+            OnFlash(event.window, now);
+            break;
         case Kind::MoveSizeStart:
             m_moving.insert(event.window);
             break;
@@ -97,9 +101,39 @@ std::optional<WindowTracker::Milliseconds> WindowTracker::NextTimer() const
     return std::min_element(m_rechecks.begin(), m_rechecks.end())->first;
 }
 
+void WindowTracker::NoteDockActivation(windows::WindowId window, Milliseconds now)
+{
+    std::erase_if(m_dockActivated,
+                  [&](const auto& entry) { return now - entry.second > kDockActivationGrace; });
+    m_dockActivated[window] = now;
+}
+
+void WindowTracker::OnFlash(windows::WindowId window, Milliseconds now)
+{
+    const auto root = m_system.RootOwner(window);
+    // Not for the window in front (the user sees it), nor one the dock just brought forward: Windows raises a
+    // flash for a restored window it was asked to activate (M3 spike).
+    if (root == m_foreground)
+    {
+        return;
+    }
+    if (const auto activated = m_dockActivated.find(root);
+        activated != m_dockActivated.end() && now - activated->second <= kDockActivationGrace)
+    {
+        return;
+    }
+    m_apps.Flash(root);
+}
+
 void WindowTracker::Consider(windows::WindowId window, Milliseconds now)
 {
-    const auto facts = m_system.FactsOf(window);
+    auto facts = m_system.FactsOf(window);
+    // An app that stopped responding: Windows shows a ghost in its window's place (left out by its class) and
+    // may hide the window itself. It stays on the dock all the same.
+    if (facts && !facts->visible && m_apps.AppOf(window) && m_system.IsHung(window))
+    {
+        facts->visible = true;
+    }
     if (!facts || !facts->className.starts_with(m_classPrefix) || !windows::IsAppWindow(*facts))
     {
         m_apps.Remove(window);

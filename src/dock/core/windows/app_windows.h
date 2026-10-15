@@ -71,6 +71,8 @@ class AppWindows
         std::uint64_t seen = 0;
         std::uint64_t active = 0;
         bool minimized = false;
+        // It flashed (asked for attention, docs/adr/0011) and its app hasn't come forward since.
+        bool attention = false;
         friend bool operator==(const Window&, const Window&) = default;
     };
 
@@ -94,8 +96,11 @@ class AppWindows
     void Upsert(const TrackedWindow& window);
     // No longer an app window (destroyed, hidden, cloaked, on another desktop). Unknown ids are ignored.
     void Remove(WindowId id);
-    // A window came to the front. Unknown ids are ignored: the foreground often isn't an app window.
+    // A window came to the front: its app's windows no longer ask for attention. Unknown ids are ignored: the
+    // foreground often isn't an app window.
     void Activated(WindowId id);
+    // A window asks for attention (it flashed). Unknown ids are ignored.
+    void Flash(WindowId id);
 
     // Every app with windows, in the order their processes started (first seen breaks ties).
     const std::vector<App>& Apps() const noexcept

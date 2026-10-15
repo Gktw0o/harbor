@@ -102,7 +102,28 @@ void AppWindows::Activated(WindowId id)
     auto& windows = FindApp(known->second)->windows;
     std::find_if(windows.begin(), windows.end(), [&](const Window& w) { return w.id == id; })->active =
         m_nextActive++;
+    // The app is in front: whatever it wanted attention for, the user sees it now.
+    for (auto& window : windows)
+    {
+        window.attention = false;
+    }
     ++m_revision;
+}
+
+void AppWindows::Flash(WindowId id)
+{
+    const auto known = m_appOfWindow.find(id);
+    if (known == m_appOfWindow.end())
+    {
+        return;
+    }
+    auto& windows = FindApp(known->second)->windows;
+    auto& window = *std::find_if(windows.begin(), windows.end(), [&](const Window& w) { return w.id == id; });
+    if (!window.attention)
+    {
+        window.attention = true;
+        ++m_revision;
+    }
 }
 
 std::optional<AppId> AppWindows::AppOf(WindowId id) const

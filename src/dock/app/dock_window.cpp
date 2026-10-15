@@ -4,6 +4,7 @@
 #include <dwmapi.h>
 #include <format>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <shellapi.h>
 #include <ShellScalingApi.h>
@@ -17,6 +18,7 @@
 #include "adapters/win32_app_bar.h"
 #include "adapters/win32_window_system.h"
 #include "app/exit_codes.h"
+#include "core/ipc/codec.h"
 #include "core/island/click_policy.h"
 #include "core/island/icon_file.h"
 #include "core/island/on_screen.h"
@@ -33,7 +35,7 @@ constexpr DWORD kExStyle = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST |
 // Posted by the control channel's thread; handled on the UI thread.
 constexpr UINT kControlConnectionChanged = WM_APP + 1; // wParam: connected (0/1)
 constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
-constexpr UINT kControlDockItems = WM_APP + 4;         // the list is in m_receivedItems
+constexpr UINT kControlMessages = WM_APP + 4;          // dockItems and appInfo wait in m_received
 // Posted by the renderer once a frame is on its way to the screen.
 constexpr UINT kRenderCommitted = WM_APP + 5;
 // Posted by the AppBar worker with the strip Explorer granted: wParam = left, top; lParam = right, bottom.
@@ -284,10 +286,10 @@ void DockWindow::StartControlChannel()
     const HWND hwnd = m_hwnd;
     TaskbarGuard& guard = m_guard;
     log::ILogger& log = m_log;
-    LatestValue<ipc::DockItems>& receivedItems = m_receivedItems;
+    MessageQueue<ipc::Message>& received = m_received;
     m_controlChannel.Start({
         .onMessage =
-            [hwnd, &guard, &receivedItems](const ipc::Message& message) {
+            [hwnd, &guard, &log, &received](const ipc::Message& message) {
                 if (const auto* ping = std::get_if<ipc::Ping>(&message))
                 {
                     PostMessageW(hwnd, kControlPing, ping->seq, 0);
@@ -297,10 +299,21 @@ void DockWindow::StartControlChannel()
                 {
                     guard.PostRequest(setTaskbar->hidden);
                 }
-                else if (const auto* dockItems = std::get_if<ipc::DockItems>(&message))
+                else if (std::holds_alternative<ipc::DockItems>(message) ||
+                         std::holds_alternative<ipc::AppInfo>(message))
                 {
-                    receivedItems.Put(*dockItems);
-                    PostMessageW(hwnd, kControlDockItems, 0, 0);
+                    // In one queue, in order: an appInfo may name a pin from the dockItems before it.
+                    switch (received.Push(message))
+                    {
+                    case MessageQueue<ipc::Message>::Pushed::First:
+                        PostMessageW(hwnd, kControlMessages, 0, 0);
+                        break;
+                    case MessageQueue<ipc::Message>::Pushed::Queued:
+                        break;
+                    case MessageQueue<ipc::Message>::Pushed::Dropped:
+                        log.Warn("control channel: the island isn't taking messages; dropped one");
+                        break;
+                    }
                 }
             },
         .onConnectionChanged =
@@ -334,17 +347,85 @@ void DockWindow::OnConnectionChanged(bool connected)
             SetTimer(m_hwnd, kOrphanTimer, static_cast<UINT>(m_options.orphanTimeout.count()), nullptr);
         }
     }
+    // A new Harbor Shell (or the same one again) knows nothing of what this one asked: ask again. What the
+    // last one answered stays until the new answers come.
+    m_lookedUp.clear();
+    m_lookupsInFlight.clear();
+    SendLookups();
 }
 
-void DockWindow::OnDockItems()
+void DockWindow::OnControlMessages()
 {
-    // Several lists may have arrived for one wake-up; the newest wins.
-    if (auto items = m_receivedItems.Take(); items && *items != m_items)
+    bool itemsChanged = false;
+    bool appsChanged = false;
+    for (auto& message : m_received.TakeAll())
     {
-        m_items = std::move(*items);
-        // Only the count: the names are the user's business.
-        m_log.Info(std::format("dock items: {} received", m_items.items.size()));
-        RebuildModel(/*force=*/true);
+        if (auto* items = std::get_if<ipc::DockItems>(&message); items && *items != m_items)
+        {
+            m_items = std::move(*items);
+            itemsChanged = true;
+            // Only the count: the names are the user's business.
+            m_log.Info(std::format("dock items: {} received", m_items.items.size()));
+        }
+        else if (auto* info = std::get_if<ipc::AppInfo>(&message))
+        {
+            m_lookupsInFlight.erase(info->id);
+            auto& known = m_appInfo[info->id];
+            appsChanged = appsChanged || known != *info;
+            known = std::move(*info);
+        }
+    }
+    if (itemsChanged || appsChanged)
+    {
+        RebuildModel(/*force=*/itemsChanged);
+    }
+    // Answers make room for more questions.
+    SendLookups();
+}
+
+void DockWindow::SendLookups()
+{
+    if (!m_connected)
+    {
+        return;
+    }
+    std::size_t sent = 0;
+    for (const auto& app : m_windows.apps)
+    {
+        if (m_lookupsInFlight.size() >= kMaxLookupsInFlight)
+        {
+            break;
+        }
+        if (m_lookedUp.contains(app.id))
+        {
+            continue;
+        }
+        // What doesn't fit the message (or isn't known) goes as null; the Shell does with what it gets.
+        ipc::AppLookup lookup{.id = app.id};
+        if (ipc::IsWireText(app.aumid, ipc::AppLookup::kMaxAumidLength))
+        {
+            lookup.aumid = app.aumid;
+        }
+        if (ipc::IsWireText(app.exe, ipc::AppLookup::kMaxExeLength))
+        {
+            lookup.exe = app.exe;
+        }
+        if (!app.windows.empty() && app.windows.front().id <= std::numeric_limits<std::uint32_t>::max())
+        {
+            lookup.window = static_cast<std::uint32_t>(app.windows.front().id);
+        }
+        if (!m_controlChannel.Send(lookup))
+        {
+            break;
+        }
+        m_lookedUp.insert(app.id);
+        m_lookupsInFlight.insert(app.id);
+        ++sent;
+    }
+    if (sent > 0)
+    {
+        // How many, not which.
+        m_log.Info(std::format("apps: asked Harbor Shell about {} running apps", sent));
     }
 }
 
@@ -356,6 +437,7 @@ void DockWindow::OnWindowsChanged()
         {
             m_windows = std::move(*snapshot);
             RebuildModel(/*force=*/false);
+            SendLookups();
         }
     }
 }
@@ -370,9 +452,11 @@ void DockWindow::RebuildModel(bool force)
         const auto known = m_appsSeen.find(app.id);
         const auto when = known != m_appsSeen.end() ? known->second : now;
         seen.emplace(app.id, when);
+        const auto info = m_appInfo.find(app.id);
         running.push_back({.id = app.id,
                            .identity = app.identity,
                            .fallbackName = island::FallbackName(app.aumid, app.exe),
+                           .info = info != m_appInfo.end() ? std::optional(info->second) : std::nullopt,
                            .seen = when});
     }
     m_appsSeen = std::move(seen);
@@ -879,8 +963,8 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case kControlPing:
         m_controlChannel.Send(ipc::Pong{static_cast<std::uint32_t>(wParam)});
         return 0;
-    case kControlDockItems:
-        OnDockItems();
+    case kControlMessages:
+        OnControlMessages();
         return 0;
     case kWindowsChanged:
         OnWindowsChanged();

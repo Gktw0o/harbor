@@ -15,24 +15,6 @@
 namespace harbor::island
 {
 
-// A pinned item, as Harbor Shell names it in appInfo.
-struct PinRef
-{
-    ipc::DockItemKind kind = ipc::DockItemKind::App;
-    std::string target;
-    friend bool operator==(const PinRef&, const PinRef&) = default;
-};
-
-// What Harbor Shell answered about a running app (appInfo).
-struct AppInfo
-{
-    std::string name;
-    std::optional<std::string> icon;
-    // The pin this app is, if the Shell matched it to one (a shortcut's target, say).
-    std::optional<PinRef> pinned;
-    friend bool operator==(const AppInfo&, const AppInfo&) = default;
-};
-
 // A running app, as the dock model needs it.
 struct RunningApp
 {
@@ -42,7 +24,8 @@ struct RunningApp
     std::string fallbackName;
     // One of its windows asked for attention.
     bool attention = false;
-    std::optional<AppInfo> info;
+    // What Harbor Shell answered about it (appInfo): its name, icon, and the pin it is.
+    std::optional<ipc::AppInfo> info;
     // When the dock first saw it, on any steady clock.
     std::chrono::milliseconds seen{0};
 };

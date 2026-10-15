@@ -28,8 +28,8 @@ TEST(DockModel, PinsComeFirstThenTheOtherRunningAppsInTheOrderGiven)
 {
     std::vector<RunningApp> apps{App(7, AppIdentity::Kind::Exe, "c:\\b.exe"),
                                  App(3, AppIdentity::Kind::Exe, "c:\\a.exe")};
-    apps[0].info = AppInfo{.name = "B", .icon = "b.bgra"};
-    apps[1].info = AppInfo{.name = "A"};
+    apps[0].info = ipc::AppInfo{.name = "B", .icon = "b.bgra"};
+    apps[1].info = ipc::AppInfo{.name = "A"};
     const auto model = BuildDockModel(kPins, apps, 1000ms);
 
     EXPECT_EQ(model.pinned, 3u);
@@ -70,8 +70,8 @@ TEST(DockModel, TheShellCanSayWhichPinAnAppIs)
 {
     // A shortcut's game: only the Shell knows the shortcut leads to it.
     auto game = App(5, AppIdentity::Kind::Exe, "d:\\games\\game.exe");
-    game.info =
-        AppInfo{.name = "Game", .pinned = PinRef{DockItemKind::Path, "C:\\Users\\me\\Desktop\\GAME.lnk"}};
+    game.info = ipc::AppInfo{
+        .name = "Game", .pinned = ipc::AppTarget{DockItemKind::Path, "C:\\Users\\me\\Desktop\\GAME.lnk"}};
     const std::vector<RunningApp> apps{game};
     const auto model = BuildDockModel(kPins, apps, 0ms);
     ASSERT_EQ(model.slots.size(), 3u);
@@ -81,7 +81,8 @@ TEST(DockModel, TheShellCanSayWhichPinAnAppIs)
 TEST(DockModel, APinCanStandForSeveralApps)
 {
     auto second = App(2, AppIdentity::Kind::Exe, "c:\\tools\\editor-helper.exe");
-    second.info = AppInfo{.name = "Editor", .pinned = PinRef{DockItemKind::Path, "C:\\Tools\\Editor.exe"}};
+    second.info =
+        ipc::AppInfo{.name = "Editor", .pinned = ipc::AppTarget{DockItemKind::Path, "C:\\Tools\\Editor.exe"}};
     second.attention = true;
     const std::vector<RunningApp> apps{App(1, AppIdentity::Kind::Exe, "c:\\tools\\editor.exe"), second};
     const auto model = BuildDockModel(kPins, apps, 0ms);
@@ -110,7 +111,7 @@ TEST(DockModel, AnAppWaitsForTheShellThenAppearsUnderItsFallbackName)
 TEST(DockModel, AttentionMarksTheItem)
 {
     auto app = App(4, AppIdentity::Kind::Exe, "c:\\chat.exe");
-    app.info = AppInfo{.name = "Chat"};
+    app.info = ipc::AppInfo{.name = "Chat"};
     app.attention = true;
     const std::vector<RunningApp> apps{app};
     EXPECT_TRUE(BuildDockModel({}, apps, 0ms).slots[0].marks.attention);
@@ -119,7 +120,7 @@ TEST(DockModel, AttentionMarksTheItem)
 TEST(DockModel, NoPinsNoDivider)
 {
     auto app = App(4, AppIdentity::Kind::Exe, "c:\\chat.exe");
-    app.info = AppInfo{.name = "Chat"};
+    app.info = ipc::AppInfo{.name = "Chat"};
     const std::vector<RunningApp> apps{app};
     const auto model = BuildDockModel({}, apps, 0ms);
     EXPECT_EQ(model.pinned, 0u);

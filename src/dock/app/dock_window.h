@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -17,8 +18,8 @@
 #include "adapters/composition_renderer.h"
 #include "adapters/uia_island.h"
 #include "app/appbar_worker.h"
-#include "app/latest_value.h"
 #include "app/launcher.h"
+#include "app/message_queue.h"
 #include "app/taskbar_guard.h"
 #include "app/window_watcher.h"
 #include "core/island/appearance.h"
@@ -106,7 +107,11 @@ class DockWindow : private adapters::IIslandAccess
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
     void StartControlChannel();
     void OnConnectionChanged(bool connected);
-    void OnDockItems();
+    // Applies the dockItems and appInfo that came, in order.
+    void OnControlMessages();
+    // Asks Harbor Shell about running apps it hasn't been asked about on this connection, at most
+    // kMaxLookupsInFlight unanswered at a time.
+    void SendLookups();
     // The window watcher has a new snapshot.
     void OnWindowsChanged();
     // Builds the dock model again from the pinned items and the running apps; redraws if the items changed
@@ -155,8 +160,15 @@ class DockWindow : private adapters::IIslandAccess
     adapters::CompositionRenderer& m_renderer;
     log::ILogger& m_log;
     Options m_options;
-    // From the channel's thread to this one.
-    LatestValue<ipc::DockItems> m_receivedItems;
+    // From the channel's thread to this one: dockItems and appInfo, in order.
+    MessageQueue<ipc::Message> m_received{4096};
+    // What Harbor Shell said about each running app, by app id; kept across reconnects until it answers
+    // again.
+    std::map<windows::AppId, ipc::AppInfo> m_appInfo;
+    // Apps asked about on this connection, and those not answered yet.
+    static constexpr std::size_t kMaxLookupsInFlight = 64;
+    std::set<windows::AppId> m_lookedUp;
+    std::set<windows::AppId> m_lookupsInFlight;
     // The pinned items. Kept while the Shell is away.
     ipc::DockItems m_items;
     // What the dock shows: the pinned items, then the running apps that aren't.

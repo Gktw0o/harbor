@@ -387,6 +387,54 @@ public sealed class DockE2ETests
         }
     }
 
+    // The dock asks Harbor Shell about each app it sees running (appLookup) and shows the answer (appInfo): its
+    // name and icon, and, when the Shell says the app is a pinned item, its dot on that item instead.
+    [TestMethod]
+    public async Task HarborShellNamesRunningAppsAndMatchesThemToPins()
+    {
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var aumid = $"Harbor.Test.{taskbar.Id}.Named";
+        var icon = new IconStore(dataDir.Path, new CapturingLog()).Save(new IconImage(1, 1, [255, 0, 0, 255]))!;
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            await windows.SendAsync($"new 1 {aumid}");
+            var lookup = await server.WaitForMessageAsync<AppLookup>(l => l.Aumid == aumid);
+            StringAssert.EndsWith(lookup.Exe, "harbor_test_windows.exe");
+            Assert.IsNotNull(lookup.Window);
+
+            Assert.IsTrue(server.Server.TrySend(new AppInfo(lookup.Id, "Named by the Shell", icon, null, new AppTarget(DockItemKind.App, aumid))));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items (1 icons)", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+            var (_, tree) = await TestDock.RunUiaClientAsync(island, "list");
+            CollectionAssert.Contains(tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), $"{Button}\tNamed by the Shell");
+
+            // A pin only the Shell can match (a shortcut, say): the app joins it once the Shell says so, in the
+            // order the messages came.
+            var from = await TestDock.LogLengthAsync(dataDir.Path);
+            var pin = new AppTarget(DockItemKind.Path, @"C:\Harbor test\Named.lnk");
+            Assert.IsTrue(server.Server.TrySend(new DockItems([new DockItem(pin.Kind, pin.Target, "Pinned", null)])));
+            Assert.IsTrue(server.Server.TrySend(new AppInfo(lookup.Id, "Named by the Shell", icon, pin, null)));
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "island: 1 items (0 icons)", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.AreEqual("status\trunning, 1 window",
+                (await TestDock.RunUiaClientAsync(island, "status", "Pinned")).Output.TrimEnd('\r', '\n'));
+            Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains(".Named", StringComparison.Ordinal),
+                "the log names an app");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // A click on a running app (here UI Automation's Invoke, which does the same) brings its most recent window
     // forward; again, its next window in turn; with one window in front, minimizes it; and brings a minimized
     // one back.

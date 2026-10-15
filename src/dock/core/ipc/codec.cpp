@@ -74,15 +74,7 @@ std::size_t CountCharacters(std::string_view utf8) noexcept
 // UTF-8 sequence is below 0x80, so checking bytes is enough.
 bool IsBoundedText(const json& value, std::size_t maxLength) noexcept
 {
-    if (!value.is_string())
-    {
-        return false;
-    }
-    const auto& text = value.get_ref<const std::string&>();
-    const auto length = CountCharacters(text);
-    return length >= 1 && length <= maxLength && std::none_of(text.begin(), text.end(), [](char c) {
-               return static_cast<unsigned char>(c) < 0x20;
-           });
+    return value.is_string() && IsWireText(value.get_ref<const std::string&>(), maxLength);
 }
 
 // "<16 lowercase hex digits>.bgra": a plain file name, so it can never point outside the icons folder.
@@ -546,6 +538,14 @@ DecodeResult Decode(std::string_view line) noexcept
         // crashes the dock" (e.g. std::bad_alloc).
         return DecodeError::MalformedJson;
     }
+}
+
+bool IsWireText(std::string_view text, std::size_t maxLength) noexcept
+{
+    const auto length = CountCharacters(text);
+    return length >= 1 && length <= maxLength && std::none_of(text.begin(), text.end(), [](char c) {
+               return static_cast<unsigned char>(c) < 0x20;
+           });
 }
 
 const char* ToString(DecodeError error) noexcept

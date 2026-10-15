@@ -217,9 +217,12 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     std::optional<TestHook> loseDevice;
     std::optional<TestHook> cloakIsland;
     std::optional<TestHook> uncloakIsland;
-    // "open-menu" opens the first item's right-click menu; "close-menu" closes it.
+    // "open-menu" opens the first item's right-click menu; "close-menu" closes it. "show-label" and
+    // "hide-label" do the same for the first item's name label.
     std::optional<TestHook> openMenu;
     std::optional<TestHook> closeMenu;
+    std::optional<TestHook> showLabel;
+    std::optional<TestHook> hideLabel;
     if (testMode)
     {
         hangUi.emplace(*options.testTaskbarId, L"hang-ui", window.Hwnd(),
@@ -234,6 +237,10 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
                          harbor::dock::DockWindow::kTestOpenMenuMessage, 0);
         closeMenu.emplace(*options.testTaskbarId, L"close-menu", window.Hwnd(),
                           harbor::dock::DockWindow::kTestCloseMenuMessage);
+        showLabel.emplace(*options.testTaskbarId, L"show-label", window.Hwnd(),
+                          harbor::dock::DockWindow::kTestShowLabelMessage, 0);
+        hideLabel.emplace(*options.testTaskbarId, L"hide-label", window.Hwnd(),
+                          harbor::dock::DockWindow::kTestHideLabelMessage);
     }
 
     MSG message{};

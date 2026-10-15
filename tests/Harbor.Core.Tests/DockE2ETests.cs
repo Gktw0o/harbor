@@ -603,6 +603,61 @@ public sealed class DockE2ETests
         }
     }
 
+    // The name label: a small window centred above the item that never activates and lets clicks through; the
+    // panic hotkey takes it away with everything else of Harbor's.
+    [TestMethod]
+    public async Task TheNameLabelSitsAboveItsItemAndLetsClicksThrough()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems([new DockItem(DockItemKind.Path, @"C:\Harbor test\app.exe", "A name", null)])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", timeout));
+            // No label over an island that isn't up yet.
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", timeout));
+            var island = IslandWindow.Find(dock.Id);
+            var label = IslandWindow.FindLabel(dock.Id);
+            Assert.AreNotEqual((nint)0, label, "no label window");
+            Assert.IsFalse(IslandWindow.IsWindowVisible(label));
+            var style = IslandWindow.ExStyle(label);
+            foreach (var bit in new[] { IslandWindow.ExLayered, IslandWindow.ExTransparent, IslandWindow.ExNoActivate, IslandWindow.ExToolWindow })
+            {
+                Assert.AreEqual(bit, style & bit, $"extended style {style:x}");
+            }
+
+            TestDock.ShowLabel(taskbar, show: true);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "label: shown for item 0", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(IslandWindow.IsWindowVisible(label));
+            var bounds = IslandWindow.Bounds(label);
+            var islandBounds = IslandWindow.Bounds(island);
+            Assert.IsTrue(bounds.Bottom < islandBounds.Top, $"label {bounds} island {islandBounds}");
+            Assert.IsTrue(bounds.Width > 0 && bounds.Height > 0, bounds.ToString());
+            // One item: centred on the island too (within a pixel of rounding).
+            var labelCentre = (bounds.Left + bounds.Right) / 2;
+            var islandCentre = (islandBounds.Left + islandBounds.Right) / 2;
+            Assert.IsTrue(Math.Abs(labelCentre - islandCentre) <= 1, $"label {bounds} island {islandBounds}");
+            Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains("A name", StringComparison.Ordinal), "the log names an app");
+
+            TestDock.PressPanicHotkey(server.PipeName);
+            var deadline = Stopwatch.StartNew();
+            while (IslandWindow.IsWindowVisible(label) && deadline.Elapsed < timeout)
+            {
+                await Task.Delay(20);
+            }
+            Assert.IsFalse(IslandWindow.IsWindowVisible(label), "the panic hotkey left the label up");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
     [TestMethod]
     public async Task TheDockExitsNormallyWhenItsWindowIsClosed()

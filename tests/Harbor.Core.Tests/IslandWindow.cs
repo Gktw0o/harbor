@@ -35,11 +35,20 @@ internal static partial class IslandWindow
         public uint Flags;
     }
 
+    public const string LabelClassName = "Harbor.Dock.Label";
+    public const long ExLayered = 0x80000;
+    public const long ExTransparent = 0x20;
+
     /// <summary>The island of the dock with this process id, or 0.</summary>
-    public static nint Find(int processId)
+    public static nint Find(int processId) => Find(processId, ClassName);
+
+    /// <summary>The name label of the dock with this process id, or 0.</summary>
+    public static nint FindLabel(int processId) => Find(processId, LabelClassName);
+
+    private static nint Find(int processId, string className)
     {
         nint window = 0;
-        while ((window = FindWindowEx(0, window, ClassName, null)) != 0)
+        while ((window = FindWindowEx(0, window, className, null)) != 0)
         {
             _ = GetWindowThreadProcessId(window, out var owner);
             if (owner == processId)

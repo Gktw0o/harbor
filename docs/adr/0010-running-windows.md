@@ -100,9 +100,14 @@ only the pinned ones.
 - A menu needs its owner in front: the island takes the foreground, opens the menu, posts `WM_NULL` after
   it, and gives the foreground back to the window that had it.
 - The name label is a small topmost popup that never activates and lets clicks through
-  (`WS_EX_LAYERED | WS_EX_TRANSPARENT`, composition-drawn; spike-checked). Its text renderer is created on
-  the first hover. The spike's first DirectWrite draw cost 6 MB, so DirectWrite and GDI text are measured
-  against each other before one is chosen; the result is added here.
+  (`WS_EX_LAYERED | WS_EX_TRANSPARENT`, composition-drawn; spike-checked), owned by the island. It appears
+  after resting 400 ms on an item, at once when moving to the next, and goes on leaving, clicking, a menu, a
+  change of items, or the panic hotkey.
+- Its text is GDI's, drawn white on black into a bitmap whose brightness becomes the alpha (grayscale
+  smoothing), then drawn by Direct2D like the icons. Measured at 200 % (off screen, 20 labels): DirectWrite
+  ended at 26.2–26.6 MB, GDI at 25.1–25.4 MB, about 1 MB less; most of the first label's cost is Direct2D's
+  first draw, which the island has paid already. The font and bitmap are made on first use and let go of a
+  minute after the label hides.
 
 **Tests never see the user's windows.** A test dock (`--test-taskbar <id>`) follows only windows of the class
 `Harbor.Test.<id>.App`, which the `harbor_test_windows` helper makes off screen: it gives them

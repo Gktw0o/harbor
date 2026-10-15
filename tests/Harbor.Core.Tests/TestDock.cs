@@ -191,6 +191,13 @@ internal static partial class TestDock
         hook.Set();
     }
 
+    // The test hooks that show the first item's name label, as resting the mouse on it would, and hide it.
+    public static void ShowLabel(FakeTaskbar taskbar, bool show)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.{(show ? "show-label" : "hide-label")}");
+        hook.Set();
+    }
+
     // The open menu's items as a screen reader sees them ("<control type>\t<name>"), invoking the one named.
     public static async Task<(int ExitCode, string[] Items)> UseMenuAsync(nint island, string? invoke = null)
     {

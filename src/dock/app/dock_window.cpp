@@ -65,6 +65,13 @@ constexpr UINT_PTR kOrphanTimer = 1;
 constexpr UINT_PTR kDeviceRetryTimer = 2;
 // A running app waits for Harbor Shell's answer: build the model again when its wait ends.
 constexpr UINT_PTR kModelTimer = 3;
+// The name label: shown after resting on an item this long; its font and bitmap let go of after this long
+// hidden.
+constexpr UINT_PTR kLabelTimer = 4;
+constexpr UINT kLabelDelayMs = 400;
+constexpr UINT_PTR kLabelReleaseTimer = 5;
+constexpr UINT kLabelReleaseMs = 60'000;
+constexpr wchar_t kLabelClass[] = L"Harbor.Dock.Label";
 constexpr UINT kDeviceRetryMs = 2000;
 // Failed attempts at a new graphics device before the dock gives up (and Harbor Shell restores the taskbar).
 constexpr int kDeviceAttempts = 5;
@@ -271,6 +278,25 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     if (!m_renderer.Attach(m_hwnd, kDeviceLostMessage))
     {
         return CreateResult::GraphicsFailed;
+    }
+    // The name label: owned by the island (so above it), never activated, and clicks go through it.
+    WNDCLASSEXW labelClass{};
+    labelClass.cbSize = sizeof(labelClass);
+    labelClass.lpfnWndProc = DefWindowProcW;
+    labelClass.hInstance = instance;
+    labelClass.lpszClassName = kLabelClass;
+    RegisterClassExW(&labelClass);
+    m_label = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_LAYERED |
+                                  WS_EX_TRANSPARENT | WS_EX_NOREDIRECTIONBITMAP,
+                              kLabelClass, L"", WS_POPUP, 0, 0, 0, 0, m_hwnd, nullptr, instance, nullptr);
+    if (m_label != nullptr)
+    {
+        SetLayeredWindowAttributes(m_label, 0, 255, LWA_ALPHA);
+        if (!m_renderer.AttachLabel(m_label))
+        {
+            DestroyWindow(m_label);
+            m_label = nullptr;
+        }
     }
 
     m_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
@@ -520,6 +546,7 @@ void DockWindow::RebuildModel(bool force)
         return;
     }
     m_hovered.reset();
+    HideLabel();
     Refresh(/*force=*/true);
     if (m_accessibility)
     {
@@ -603,6 +630,8 @@ void DockWindow::Refresh(bool force)
     m_dpi = monitor.dpi;
     const bool countChanged = !m_layout || m_layout->items.size() != layout.items.size();
     m_layout = std::move(layout);
+    // The items may have moved from under it.
+    HideLabel();
     if (m_hovered && *m_hovered >= m_layout->items.size())
     {
         m_hovered.reset();
@@ -715,11 +744,70 @@ std::optional<std::size_t> DockWindow::ItemAtClient(LPARAM position) const
 
 void DockWindow::SetHovered(std::optional<std::size_t> hovered)
 {
-    if (hovered != m_hovered)
+    if (hovered == m_hovered)
     {
-        m_hovered = hovered;
-        m_renderer.SetHovered(hovered);
+        return;
     }
+    m_hovered = hovered;
+    m_renderer.SetHovered(hovered);
+    if (!hovered)
+    {
+        HideLabel();
+    }
+    else if (m_labelItem)
+    {
+        // Moving along the dock with a label up: the next one at once, like tooltips.
+        ShowLabel(*hovered);
+    }
+    else
+    {
+        SetTimer(m_hwnd, kLabelTimer, kLabelDelayMs, nullptr);
+    }
+}
+
+void DockWindow::ShowLabel(std::size_t index)
+{
+    KillTimer(m_hwnd, kLabelTimer);
+    if (m_label == nullptr || m_menuOpen || !m_layout || index >= m_layout->items.size() ||
+        !IsWindowVisible(m_hwnd))
+    {
+        return;
+    }
+    const auto size = m_renderer.RenderLabel(ItemName(index), m_style, m_dpi);
+    if (!size)
+    {
+        HideLabel();
+        return;
+    }
+    // Centred above the item, inside its monitor.
+    const auto& item = m_layout->items[index];
+    const auto monitor = ReadMonitor(DockMonitor()).monitor;
+    const int width = static_cast<int>(size->cx);
+    const int height = static_cast<int>(size->cy);
+    const int x = std::clamp((item.left + item.right - width) / 2, monitor.left,
+                             std::max(monitor.left, monitor.right - width));
+    const int y = m_layout->island.top - island::Scale(6, m_dpi) - height;
+    SetWindowPos(m_label, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    KillTimer(m_hwnd, kLabelReleaseTimer);
+    if (m_labelItem != index)
+    {
+        m_labelItem = index;
+        // Which item, never what it says.
+        m_log.Info(std::format("label: shown for item {}", index));
+    }
+}
+
+void DockWindow::HideLabel()
+{
+    KillTimer(m_hwnd, kLabelTimer);
+    if (!m_labelItem)
+    {
+        return;
+    }
+    m_labelItem.reset();
+    ShowWindow(m_label, SW_HIDE);
+    // Its font and bitmap go after a quiet while (rule 4).
+    SetTimer(m_hwnd, kLabelReleaseTimer, kLabelReleaseMs, nullptr);
 }
 
 void DockWindow::OnMouseMove(LPARAM position)
@@ -734,6 +822,7 @@ void DockWindow::OnMouseMove(LPARAM position)
 
 void DockWindow::OnClick(LPARAM position)
 {
+    HideLabel();
     if (const auto item = ItemAtClient(position))
     {
         ClickItem(*item, "click");
@@ -833,6 +922,7 @@ void DockWindow::OpenMenu(std::size_t index, std::string_view how)
 
     const auto& item = m_layout->items[index];
     const auto& island = m_layout->island;
+    HideLabel();
     m_menuOpen = true;
     const auto chosen =
         adapters::PopupMenu::Show(m_hwnd, menu, {(item.left + item.right) / 2, island.top},
@@ -1127,6 +1217,13 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case TaskbarGuard::kPanicMessage:
         // Nothing of Harbor's may stay in the way.
         EndMenu();
+        HideLabel();
+        return 0;
+    case kTestShowLabelMessage:
+        ShowLabel(wParam);
+        return 0;
+    case kTestHideLabelMessage:
+        HideLabel();
         return 0;
     case kTestOpenMenuMessage:
         OpenMenu(wParam, "test hook");
@@ -1189,6 +1286,21 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
             KillTimer(m_hwnd, kDeviceRetryTimer);
             OnDeviceLost();
+            return 0;
+        }
+        if (wParam == kLabelTimer)
+        {
+            KillTimer(m_hwnd, kLabelTimer);
+            if (m_hovered)
+            {
+                ShowLabel(*m_hovered);
+            }
+            return 0;
+        }
+        if (wParam == kLabelReleaseTimer)
+        {
+            KillTimer(m_hwnd, kLabelReleaseTimer);
+            m_renderer.ReleaseLabelResources();
             return 0;
         }
         if (wParam == kModelTimer)

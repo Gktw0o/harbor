@@ -219,6 +219,12 @@ struct CompositionRenderer::Impl
     // Per item, hidden until SetMarks shows them.
     std::vector<wuc::SpriteVisual> dots;
     std::vector<wuc::SpriteVisual> highlights;
+    // The hover label's window, and what draws its text (made on first use, let go after a quiet while).
+    wuc::Desktop::DesktopWindowTarget labelTarget{nullptr};
+    wuc::SpriteVisual labelVisual{nullptr};
+    wil::unique_hdc labelDc;
+    wil::unique_hfont labelFont;
+    unsigned labelFontDpi = 0;
     // Read by the device-removed callback on a thread-pool thread.
     std::atomic<HWND> window{nullptr};
     std::atomic<UINT> deviceLostMessage{0};
@@ -242,6 +248,8 @@ CompositionRenderer::~CompositionRenderer()
     try
     {
         // The window target first, while the compositor and its queue still exist.
+        m_impl->labelVisual = nullptr;
+        m_impl->labelTarget = nullptr;
         m_impl->target = nullptr;
         m_impl->root = nullptr;
         m_impl->hover = nullptr;
@@ -493,6 +501,154 @@ try
 catch (...)
 {
     m_impl->log.Warn("couldn't move the hover highlight");
+}
+
+bool CompositionRenderer::AttachLabel(HWND label) noexcept
+try
+{
+    auto& impl = *m_impl;
+    winrt::check_hresult(
+        impl.compositor.as<abi::Desktop::ICompositorDesktopInterop>()->CreateDesktopWindowTarget(
+            label, TRUE,
+            reinterpret_cast<abi::Desktop::IDesktopWindowTarget**>(winrt::put_abi(impl.labelTarget))));
+    impl.labelVisual = impl.compositor.CreateSpriteVisual();
+    impl.labelTarget.Root(impl.labelVisual);
+    return true;
+}
+catch (...)
+{
+    m_impl->log.Warn("composition can't draw into the label window; no labels");
+    return false;
+}
+
+std::optional<SIZE> CompositionRenderer::RenderLabel(std::wstring_view text, const island::IslandStyle& style,
+                                                     unsigned dpi) noexcept
+try
+{
+    auto& impl = *m_impl;
+    if (!impl.labelVisual || text.empty())
+    {
+        return std::nullopt;
+    }
+    const auto scale = [dpi](int dip) { return MulDiv(dip, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); };
+    // GDI text into a bitmap: about 1 MB less than DirectWrite, which nothing else in the dock loads (M3 step
+    // 8).
+    if (!impl.labelDc)
+    {
+        impl.labelDc.reset(CreateCompatibleDC(nullptr));
+    }
+    if (!impl.labelFont || impl.labelFontDpi != dpi)
+    {
+        NONCLIENTMETRICSW metrics{sizeof(metrics)};
+        SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
+        metrics.lfMessageFont.lfWeight = FW_SEMIBOLD;
+        // Grayscale smoothing: the coverage becomes the alpha, which ClearType's colored fringes can't.
+        metrics.lfMessageFont.lfQuality = ANTIALIASED_QUALITY;
+        impl.labelFont.reset(CreateFontIndirectW(&metrics.lfMessageFont));
+        impl.labelFontDpi = dpi;
+    }
+    const HDC dc = impl.labelDc.get();
+    const auto oldFont = wil::SelectObject(dc, impl.labelFont.get());
+    SIZE textSize{};
+    GetTextExtentPoint32W(dc, text.data(), static_cast<int>(text.size()), &textSize);
+    if (textSize.cx <= 0 || textSize.cy <= 0)
+    {
+        return std::nullopt;
+    }
+
+    // White on black: each pixel's brightness is the text's coverage there.
+    BITMAPINFO info{};
+    info.bmiHeader = {sizeof(BITMAPINFOHEADER), textSize.cx, -textSize.cy, 1, 32, BI_RGB};
+    std::uint8_t* bits = nullptr;
+    wil::unique_hbitmap dib(
+        CreateDIBSection(dc, &info, DIB_RGB_COLORS, reinterpret_cast<void**>(&bits), nullptr, 0));
+    if (!dib || bits == nullptr)
+    {
+        return std::nullopt;
+    }
+    {
+        const auto oldBitmap = wil::SelectObject(dc, dib.get());
+        RECT all{0, 0, textSize.cx, textSize.cy};
+        FillRect(dc, &all, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        SetTextColor(dc, RGB(255, 255, 255));
+        SetBkMode(dc, TRANSPARENT);
+        DrawTextW(dc, text.data(), static_cast<int>(text.size()), &all, DT_SINGLELINE | DT_NOPREFIX);
+        GdiFlush();
+    }
+    // In the text's color, premultiplied by the coverage.
+    const auto color = style.dot;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(textSize.cx) * textSize.cy; ++i)
+    {
+        auto* pixel = bits + i * 4;
+        const unsigned coverage = std::max({pixel[0], pixel[1], pixel[2]});
+        pixel[0] = static_cast<std::uint8_t>(color.b * coverage / 255);
+        pixel[1] = static_cast<std::uint8_t>(color.g * coverage / 255);
+        pixel[2] = static_cast<std::uint8_t>(color.r * coverage / 255);
+        pixel[3] = static_cast<std::uint8_t>(coverage);
+    }
+
+    const int padX = scale(10);
+    const int padY = scale(5);
+    const SIZE box{textSize.cx + 2 * padX, textSize.cy + 2 * padY};
+    auto surface = impl.graphics.CreateDrawingSurface(
+        {static_cast<float>(box.cx), static_cast<float>(box.cy)},
+        winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        winrt::Windows::Graphics::DirectX::DirectXAlphaMode::Premultiplied);
+    const auto interop = surface.as<abi::ICompositionDrawingSurfaceInterop>();
+    winrt::com_ptr<ID2D1DeviceContext> context;
+    POINT offset{};
+    winrt::check_hresult(interop->BeginDraw(nullptr, IID_PPV_ARGS(context.put()), &offset));
+    context->Clear({0, 0, 0, 0});
+    const float left = static_cast<float>(offset.x);
+    const float top = static_cast<float>(offset.y);
+    const float radius = static_cast<float>(scale(7));
+    const D2D1_ROUNDED_RECT shape{
+        {left + 0.5f, top + 0.5f, left + box.cx - 0.5f, top + box.cy - 0.5f}, radius, radius};
+    // Nothing to blur behind it: the island's tint, nearly opaque so the text reads over anything.
+    auto fill = style.fill;
+    fill.a = std::max<std::uint8_t>(fill.a, 240);
+    winrt::com_ptr<ID2D1SolidColorBrush> brush;
+    winrt::check_hresult(context->CreateSolidColorBrush(ToD2D(fill), brush.put()));
+    context->FillRoundedRectangle(shape, brush.get());
+    brush->SetColor(ToD2D(style.border));
+    context->DrawRoundedRectangle(shape, brush.get(), 1.0f);
+    const D2D1_BITMAP_PROPERTIES properties{
+        {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
+    winrt::com_ptr<ID2D1Bitmap> textBitmap;
+    winrt::check_hresult(
+        context->CreateBitmap({static_cast<UINT32>(textSize.cx), static_cast<UINT32>(textSize.cy)}, bits,
+                              static_cast<UINT32>(textSize.cx) * 4, properties, textBitmap.put()));
+    context->DrawBitmap(textBitmap.get(), D2D1_RECT_F{left + padX, top + padY, left + padX + textSize.cx,
+                                                      top + padY + textSize.cy});
+    winrt::check_hresult(interop->EndDraw());
+
+    impl.labelVisual.Size({static_cast<float>(box.cx), static_cast<float>(box.cy)});
+    impl.labelVisual.Brush(impl.compositor.CreateSurfaceBrush(surface));
+    return box;
+}
+catch (...)
+{
+    m_impl->log.Warn("couldn't draw the label");
+    return std::nullopt;
+}
+
+void CompositionRenderer::ReleaseLabelResources() noexcept
+{
+    auto& impl = *m_impl;
+    impl.labelFont.reset();
+    impl.labelDc.reset();
+    impl.labelFontDpi = 0;
+    try
+    {
+        if (impl.labelVisual)
+        {
+            // Its surface goes with the brush.
+            impl.labelVisual.Brush(nullptr);
+        }
+    }
+    catch (...)
+    {
+    }
 }
 
 void CompositionRenderer::SetMarks(std::span<const island::ItemMarks> marks) noexcept

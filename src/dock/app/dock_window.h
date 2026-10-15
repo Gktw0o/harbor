@@ -106,6 +106,9 @@ class DockWindow : private adapters::IIslandAccess
     // it without moving the user's mouse.
     static constexpr UINT kTestOpenMenuMessage = WM_APP + 13;
     static constexpr UINT kTestCloseMenuMessage = WM_APP + 14;
+    // Test docks only: shows the name label for item wParam (as resting the mouse on it would), or hides it.
+    static constexpr UINT kTestShowLabelMessage = WM_APP + 15;
+    static constexpr UINT kTestHideLabelMessage = WM_APP + 16;
 
   private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -147,6 +150,9 @@ class DockWindow : private adapters::IIslandAccess
     // Brings another app's window to the front (restoring it first), without waiting on the app.
     void BringForward(windows::WindowId window, bool restore);
     void OnRightClick(LPARAM position);
+    // The name label above item index (docs/adr/0010), or none.
+    void ShowLabel(std::size_t index);
+    void HideLabel();
     // The item's right-click menu (docs/adr/0010): blocks in the menu's loop, then carries out the choice.
     void OpenMenu(std::size_t index, std::string_view how);
     void UpdatePresentable();
@@ -216,6 +222,9 @@ class DockWindow : private adapters::IIslandAccess
     bool m_highContrast = false;
     // A menu's loop is running (one at a time).
     bool m_menuOpen = false;
+    // The name label's window (null if composition can't draw it), and the item it shows, if shown.
+    HWND m_label = nullptr;
+    std::optional<std::size_t> m_labelItem;
     // Each Render's number; only the latest one's commit counts.
     WPARAM m_renderGeneration = 0;
     // The latest frame is committed (and nothing was lost since).

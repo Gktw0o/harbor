@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "core/island/appearance.h"
@@ -61,6 +62,16 @@ class CompositionRenderer
     // Shows item i's running dot and attention highlight as marks[i] says (none past the end of marks).
     // Nothing is redrawn: the dots and highlights are there already, hidden.
     void SetMarks(std::span<const island::ItemMarks> marks) noexcept;
+
+    // The hover label (docs/adr/0010): another NOREDIRECTIONBITMAP window, drawn by the same compositor.
+    // False if it can't be drawn into (then there are no labels).
+    bool AttachLabel(HWND label) noexcept;
+    // Draws text in a small rounded box in style's colors at dpi and returns the box's size in pixels, to
+    // size the label window by; nullopt if it couldn't. The text is GDI's, drawn into a bitmap.
+    std::optional<SIZE> RenderLabel(std::wstring_view text, const island::IslandStyle& style,
+                                    unsigned dpi) noexcept;
+    // Lets go of the label's font, bitmap and surface (after a quiet while: rule 4).
+    void ReleaseLabelResources() noexcept;
 
   private:
     struct Impl;

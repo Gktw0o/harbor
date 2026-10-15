@@ -70,4 +70,14 @@ std::optional<std::size_t> HitTest(const Layout& layout, geometry::Point point) 
     return static_cast<std::size_t>(std::clamp(offset / pitch, 0, static_cast<int>(layout.items.size()) - 1));
 }
 
+geometry::Rect DotFor(const Layout& layout, std::size_t index) noexcept
+{
+    const auto& item = layout.items[index];
+    const int padding = layout.metrics.padding;
+    const int diameter = std::max(2, padding / 2);
+    const int left = item.left + (item.Width() - diameter) / 2;
+    const int top = item.bottom + (padding - diameter) / 2;
+    return {left, top, left + diameter, top + diameter};
+}
+
 } // namespace harbor::island

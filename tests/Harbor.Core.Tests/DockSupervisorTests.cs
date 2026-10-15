@@ -241,6 +241,28 @@ public sealed partial class DockSupervisorTests
         Assert.AreEqual(2, log.Split("composition: drawing with a").Length - 1, log);
     }
 
+    // A cloaked island (on another virtual desktop) is no island to the user: the taskbar comes back until it is
+    // uncloaked, then goes again by itself. Only the dock's cloak hook can notice: no window message says so.
+    [TestMethod]
+    public async Task ACloakedIslandBringsTheTaskbarBackUntilItIsUncloaked()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+
+        TestDock.CloakIsland(harness.Taskbar, cloak: true);
+        await harness.WaitForStateAsync(s => !s.Hidden);
+        Assert.IsTrue(FakeTaskbar.WaitUntilVisible(harness.Taskbar.Primary, visible: true, Timeout));
+
+        TestDock.CloakIsland(harness.Taskbar, cloak: false);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+        var log = await TestDock.ReadLogAsync(harness.DataDir);
+        StringAssert.Contains(log, "island: not shown");
+    }
+
     // The panic hotkey gives back the taskbar and takes the island away; turning hiding on again brings back both
     // (the island first: the taskbar only goes while the island is on screen).
     [TestMethod]

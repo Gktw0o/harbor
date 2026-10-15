@@ -43,6 +43,10 @@ struct IslandStyle
     Color hover;
     // An item without an icon.
     Color placeholder;
+    // The running dot under an app's icon.
+    Color dot;
+    // Behind an app that asked for attention.
+    Color attention;
     friend bool operator==(const IslandStyle&, const IslandStyle&) = default;
 };
 

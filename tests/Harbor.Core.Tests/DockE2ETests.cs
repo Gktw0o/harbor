@@ -240,6 +240,49 @@ public sealed class DockE2ETests
         }
     }
 
+    // A screen reader keeps its place when the list changes: the element for an app that only moved stays alive,
+    // the one for an app that left the dock says it is gone.
+    [TestMethod]
+    public async Task ScreenReaderElementsSurviveAMoveAndGoWithTheirApp()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\leaving.exe", "Leaving", null),
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\staying.exe", "Staying", null),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 2 items", TimeSpan.FromSeconds(10)));
+            var island = IslandWindow.Find(dock.Id);
+            using var staying = await TestDock.HoldUiaElementAsync(island, "Staying");
+            using var leaving = await TestDock.HoldUiaElementAsync(island, "Leaving");
+
+            // Staying moves to the front; Leaving goes.
+            Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\staying.exe", "Staying", null),
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\new.exe", "New", null),
+                new DockItem(DockItemKind.Path, @"C:\Harbor test\other.exe", "Other", null),
+            ])));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 3 items", TimeSpan.FromSeconds(10)));
+
+            var (stayingExit, stayingOutput) = await TestDock.ReleaseUiaElementAsync(staying);
+            Assert.AreEqual(0, stayingExit, stayingOutput);
+            StringAssert.Contains(stayingOutput, "alive\tStaying");
+            var (leavingExit, leavingOutput) = await TestDock.ReleaseUiaElementAsync(leaving);
+            Assert.AreEqual(5, leavingExit, leavingOutput);
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
     [TestMethod]
     public async Task TheDockExitsNormallyWhenItsWindowIsClosed()

@@ -48,6 +48,20 @@ TEST(Appearance, UsesTheHighContrastColors)
     EXPECT_EQ(style.border, appearance.highContrastText);
     EXPECT_EQ(style.hover, appearance.highContrastHighlight);
     EXPECT_EQ(style.placeholder, appearance.highContrastText);
+    EXPECT_EQ(style.dot, appearance.highContrastText);
+    EXPECT_EQ(style.attention, appearance.highContrastHighlight);
+}
+
+TEST(Appearance, DotsAndAttentionStandOutFromTheFillAndTheHover)
+{
+    for (const bool dark : {true, false})
+    {
+        const auto style = StyleFor({.dark = dark});
+        EXPECT_NE(style.dot, style.fill);
+        EXPECT_GT(style.dot.a, style.hover.a);
+        EXPECT_NE(style.attention, style.hover);
+        EXPECT_GT(style.attention.a, 0);
+    }
 }
 
 } // namespace

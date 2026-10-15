@@ -196,6 +196,19 @@ struct CompositionRenderer::Impl
         });
     }
 
+    // A size x size square of brush at left, top, with rounded corners (a circle at radius = size / 2).
+    wuc::SpriteVisual RoundedSprite(const wuc::CompositionBrush& brush, float left, float top, float size,
+                                    float radius)
+    {
+        auto sprite = compositor.CreateSpriteVisual();
+        sprite.Size({size, size});
+        sprite.Offset({left, top, 0});
+        sprite.Brush(brush);
+        sprite.Clip(compositor.CreateRectangleClip(0, 0, size, size, {radius, radius}, {radius, radius},
+                                                   {radius, radius}, {radius, radius}));
+        return sprite;
+    }
+
     log::ILogger& log;
     winrt::Windows::System::DispatcherQueueController queue{nullptr};
     wuc::Compositor compositor{nullptr};
@@ -203,6 +216,9 @@ struct CompositionRenderer::Impl
     wuc::Desktop::DesktopWindowTarget target{nullptr};
     wuc::ContainerVisual root{nullptr};
     wuc::SpriteVisual hover{nullptr};
+    // Per item, hidden until SetMarks shows them.
+    std::vector<wuc::SpriteVisual> dots;
+    std::vector<wuc::SpriteVisual> highlights;
     // Read by the device-removed callback on a thread-pool thread.
     std::atomic<HWND> window{nullptr};
     std::atomic<UINT> deviceLostMessage{0};
@@ -229,6 +245,8 @@ CompositionRenderer::~CompositionRenderer()
         m_impl->target = nullptr;
         m_impl->root = nullptr;
         m_impl->hover = nullptr;
+        m_impl->dots.clear();
+        m_impl->highlights.clear();
         m_impl->graphics = nullptr;
         m_impl->compositor = nullptr;
         if (m_impl->queue)
@@ -317,7 +335,7 @@ catch (...)
 }
 
 bool CompositionRenderer::Render(const island::Layout& layout, const island::IslandStyle& style,
-                                 std::span<const std::optional<island::IconView>> icons,
+                                 const IconSource& icons, std::span<const island::ItemMarks> marks,
                                  std::optional<std::size_t> hovered, UINT committedMessage,
                                  WPARAM tag) noexcept
 try
@@ -347,33 +365,44 @@ try
     fill.Brush(impl.compositor.CreateColorBrush(ToWinRt(style.fill)));
     island.Children().InsertAtTop(fill);
 
-    // The hover highlight: a rounded square a little larger than the icon.
+    // The hover highlight (and an item's attention highlight): a rounded square a little larger than the
+    // icon.
     impl.hoverInset = metrics.padding / 2;
     const float hoverSize = static_cast<float>(metrics.icon + 2 * impl.hoverInset);
     const float hoverRadius = hoverSize * 0.2f;
-    impl.hover = impl.compositor.CreateSpriteVisual();
-    impl.hover.Size({hoverSize, hoverSize});
-    impl.hover.Brush(impl.compositor.CreateColorBrush(ToWinRt(style.hover)));
-    impl.hover.Clip(impl.compositor.CreateRectangleClip(
-        0, 0, hoverSize, hoverSize, {hoverRadius, hoverRadius}, {hoverRadius, hoverRadius},
-        {hoverRadius, hoverRadius}, {hoverRadius, hoverRadius}));
+    impl.hover = impl.RoundedSprite(impl.compositor.CreateColorBrush(ToWinRt(style.hover)), 0, 0, hoverSize,
+                                    hoverRadius);
     island.Children().InsertAtTop(impl.hover);
 
     impl.items.clear();
-    // One surface serves every item without an icon; made only if one needs it.
+    impl.dots.clear();
+    impl.highlights.clear();
+    // One surface serves every item without an icon; made only if one needs it. One brush serves all the
+    // dots, one all the highlights.
     wuc::CompositionSurfaceBrush placeholder{nullptr};
+    const auto dotBrush = impl.compositor.CreateColorBrush(ToWinRt(style.dot));
+    const auto highlightBrush = impl.compositor.CreateColorBrush(ToWinRt(style.attention));
+    std::vector<std::uint8_t> file;
     for (std::size_t i = 0; i < layout.items.size(); ++i)
     {
         const auto& item = layout.items[i];
         const geometry::Rect local{item.left - layout.island.left, item.top - layout.island.top,
                                    item.right - layout.island.left, item.bottom - layout.island.top};
         impl.items.push_back(local);
+
+        auto highlight =
+            impl.RoundedSprite(highlightBrush, static_cast<float>(local.left - impl.hoverInset),
+                               static_cast<float>(local.top - impl.hoverInset), hoverSize, hoverRadius);
+        highlight.IsVisible(false);
+        island.Children().InsertAtTop(highlight);
+        impl.highlights.push_back(highlight);
+
         auto visual = impl.compositor.CreateSpriteVisual();
         visual.Size(Size(local));
         visual.Offset({static_cast<float>(local.left), static_cast<float>(local.top), 0});
-        if (i < icons.size() && icons[i])
+        if (const auto icon = icons ? icons(i, file) : std::nullopt)
         {
-            visual.Brush(impl.IconBrush(metrics.icon, *icons[i]));
+            visual.Brush(impl.IconBrush(metrics.icon, *icon));
         }
         else
         {
@@ -384,6 +413,15 @@ try
             visual.Brush(placeholder);
         }
         island.Children().InsertAtTop(visual);
+
+        const auto dot = island::DotFor(layout, i);
+        const float diameter = static_cast<float>(dot.Width());
+        auto dotVisual =
+            impl.RoundedSprite(dotBrush, static_cast<float>(dot.left - layout.island.left),
+                               static_cast<float>(dot.top - layout.island.top), diameter, diameter / 2);
+        dotVisual.IsVisible(false);
+        island.Children().InsertAtTop(dotVisual);
+        impl.dots.push_back(dotVisual);
     }
 
     // A hairline inside the edge.
@@ -400,6 +438,7 @@ try
     island.Children().InsertAtTop(border);
 
     SetHovered(hovered);
+    SetMarks(marks);
 
     const HWND window = impl.window.load();
     impl.compositor.RequestCommitAsync().Completed(
@@ -443,6 +482,22 @@ try
 catch (...)
 {
     m_impl->log.Warn("couldn't move the hover highlight");
+}
+
+void CompositionRenderer::SetMarks(std::span<const island::ItemMarks> marks) noexcept
+try
+{
+    auto& impl = *m_impl;
+    for (std::size_t i = 0; i < impl.dots.size(); ++i)
+    {
+        const auto item = i < marks.size() ? marks[i] : island::ItemMarks{};
+        impl.dots[i].IsVisible(item.running);
+        impl.highlights[i].IsVisible(item.attention);
+    }
+}
+catch (...)
+{
+    m_impl->log.Warn("couldn't show the items' marks");
 }
 
 } // namespace harbor::adapters

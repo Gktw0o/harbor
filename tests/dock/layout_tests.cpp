@@ -118,5 +118,20 @@ TEST(Layout, EveryPointOfTheIslandHitsTheNearestItem)
     EXPECT_FALSE(HitTest(layout, {layout.island.right, items[0].top}));
 }
 
+TEST(Layout, TheRunningDotSitsCentredInThePaddingBelowTheIcon)
+{
+    const auto layout = Arrange({0, 1000, 1920, 1080}, MeasureFor(1920, k100Percent, 4));
+    // Item 0 is 855..903 wide, its icon ends at 1064 and the island at 1072: a 4 px dot, 2 px from each.
+    EXPECT_EQ(DotFor(layout, 0), (Rect{877, 1066, 881, 1070}));
+    EXPECT_EQ(DotFor(layout, 3).left - layout.items[3].left, 22);
+
+    const auto large = Arrange({0, 2000, 3840, 2160}, MeasureFor(3840, k200Percent, 1));
+    const auto dot = DotFor(large, 0);
+    EXPECT_EQ(dot.Width(), 8);
+    EXPECT_EQ(dot.Height(), 8);
+    EXPECT_EQ(dot.top - large.items[0].bottom, 4);
+    EXPECT_EQ(large.island.bottom - dot.bottom, 4);
+}
+
 } // namespace
 } // namespace harbor::island

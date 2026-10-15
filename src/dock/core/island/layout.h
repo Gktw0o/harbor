@@ -61,4 +61,19 @@ Layout Arrange(const geometry::Rect& strip, const Metrics& metrics);
 // so there's nowhere on it a click does nothing.
 std::optional<std::size_t> HitTest(const Layout& layout, geometry::Point point) noexcept;
 
+// What an item shows besides its icon.
+struct ItemMarks
+{
+    // The app has windows: a dot under its icon.
+    bool running = false;
+    // One of its windows asked for attention (docs/adr/0011): a highlight behind the icon until it comes
+    // forward.
+    bool attention = false;
+    friend bool operator==(const ItemMarks&, const ItemMarks&) = default;
+};
+
+// The running dot under item index (which must be visible): a circle centred in the padding below its icon,
+// half the padding across (at least 2 px).
+geometry::Rect DotFor(const Layout& layout, std::size_t index) noexcept;
+
 } // namespace harbor::island

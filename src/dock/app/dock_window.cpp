@@ -1,7 +1,9 @@
 #include "app/dock_window.h"
 
 #include <algorithm>
+#include <dwmapi.h>
 #include <format>
+#include <iterator>
 #include <memory>
 #include <shellapi.h>
 #include <ShellScalingApi.h>
@@ -15,6 +17,7 @@
 #include "adapters/win32_app_bar.h"
 #include "app/exit_codes.h"
 #include "core/island/icon_file.h"
+#include "core/island/on_screen.h"
 
 namespace harbor::dock
 {
@@ -56,7 +59,7 @@ constexpr UINT kDeviceRetryMs = 2000;
 // Failed attempts at a new graphics device before the dock gives up (and Harbor Shell restores the taskbar).
 constexpr int kDeviceAttempts = 5;
 
-struct PrimaryMonitor
+struct MonitorFacts
 {
     geometry::Rect monitor;
     geometry::Rect workArea;
@@ -68,10 +71,15 @@ geometry::Rect FromRect(const RECT& rect) noexcept
     return {rect.left, rect.top, rect.right, rect.bottom};
 }
 
-PrimaryMonitor ReadPrimaryMonitor() noexcept
+// The monitor the island is on: the primary until the dock follows the mouse (docs/adr/0011).
+HMONITOR DockMonitor() noexcept
 {
-    PrimaryMonitor result;
-    const HMONITOR monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    return MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+}
+
+MonitorFacts ReadMonitor(HMONITOR monitor) noexcept
+{
+    MonitorFacts result;
     MONITORINFO info{sizeof(info)};
     if (GetMonitorInfoW(monitor, &info))
     {
@@ -85,6 +93,40 @@ PrimaryMonitor ReadPrimaryMonitor() noexcept
         result.dpi = dpiX;
     }
     return result;
+}
+
+// Every connected monitor's rectangle.
+std::vector<geometry::Rect> ConnectedMonitors()
+{
+    std::vector<geometry::Rect> monitors;
+    EnumDisplayMonitors(
+        nullptr, nullptr,
+        [](HMONITOR, HDC, LPRECT rect, LPARAM context) -> BOOL {
+            try
+            {
+                reinterpret_cast<std::vector<geometry::Rect>*>(context)->push_back(FromRect(*rect));
+                return TRUE;
+            }
+            catch (...)
+            {
+                return FALSE;
+            }
+        },
+        reinterpret_cast<LPARAM>(&monitors));
+    return monitors;
+}
+
+// Out-of-context WinEvent hook for this thread's windows being cloaked or uncloaked (another virtual desktop,
+// or the shell hiding them): no window message says so, and a cloaked island isn't on screen.
+void CALLBACK OnCloakChanged(HWINEVENTHOOK, DWORD, HWND hwnd, LONG object, LONG child, DWORD, DWORD)
+{
+    wchar_t name[std::size(DockWindow::kWindowClass) + 1]{};
+    if (object == OBJID_WINDOW && child == CHILDID_SELF &&
+        GetClassNameW(hwnd, name, static_cast<int>(std::size(name))) != 0 &&
+        std::wstring_view(name) == DockWindow::kWindowClass)
+    {
+        PostMessageW(hwnd, DockWindow::kCloakChangedMessage, 0, 0);
+    }
 }
 
 } // namespace
@@ -153,6 +195,14 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     // Energy saver turning on or off changes the island's look.
     m_powerNotification =
         RegisterPowerSettingNotification(m_hwnd, &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    // A cloaked island isn't on screen (docs/adr/0011). Only this thread's windows: the hook costs nothing
+    // while nothing here is cloaked.
+    m_cloakHook.reset(SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, &OnCloakChanged,
+                                      GetCurrentProcessId(), GetCurrentThreadId(), WINEVENT_OUTOFCONTEXT));
+    if (!m_cloakHook)
+    {
+        m_log.Warn(std::format("island: no cloak notifications ({})", GetLastError()));
+    }
 
     // Test docks reserve nothing: tests never change the user's work area.
     std::unique_ptr<appbar::IAppBar> appBar;
@@ -247,6 +297,7 @@ void DockWindow::OnDockItems()
     if (auto items = m_receivedItems.Take(); items && *items != m_items)
     {
         m_items = std::move(*items);
+        AssignItemKeys();
         // Only the count: the names are the user's business.
         m_log.Info(std::format("dock items: {} received", m_items.items.size()));
         m_hovered.reset();
@@ -266,29 +317,29 @@ void DockWindow::Refresh(bool force)
         // Nothing can be drawn now; getting a new device redraws everything.
         return;
     }
-    const auto primary = ReadPrimaryMonitor();
+    const auto monitor = ReadMonitor(DockMonitor());
     const auto style = island::StyleFor(adapters::ReadSystemAppearance());
-    const auto metrics = island::MeasureFor(primary.monitor.Width(), primary.dpi, m_items.items.size());
+    const auto metrics = island::MeasureFor(monitor.monitor.Width(), monitor.dpi, m_items.items.size());
     // The AppBar asks Explorer for the strip (and it answers on kAppBarStrip); same request, nothing happens.
     if (m_appBar)
     {
-        m_appBar->SetWant({primary.monitor, metrics.StripHeight()});
+        m_appBar->SetWant({monitor.monitor, metrics.StripHeight()});
     }
     // Until Explorer answers (or if it never does): the bottom of the work area, above a visible taskbar.
     // That is usually where the strip goes too.
     const geometry::Rect strip =
-        m_strip.value_or(geometry::Rect{primary.monitor.left, primary.workArea.bottom - metrics.StripHeight(),
-                                        primary.monitor.right, primary.workArea.bottom});
+        m_strip.value_or(geometry::Rect{monitor.monitor.left, monitor.workArea.bottom - metrics.StripHeight(),
+                                        monitor.monitor.right, monitor.workArea.bottom});
     auto layout = island::Arrange(strip, metrics);
 
     if (!force && m_layout && layout.island == m_layout->island && layout.items == m_layout->items &&
-        style == m_style && primary.dpi == m_dpi)
+        style == m_style && monitor.dpi == m_dpi)
     {
         return;
     }
     if (metrics.visibleCount < m_items.items.size())
     {
-        m_log.Warn(std::format("island: {} of {} items fit on the primary monitor", metrics.visibleCount,
+        m_log.Warn(std::format("island: {} of {} items fit on the dock's monitor", metrics.visibleCount,
                                m_items.items.size()));
     }
 
@@ -302,7 +353,7 @@ void DockWindow::Refresh(bool force)
                  CreateRoundRectRgn(0, 0, island.Width() + 1, island.Height() + 1, diameter, diameter), TRUE);
 
     m_style = style;
-    m_dpi = primary.dpi;
+    m_dpi = monitor.dpi;
     const bool countChanged = !m_layout || m_layout->items.size() != layout.items.size();
     m_layout = std::move(layout);
     if (m_hovered && *m_hovered >= m_layout->items.size())
@@ -314,21 +365,21 @@ void DockWindow::Refresh(bool force)
         // More or fewer items fit the monitor now.
         m_accessibility->ItemsChanged();
     }
-    // Read again on every redraw rather than kept: decoded, 40 icons would hold 10 MB (rule 4).
-    std::vector<std::vector<std::uint8_t>> files;
-    std::vector<std::optional<island::IconView>> icons;
-    files.reserve(m_layout->items.size());
-    for (std::size_t i = 0; i < m_layout->items.size(); ++i)
-    {
-        const auto& icon = m_items.items[i].icon;
-        files.push_back(icon ? adapters::ReadIconFile(m_options.iconsDir, *icon)
-                             : std::vector<std::uint8_t>{});
-        icons.push_back(island::ParseIconFile(files.back()));
-    }
-    const auto drawn =
-        std::count_if(icons.begin(), icons.end(), [](const auto& icon) { return icon.has_value(); });
+    // Read again on every redraw rather than kept, one at a time: decoded, 40 icons would hold 10 MB (rule
+    // 4).
+    std::size_t drawn = 0;
+    const auto& items = m_items.items;
+    const auto& iconsDir = m_options.iconsDir;
+    const adapters::CompositionRenderer::IconSource icons =
+        [&](std::size_t index, std::vector<std::uint8_t>& file) -> std::optional<island::IconView> {
+        const auto& icon = items[index].icon;
+        file = icon ? adapters::ReadIconFile(iconsDir, *icon) : std::vector<std::uint8_t>{};
+        auto view = island::ParseIconFile(file);
+        drawn += view.has_value() ? 1 : 0;
+        return view;
+    };
 
-    if (m_renderer.Render(*m_layout, m_style, icons, m_hovered, kRenderCommitted, ++m_renderGeneration))
+    if (m_renderer.Render(*m_layout, m_style, icons, {}, m_hovered, kRenderCommitted, ++m_renderGeneration))
     {
         m_log.Info(std::format("island: {} items ({} icons), {}x{} at {},{} ({} dpi, {})",
                                m_layout->items.size(), drawn, island.Width(), island.Height(), island.left,
@@ -383,18 +434,17 @@ void DockWindow::OnDeviceLost()
 
 void DockWindow::UpdatePresentable()
 {
-    // On screen: drawn, visible, and on the primary monitor.
-    bool presentable = m_committed && m_layout && IsWindowVisible(m_hwnd);
-    if (presentable)
+    // On screen: drawn, visible, not cloaked, and inside one connected monitor (docs/adr/0011).
+    island::WindowFacts facts{.committed = m_committed && m_layout.has_value(),
+                              .visible = IsWindowVisible(m_hwnd) != FALSE};
+    DWORD cloaked = 0;
+    facts.cloaked =
+        SUCCEEDED(DwmGetWindowAttribute(m_hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0;
+    if (RECT window{}; GetWindowRect(m_hwnd, &window))
     {
-        RECT window{};
-        RECT visible{};
-        const auto primary = ReadPrimaryMonitor();
-        const RECT monitor{primary.monitor.left, primary.monitor.top, primary.monitor.right,
-                           primary.monitor.bottom};
-        presentable = GetWindowRect(m_hwnd, &window) && IntersectRect(&visible, &window, &monitor) &&
-                      EqualRect(&visible, &window);
+        facts.window = FromRect(window);
     }
+    const bool presentable = island::IsOnScreen(facts, ConnectedMonitors());
     if (presentable != m_presentable)
     {
         m_presentable = presentable;
@@ -456,9 +506,47 @@ bool DockWindow::LaunchItem(std::size_t index, std::string_view how)
     return true;
 }
 
+void DockWindow::AssignItemKeys()
+{
+    std::map<std::string, std::uint64_t> keys;
+    m_itemKeys.clear();
+    for (const auto& item : m_items.items)
+    {
+        // The same pin twice is two items: each later one's identity gets another line ending.
+        auto identity = std::format("{}\n{}\n", static_cast<int>(item.kind), item.target);
+        while (keys.contains(identity))
+        {
+            identity.push_back('\n');
+        }
+        const auto previous = m_keysByIdentity.find(identity);
+        const auto key = previous != m_keysByIdentity.end() ? previous->second : m_nextItemKey++;
+        keys.emplace(std::move(identity), key);
+        m_itemKeys.push_back(key);
+    }
+    m_keysByIdentity = std::move(keys);
+}
+
 std::size_t DockWindow::ItemCount() const
 {
     return m_layout ? m_layout->items.size() : 0;
+}
+
+std::uint64_t DockWindow::ItemKey(std::size_t index) const
+{
+    return index < m_itemKeys.size() ? m_itemKeys[index] : 0;
+}
+
+std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
+{
+    const auto visible = std::min(ItemCount(), m_itemKeys.size());
+    for (std::size_t i = 0; i < visible; ++i)
+    {
+        if (m_itemKeys[i] == key)
+        {
+            return i;
+        }
+    }
+    return std::nullopt;
 }
 
 std::wstring DockWindow::ItemName(std::size_t index) const
@@ -605,6 +693,16 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case kDeviceLostMessage:
         OnDeviceLost();
         return 0;
+    case kCloakChangedMessage:
+        UpdatePresentable();
+        return 0;
+    case kTestCloakMessage: {
+        // Only the cloak hook notices: that is what the test checks.
+        const BOOL cloak = wParam != 0;
+        m_log.Warn(cloak ? "test hook: cloaking the island" : "test hook: uncloaking the island");
+        DwmSetWindowAttribute(m_hwnd, DWMWA_CLOAK, &cloak, sizeof(cloak));
+        return 0;
+    }
     case kTestHangMessage:
         m_log.Warn("test hook: hanging the UI thread");
         Sleep(INFINITE);
@@ -652,7 +750,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         OnClick(lParam);
         return 0;
     case WM_DPICHANGED:
-        // Not Windows' suggested rectangle: the layout follows the primary monitor, wherever this window is.
+        // Not Windows' suggested rectangle: the layout follows the dock's monitor, wherever this window is.
         Refresh(/*force=*/false);
         return 0;
     case kAppBarStrip: {
@@ -703,6 +801,7 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         }
         return DefWindowProcW(m_hwnd, message, wParam, lParam);
     case WM_DESTROY:
+        m_cloakHook.reset();
         if (m_accessibility)
         {
             m_accessibility->Disconnect();

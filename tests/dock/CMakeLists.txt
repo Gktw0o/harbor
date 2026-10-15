@@ -36,6 +36,7 @@ add_executable(harbor_dock_tests
     line_framer_tests.cpp
     log_line_tests.cpp
     named_pipe_client_tests.cpp
+    on_screen_tests.cpp
     pipe_name_tests.cpp
     restore_record_tests.cpp
     taskbar_guard_tests.cpp

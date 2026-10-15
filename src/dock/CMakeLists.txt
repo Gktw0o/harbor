@@ -8,6 +8,7 @@ add_library(harbor_dock_core STATIC
     core/island/appearance.cpp
     core/island/icon_file.cpp
     core/island/layout.cpp
+    core/island/on_screen.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
     core/json/strict_json.cpp
@@ -52,7 +53,7 @@ add_library(harbor_dock_app STATIC
     app/launcher.cpp
     app/taskbar_guard.cpp
 )
-target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore)
+target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore dwmapi)
 
 add_executable(harbor-dock WIN32
     app/main.cpp

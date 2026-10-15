@@ -6,9 +6,9 @@
 // first.
 #include <ole2.h>
 
+#include <map>
 #include <UIAutomation.h>
 #include <utility>
-#include <vector>
 #include <winrt/base.h>
 
 namespace harbor::adapters
@@ -22,12 +22,10 @@ struct UiaState
     HWND window = nullptr;
     // Null once disconnected: every provider then answers UIA_E_ELEMENTNOTAVAILABLE.
     IIslandAccess* island = nullptr;
-    // Bumped when the items change: item providers of an older generation are dead.
-    unsigned generation = 0;
     int nextRuntimeId = 1;
     winrt::com_ptr<IRawElementProviderSimple> root;
-    // This generation's item providers, made when first asked for.
-    std::vector<winrt::com_ptr<IRawElementProviderSimple>> items;
+    // Item providers by item key, made when first asked for and kept while their item stays.
+    std::map<std::uint64_t, winrt::com_ptr<IRawElementProviderSimple>> items;
 };
 
 constexpr ProviderOptions kOptions =
@@ -53,8 +51,8 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
                                             IRawElementProviderFragment, IInvokeProvider>
 {
   public:
-    IslandItem(std::shared_ptr<UiaState> state, std::size_t index, int runtimeId)
-        : m_state(std::move(state)), m_index(index), m_generation(m_state->generation), m_runtimeId(runtimeId)
+    IslandItem(std::shared_ptr<UiaState> state, std::uint64_t key, int runtimeId)
+        : m_state(std::move(state)), m_key(key), m_runtimeId(runtimeId)
     {
     }
 
@@ -67,7 +65,7 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
     HRESULT __stdcall GetPatternProvider(PATTERNID pattern, IUnknown** provider) noexcept override
     {
         *provider = nullptr;
-        if (!Alive())
+        if (!Index())
         {
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
@@ -79,9 +77,11 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
         return S_OK;
     }
     HRESULT __stdcall GetPropertyValue(PROPERTYID property, VARIANT* value) noexcept override
+    try
     {
         value->vt = VT_EMPTY;
-        if (!Alive())
+        const auto index = Index();
+        if (!index)
         {
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
@@ -92,10 +92,10 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
             value->lVal = UIA_ButtonControlTypeId;
             break;
         case UIA_NamePropertyId:
-            SetString(value, m_state->island->ItemName(m_index).c_str());
+            SetString(value, m_state->island->ItemName(*index).c_str());
             break;
         case UIA_AutomationIdPropertyId:
-            SetString(value, (L"HarborDockItem" + std::to_wstring(m_index)).c_str());
+            SetString(value, (L"HarborDockItem." + std::to_wstring(m_key)).c_str());
             break;
         case UIA_IsKeyboardFocusablePropertyId:
             // The island never takes the focus.
@@ -106,6 +106,10 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
             break;
         }
         return S_OK;
+    }
+    catch (...)
+    {
+        return E_OUTOFMEMORY;
     }
     HRESULT __stdcall get_HostRawElementProvider(IRawElementProviderSimple** host) noexcept override
     {
@@ -119,7 +123,8 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
     try
     {
         *element = nullptr;
-        if (!Alive())
+        const auto index = Index();
+        if (!index)
         {
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
@@ -128,11 +133,11 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
         case NavigateDirection_Parent:
             return AsFragment(m_state->root, element);
         case NavigateDirection_NextSibling:
-            return m_index + 1 < m_state->island->ItemCount()
-                       ? AsFragment(ItemProvider(m_state, m_index + 1), element)
+            return *index + 1 < m_state->island->ItemCount()
+                       ? AsFragment(ItemProvider(m_state, *index + 1), element)
                        : S_OK;
         case NavigateDirection_PreviousSibling:
-            return m_index > 0 ? AsFragment(ItemProvider(m_state, m_index - 1), element) : S_OK;
+            return *index > 0 ? AsFragment(ItemProvider(m_state, *index - 1), element) : S_OK;
         default:
             return S_OK;
         }
@@ -144,7 +149,7 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
     HRESULT __stdcall GetRuntimeId(SAFEARRAY** id) noexcept override
     {
         *id = nullptr;
-        if (!Alive())
+        if (!Index())
         {
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
@@ -163,11 +168,12 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
     HRESULT __stdcall get_BoundingRectangle(UiaRect* rect) noexcept override
     {
         *rect = {};
-        if (!Alive())
+        const auto index = Index();
+        if (!index)
         {
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
-        const RECT bounds = m_state->island->ItemBounds(m_index);
+        const RECT bounds = m_state->island->ItemBounds(*index);
         *rect = {static_cast<double>(bounds.left), static_cast<double>(bounds.top),
                  static_cast<double>(bounds.right - bounds.left),
                  static_cast<double>(bounds.bottom - bounds.top)};
@@ -185,7 +191,7 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
     HRESULT __stdcall get_FragmentRoot(IRawElementProviderFragmentRoot** root) noexcept override
     {
         *root = nullptr;
-        if (!Alive())
+        if (!Index())
         {
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
@@ -195,11 +201,12 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
     // IInvokeProvider
     HRESULT __stdcall Invoke() noexcept override
     {
-        if (!Alive())
+        const auto index = Index();
+        if (!index)
         {
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
-        if (!m_state->island->InvokeItem(m_index))
+        if (!m_state->island->InvokeItem(*index))
         {
             return E_FAIL;
         }
@@ -211,15 +218,14 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
     }
 
   private:
-    bool Alive() const noexcept
+    // Where this provider's item is now; nullopt once it's gone or the island went away.
+    std::optional<std::size_t> Index() const noexcept
     {
-        return m_state->island != nullptr && m_generation == m_state->generation &&
-               m_index < m_state->island->ItemCount();
+        return m_state->island != nullptr ? m_state->island->IndexOfKey(m_key) : std::nullopt;
     }
 
     std::shared_ptr<UiaState> m_state;
-    std::size_t m_index;
-    unsigned m_generation;
+    std::uint64_t m_key;
     int m_runtimeId;
 };
 
@@ -373,17 +379,14 @@ class IslandRoot : public winrt::implements<IslandRoot, IRawElementProviderSimpl
 winrt::com_ptr<IRawElementProviderSimple> ItemProvider(const std::shared_ptr<UiaState>& state,
                                                        std::size_t index)
 {
-    auto& items = state->items;
-    if (items.size() <= index)
+    const auto key = state->island->ItemKey(index);
+    auto& provider = state->items[key];
+    if (!provider)
     {
-        items.resize(index + 1);
+        provider =
+            winrt::make_self<IslandItem>(state, key, state->nextRuntimeId++).as<IRawElementProviderSimple>();
     }
-    if (!items[index])
-    {
-        items[index] = winrt::make_self<IslandItem>(state, index, state->nextRuntimeId++)
-                           .as<IRawElementProviderSimple>();
-    }
-    return items[index];
+    return provider;
 }
 
 } // namespace
@@ -422,20 +425,29 @@ std::optional<LRESULT> IslandAccessibility::OnGetObject(WPARAM wParam, LPARAM lP
 
 void IslandAccessibility::ItemsChanged()
 {
-    ++m_shared->generation;
-    if (!m_shared->root)
+    if (m_shared->island == nullptr)
     {
-        m_shared->items.clear();
         return;
     }
-    for (const auto& item : m_shared->items)
+    // Items that moved keep their providers (and a screen reader its place); those that are gone go dead.
+    auto& items = m_shared->items;
+    for (auto it = items.begin(); it != items.end();)
     {
-        if (item)
+        if (m_shared->island->IndexOfKey(it->first))
         {
-            UiaDisconnectProvider(item.get());
+            ++it;
+            continue;
         }
+        if (m_shared->root)
+        {
+            UiaDisconnectProvider(it->second.get());
+        }
+        it = items.erase(it);
     }
-    m_shared->items.clear();
+    if (!m_shared->root)
+    {
+        return;
+    }
     if (UiaClientsAreListening())
     {
         UiaRaiseStructureChangedEvent(m_shared->root.get(), StructureChangeType_ChildrenInvalidated, nullptr,
@@ -454,12 +466,9 @@ void IslandAccessibility::Disconnect() noexcept
     {
         return;
     }
-    for (const auto& item : m_shared->items)
+    for (const auto& [key, item] : m_shared->items)
     {
-        if (item)
-        {
-            UiaDisconnectProvider(item.get());
-        }
+        UiaDisconnectProvider(item.get());
     }
     m_shared->items.clear();
     UiaDisconnectProvider(m_shared->root.get());

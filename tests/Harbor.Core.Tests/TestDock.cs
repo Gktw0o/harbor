@@ -44,6 +44,28 @@ internal static partial class TestDock
     // reader is. Returns its exit code and output.
     public static async Task<(int ExitCode, string Output)> RunUiaClientAsync(nint island, params string[] arguments)
     {
+        using var process = StartUiaClient(island, arguments);
+        return await FinishUiaClientAsync(process);
+    }
+
+    // Starts the client's "hold" on the button with that name and waits until it holds the element.
+    public static async Task<Process> HoldUiaElementAsync(nint island, string name)
+    {
+        var process = StartUiaClient(island, "hold", name);
+        Assert.AreEqual("found", await process.StandardOutput.ReadLineAsync(), $"no button named {name}");
+        return process;
+    }
+
+    // Lets a holding client ask its element again. Exit code 0 and "alive\t<name>", or 5 and "gone".
+    public static async Task<(int ExitCode, string Output)> ReleaseUiaElementAsync(Process client)
+    {
+        await client.StandardInput.WriteLineAsync();
+        await client.StandardInput.FlushAsync();
+        return await FinishUiaClientAsync(client);
+    }
+
+    private static Process StartUiaClient(nint island, params string[] arguments)
+    {
         var client = Environment.GetEnvironmentVariable("HARBOR_UIA_CLIENT_EXE");
         if (string.IsNullOrEmpty(client))
         {
@@ -51,6 +73,7 @@ internal static partial class TestDock
         }
         var startInfo = new ProcessStartInfo(client)
         {
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             StandardOutputEncoding = System.Text.Encoding.UTF8,
             CreateNoWindow = true,
@@ -60,7 +83,11 @@ internal static partial class TestDock
         {
             startInfo.ArgumentList.Add(argument);
         }
-        using var process = Process.Start(startInfo)!;
+        return Process.Start(startInfo)!;
+    }
+
+    private static async Task<(int ExitCode, string Output)> FinishUiaClientAsync(Process process)
+    {
         var output = await process.StandardOutput.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await process.WaitForExitAsync(timeout.Token);
@@ -112,6 +139,15 @@ internal static partial class TestDock
     {
         using var lose = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.lose-device");
         lose.Set();
+    }
+
+    // The test hooks that cloak or uncloak the island, as a virtual desktop switch would (see
+    // DockWindow::kTestCloakMessage). Each works once per dock.
+    public static void CloakIsland(FakeTaskbar taskbar, bool cloak)
+    {
+        using var hook = EventWaitHandle.OpenExisting(
+            $@"Local\Harbor.Test.{taskbar.Id}.{(cloak ? "cloak-island" : "uncloak-island")}");
+        hook.Set();
     }
 
     public static async Task<string> ReadLogAsync(string dataDir)

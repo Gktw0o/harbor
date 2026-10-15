@@ -6,10 +6,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
+#include <wil/resource.h>
 
 #include "adapters/composition_renderer.h"
 #include "adapters/uia_island.h"
@@ -25,7 +28,7 @@
 namespace harbor::dock
 {
 
-// The island: a small topmost popup at the bottom of the primary monitor that never takes focus, drawn by
+// The island: a small topmost popup at the bottom of the dock's monitor that never takes focus, drawn by
 // CompositionRenderer. It follows the monitor's DPI, the work area and the Windows appearance settings; it
 // is shown only once its first frame is committed. Until the AppBar arrives it sits at the bottom of the work
 // area. The taskbar itself is the TaskbarGuard's business. Per-monitor-v2 DPI awareness comes from the
@@ -87,6 +90,13 @@ class DockWindow : private adapters::IIslandAccess
     // island goes off screen (so the taskbar comes back), gets a new device and is drawn again.
     static constexpr UINT kDeviceLostMessage = WM_APP + 6;
 
+    // Posted when the island is cloaked or uncloaked: is it still on screen?
+    static constexpr UINT kCloakChangedMessage = WM_APP + 10;
+
+    // Test docks only: cloaks (wParam 1) or uncloaks (0) the island, as a switch to another virtual desktop
+    // would, so tests can check a cloaked island brings the taskbar back.
+    static constexpr UINT kTestCloakMessage = WM_APP + 11;
+
   private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT message, WPARAM wParam, LPARAM lParam);
@@ -110,8 +120,14 @@ class DockWindow : private adapters::IIslandAccess
     bool LaunchItem(std::size_t index, std::string_view how);
     void UpdatePresentable();
 
+    // Gives every item in m_items its UI Automation key: the one it had in the previous list, if it was
+    // there.
+    void AssignItemKeys();
+
     // adapters::IIslandAccess, for UI Automation: the visible items.
     std::size_t ItemCount() const override;
+    std::uint64_t ItemKey(std::size_t index) const override;
+    std::optional<std::size_t> IndexOfKey(std::uint64_t key) const override;
     std::wstring ItemName(std::size_t index) const override;
     RECT ItemBounds(std::size_t index) const override;
     std::optional<std::size_t> ItemAt(POINT screenPoint) const override;
@@ -126,6 +142,11 @@ class DockWindow : private adapters::IIslandAccess
     LatestValue<ipc::DockItems> m_receivedItems;
     // What the dock shows. Kept while the Shell is away.
     ipc::DockItems m_items;
+    // Each item's UI Automation key, and the keys by item identity (kind, target, and how many times the same
+    // pin came before it) for the next list.
+    std::vector<std::uint64_t> m_itemKeys;
+    std::map<std::string, std::uint64_t> m_keysByIdentity;
+    std::uint64_t m_nextItemKey = 1;
     HWND m_hwnd = nullptr;
     std::optional<AppBarWorker> m_appBar;
     // The strip Explorer granted; until then the island sits at the bottom of the work area.
@@ -135,6 +156,8 @@ class DockWindow : private adapters::IIslandAccess
     std::optional<Launcher> m_launcher;
     std::unique_ptr<adapters::IslandAccessibility> m_accessibility;
     HPOWERNOTIFY m_powerNotification = nullptr;
+    // This thread's windows being cloaked or uncloaked.
+    wil::unique_hwineventhook m_cloakHook;
     UINT m_taskbarCreatedMessage = 0;
     bool m_connected = false;
 

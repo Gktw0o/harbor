@@ -15,6 +15,7 @@
 #include "adapters/icon_files.h"
 #include "adapters/system_appearance.h"
 #include "adapters/win32_app_bar.h"
+#include "adapters/win32_window_system.h"
 #include "app/exit_codes.h"
 #include "core/island/icon_file.h"
 #include "core/island/on_screen.h"
@@ -38,6 +39,8 @@ constexpr UINT kRenderCommitted = WM_APP + 5;
 constexpr UINT kAppBarStrip = WM_APP + 8;
 // Explorer's AppBar notifications (ABN_*): wParam = notification.
 constexpr UINT kAppBarCallback = WM_APP + 9;
+// Posted by the window watcher: a new snapshot waits.
+constexpr UINT kWindowsChanged = WM_APP + 12;
 
 static_assert(sizeof(WPARAM) == 8 && sizeof(LPARAM) == 8, "two 32-bit coordinates go in each");
 
@@ -159,8 +162,9 @@ void DockWindow::Shutdown() noexcept
         m_appBar->Stop();
         m_appBar.reset();
     }
-    // A launch stuck in Explorer is left behind.
+    // A launch stuck in Explorer is left behind, and so is a watcher stuck in another app.
     m_launcher.reset();
+    m_watcher.reset();
     if (m_hwnd != nullptr)
     {
         DestroyWindow(m_hwnd);
@@ -221,6 +225,9 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     });
     Refresh(/*force=*/true);
     m_launcher.emplace(m_hwnd);
+    m_watcher = std::make_unique<WindowWatcher>(std::make_unique<adapters::Win32WindowSystem>(),
+                                                m_options.windowClassPrefix, m_log,
+                                                [hwnd] { PostMessageW(hwnd, kWindowsChanged, 0, 0); });
     // The base is private: converted here, where it's accessible.
     adapters::IIslandAccess& access = *this;
     m_accessibility = std::make_unique<adapters::IslandAccessibility>(m_hwnd, access);
@@ -306,6 +313,17 @@ void DockWindow::OnDockItems()
         {
             // Names and order may differ: UI Automation clients must look again.
             m_accessibility->ItemsChanged();
+        }
+    }
+}
+
+void DockWindow::OnWindowsChanged()
+{
+    if (m_watcher)
+    {
+        if (auto snapshot = m_watcher->TakeSnapshot())
+        {
+            m_windows = std::move(*snapshot);
         }
     }
 }
@@ -672,6 +690,10 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         {
             m_appBar->TaskbarCreated();
         }
+        if (m_watcher)
+        {
+            m_watcher->Rescan();
+        }
         Refresh(/*force=*/false);
         return 0;
     }
@@ -686,6 +708,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case kControlDockItems:
         OnDockItems();
+        return 0;
+    case kWindowsChanged:
+        OnWindowsChanged();
         return 0;
     case kRenderCommitted:
         OnCommitted(wParam);

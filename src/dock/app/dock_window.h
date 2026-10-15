@@ -20,6 +20,7 @@
 #include "app/latest_value.h"
 #include "app/launcher.h"
 #include "app/taskbar_guard.h"
+#include "app/window_watcher.h"
 #include "core/island/appearance.h"
 #include "core/island/layout.h"
 #include "ports/ipc_channel.h"
@@ -50,6 +51,8 @@ class DockWindow : private adapters::IIslandAccess
         std::filesystem::path iconsDir;
         // Test docks: an AppBar that reserves nothing (adapters::TestAppBar).
         bool testAppBar = false;
+        // Test docks: follow only windows whose class starts with this (WindowTracker); empty: every window.
+        std::string windowClassPrefix;
     };
 
     enum class CreateResult
@@ -103,6 +106,8 @@ class DockWindow : private adapters::IIslandAccess
     void StartControlChannel();
     void OnConnectionChanged(bool connected);
     void OnDockItems();
+    // The window watcher has a new snapshot.
+    void OnWindowsChanged();
     // Reads the monitor, work area and appearance again and redraws if anything changed (or if forced).
     void Refresh(bool force);
     void OnCommitted(WPARAM generation);
@@ -154,6 +159,9 @@ class DockWindow : private adapters::IIslandAccess
     // A full-screen app covers the monitor: the island is behind it.
     bool m_fullScreen = false;
     std::optional<Launcher> m_launcher;
+    // Follows the app windows on its own thread; its newest snapshot is m_windows.
+    std::unique_ptr<WindowWatcher> m_watcher;
+    WindowWatcher::Snapshot m_windows;
     std::unique_ptr<adapters::IslandAccessibility> m_accessibility;
     HPOWERNOTIFY m_powerNotification = nullptr;
     // This thread's windows being cloaked or uncloaked.

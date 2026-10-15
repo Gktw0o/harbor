@@ -42,7 +42,7 @@ bool IsAppWindow(const WindowFacts& facts) noexcept
     {
         return false;
     }
-    if (facts.cloak == Cloak::Shell || facts.cloak == Cloak::Inherited || facts.onOtherDesktop)
+    if (facts.cloak == Cloak::Shell || facts.cloak == Cloak::Inherited)
     {
         return false;
     }

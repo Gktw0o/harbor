@@ -41,6 +41,7 @@ add_library(harbor_dock_adapters STATIC
     adapters/uia_island.cpp
     adapters/win32_app_bar.cpp
     adapters/win32_taskbar.cpp
+    adapters/win32_window_system.cpp
 )
 # Composition, Direct2D and the shell come with the Windows SDK and the OS (C++/WinRT headers included):
 # no packages.
@@ -58,6 +59,8 @@ add_library(harbor_dock_app STATIC
     app/explorer_worker.cpp
     app/launcher.cpp
     app/taskbar_guard.cpp
+    app/window_tracker.cpp
+    app/window_watcher.cpp
 )
 target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore dwmapi)
 

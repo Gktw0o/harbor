@@ -159,13 +159,18 @@ internal static partial class TestDock
     }
 
     // Waits until the dock's log contains the text; false after the timeout.
-    public static async Task<bool> WaitForLogAsync(string dataDir, string text, TimeSpan timeout)
+    public static Task<bool> WaitForLogAsync(string dataDir, string text, TimeSpan timeout) =>
+        WaitForLogAfterAsync(dataDir, 0, text, timeout);
+
+    // Waits until the dock's log contains the text past the first `from` characters (LogLengthAsync before
+    // an action: what the action caused); false after the timeout.
+    public static async Task<bool> WaitForLogAfterAsync(string dataDir, int from, string text, TimeSpan timeout)
     {
         var deadline = Stopwatch.StartNew();
         do
         {
             if (File.Exists(Path.Combine(dataDir, "logs", "dock.log")) &&
-                (await ReadLogAsync(dataDir)).Contains(text, StringComparison.Ordinal))
+                (await ReadLogAsync(dataDir)).IndexOf(text, from, StringComparison.Ordinal) >= 0)
             {
                 return true;
             }
@@ -174,6 +179,8 @@ internal static partial class TestDock
         while (deadline.Elapsed < timeout);
         return false;
     }
+
+    public static async Task<int> LogLengthAsync(string dataDir) => (await ReadLogAsync(dataDir)).Length;
 
     public static void KillQuietly(int processId)
     {

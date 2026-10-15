@@ -56,7 +56,7 @@ TEST(Eligibility, AppWindowStyleBringsThemBackIn)
     EXPECT_TRUE(IsAppWindow(noActivate));
 }
 
-TEST(Eligibility, ShellCloakedOrOtherDesktopWindowsAreNot)
+TEST(Eligibility, ShellCloakedWindowsAreNot)
 {
     auto shell = Plain();
     shell.cloak = Cloak::Shell;
@@ -64,9 +64,6 @@ TEST(Eligibility, ShellCloakedOrOtherDesktopWindowsAreNot)
     auto inherited = Plain();
     inherited.cloak = Cloak::Inherited;
     EXPECT_FALSE(IsAppWindow(inherited));
-    auto elsewhere = Plain();
-    elsewhere.onOtherDesktop = true;
-    EXPECT_FALSE(IsAppWindow(elsewhere));
 }
 
 TEST(Eligibility, AWindowItsAppCloakedStays)

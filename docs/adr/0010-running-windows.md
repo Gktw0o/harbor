@@ -32,8 +32,9 @@ mailbox, so the UI thread never waits on it.
 
 **Which windows count** (a pure function of the window's facts, `core/windows`): the Alt+Tab rules. Visible;
 unowned or `WS_EX_APPWINDOW`; not a tool window; not the shell window, Progman/WorkerW, Explorer's tray
-windows, `Ghost` windows (the hung original stays) or Harbor's own. Windows on another virtual desktop
-(`IVirtualDesktopManager`) and shell-cloaked windows are left out; a window its app cloaked itself stays.
+windows, `Ghost` windows (the hung original stays) or Harbor's own. Shell-cloaked windows are left out,
+which includes every window on another virtual desktop (no need to ask Explorer through
+`IVirtualDesktopManager`); a window its app cloaked itself stays.
 
 **An app's identity, in order:**
 1. the window's AppUserModelID (`SHGetPropertyStoreForWindow`, `PKEY_AppUserModel_ID`);
@@ -103,9 +104,10 @@ only the pinned ones.
   the first hover. The spike's first DirectWrite draw cost 6 MB, so DirectWrite and GDI text are measured
   against each other before one is chosen; the result is added here.
 
-**Tests never see the user's windows.** In test mode, `--test-windows <id>` limits the watcher to windows of
-the `harbor_test_windows` helper, which gives each window its own AppUserModelID
-(`Harbor.Test.<id>.<n>`) and shows, hides, minimizes, cloaks, owns, hangs or closes it on request.
+**Tests never see the user's windows.** A test dock (`--test-taskbar <id>`) follows only windows of the class
+`Harbor.Test.<id>.App`, which the `harbor_test_windows` helper makes off screen: it gives them
+AppUserModelIDs (also late) and shows, hides, minimizes, cloaks, activates, flashes or closes them on
+request.
 
 **Privacy.** Both processes log app ids and counts, never window titles, AppUserModelIDs or paths: they name
 apps and the user's account folder.

@@ -283,6 +283,53 @@ public sealed class DockE2ETests
         }
     }
 
+    // The dock follows app windows as they come, change app, hide and go, grouped by app, and only the test's
+    // own windows (the user's are there too). Its log says how many, never which.
+    [TestMethod]
+    public async Task TheDockFollowsAppWindowsGroupedByApp()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var aumid = $"Harbor.Test.{taskbar.Id}.Grouped";
+        var timeout = TimeSpan.FromSeconds(10);
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "windows: 0 apps, 0 windows", timeout));
+
+            async Task ExpectAsync(string command, string counts)
+            {
+                var from = await TestDock.LogLengthAsync(dataDir.Path);
+                await windows.SendAsync(command);
+                Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, $"windows: {counts}", timeout),
+                    $"after {command}: {await TestDock.ReadLogAsync(dataDir.Path)}");
+            }
+
+            await ExpectAsync($"new 1 {aumid}", "1 apps, 1 windows");
+            await ExpectAsync($"new 2 {aumid}", "1 apps, 2 windows");
+            // No AppUserModelID: the helper's executable is the app.
+            await ExpectAsync("new 3", "2 apps, 3 windows");
+            // Set late: it joins the others.
+            await ExpectAsync($"aumid 3 {aumid}", "1 apps, 3 windows");
+            // A window its own app cloaked stays (only the shell's cloaking, as for other desktops, hides one);
+            // the hidden one goes.
+            await windows.SendAsync("cloak 1");
+            await ExpectAsync("hide 3", "1 apps, 2 windows");
+            await ExpectAsync("close 1", "1 apps, 1 windows");
+            await ExpectAsync("close 2", "0 apps, 0 windows");
+
+            Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains(".Grouped", StringComparison.Ordinal),
+                "the log names an app");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
     [TestMethod]
     public async Task TheDockExitsNormallyWhenItsWindowIsClosed()

@@ -179,10 +179,22 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     const auto orphanTimeout = testMode
                                    ? std::chrono::milliseconds(options.testOrphanTimeoutMs.value_or(30'000))
                                    : std::chrono::milliseconds::zero();
+    // A test dock follows only the test helper's windows, never the user's (docs/adr/0010). The id is ASCII.
+    std::string windowClassPrefix;
+    if (testMode)
+    {
+        windowClassPrefix = "Harbor.Test.";
+        for (const wchar_t c : *options.testTaskbarId)
+        {
+            windowClassPrefix.push_back(static_cast<char>(c));
+        }
+        windowClassPrefix += ".App";
+    }
     harbor::dock::DockWindow window(controlChannel, guard, renderer, log,
                                     {.orphanTimeout = orphanTimeout,
                                      .iconsDir = dataDir.empty() ? dataDir : dataDir / L"icons",
-                                     .testAppBar = testMode});
+                                     .testAppBar = testMode,
+                                     .windowClassPrefix = windowClassPrefix});
     switch (window.Create(instance))
     {
     case harbor::dock::DockWindow::CreateResult::Created:

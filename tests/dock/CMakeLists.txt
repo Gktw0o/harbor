@@ -18,6 +18,11 @@ target_link_libraries(harbor_test_marker PRIVATE harbor_compiler_options)
 add_executable(harbor_test_uia_client uia_client.cpp)
 target_link_libraries(harbor_test_uia_client PRIVATE harbor_compiler_options WIL::WIL ole32 oleaut32)
 
+# Off-screen app windows made on request, the only windows a test dock follows: the running-windows tests
+# drive it (HARBOR_TEST_WINDOWS_EXE).
+add_executable(harbor_test_windows test_windows.cpp)
+target_link_libraries(harbor_test_windows PRIVATE harbor_compiler_options dwmapi ole32 shell32)
+
 add_executable(harbor_dock_tests
     app_launcher_tests.cpp
     app_windows_tests.cpp
@@ -47,6 +52,7 @@ add_executable(harbor_dock_tests
     restore_record_tests.cpp
     taskbar_guard_tests.cpp
     win32_taskbar_tests.cpp
+    window_tracker_tests.cpp
 )
 target_link_libraries(harbor_dock_tests PRIVATE
     harbor_dock_app

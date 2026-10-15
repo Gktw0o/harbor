@@ -47,8 +47,9 @@ winrt::com_ptr<IRawElementProviderSimple> ItemProvider(const std::shared_ptr<Uia
                                                        std::size_t index);
 
 // C++/WinRT implementation types can't be final.
-class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimple,
-                                            IRawElementProviderFragment, IInvokeProvider>
+class IslandItem
+    : public winrt::implements<IslandItem, IRawElementProviderSimple, IRawElementProviderFragment,
+                               IInvokeProvider, IExpandCollapseProvider>
 {
   public:
     IslandItem(std::shared_ptr<UiaState> state, std::uint64_t key, int runtimeId)
@@ -72,6 +73,12 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
         if (pattern == UIA_InvokePatternId)
         {
             *provider = static_cast<IInvokeProvider*>(this);
+            (*provider)->AddRef();
+        }
+        else if (pattern == UIA_ExpandCollapsePatternId && m_state->island->IsOverflow(*Index()))
+        {
+            // The "…" button: a button that expands into the overflow menu.
+            *provider = static_cast<IExpandCollapseProvider*>(this);
             (*provider)->AddRef();
         }
         return S_OK;
@@ -202,6 +209,49 @@ class IslandItem : public winrt::implements<IslandItem, IRawElementProviderSimpl
             return UIA_E_ELEMENTNOTAVAILABLE;
         }
         return m_state->root ? m_state->root->QueryInterface(IID_PPV_ARGS(root)) : S_OK;
+    }
+
+    // IExpandCollapseProvider (the "…" button only)
+    HRESULT __stdcall Expand() noexcept override
+    {
+        const auto index = Index();
+        if (!index)
+        {
+            return UIA_E_ELEMENTNOTAVAILABLE;
+        }
+        if (!m_state->island->IsOverflow(*index))
+        {
+            return UIA_E_INVALIDOPERATION;
+        }
+        return m_state->island->InvokeItem(*index) ? S_OK : E_FAIL;
+    }
+    HRESULT __stdcall Collapse() noexcept override
+    {
+        const auto index = Index();
+        if (!index)
+        {
+            return UIA_E_ELEMENTNOTAVAILABLE;
+        }
+        if (m_state->island->IsOverflow(*index) && m_state->island->IsOverflowMenuOpen())
+        {
+            m_state->island->CloseMenu();
+        }
+        return S_OK;
+    }
+    HRESULT __stdcall get_ExpandCollapseState(ExpandCollapseState* state) noexcept override
+    {
+        *state = ExpandCollapseState_LeafNode;
+        const auto index = Index();
+        if (!index)
+        {
+            return UIA_E_ELEMENTNOTAVAILABLE;
+        }
+        if (m_state->island->IsOverflow(*index))
+        {
+            *state = m_state->island->IsOverflowMenuOpen() ? ExpandCollapseState_Expanded
+                                                           : ExpandCollapseState_Collapsed;
+        }
+        return S_OK;
     }
 
     // IInvokeProvider

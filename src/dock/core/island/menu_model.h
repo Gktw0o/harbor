@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,6 +25,8 @@ enum class MenuCommand
     CloseWindow,
     // Close each of the app's windows.
     CloseAll,
+    // The overflow menu: do what clicking that dock item would.
+    Item,
 };
 
 struct MenuItem
@@ -34,8 +37,13 @@ struct MenuItem
     windows::WindowId window = 0;
     bool separatorAbove = false;
     bool enabled = true;
+    // MenuCommand::Item: which dock item.
+    std::size_t item = 0;
     friend bool operator==(const MenuItem&, const MenuItem&) = default;
 };
+
+// The overflow "…" menu: the items that didn't fit on the island, by name; names[i] is dock item first + i.
+std::vector<MenuItem> BuildOverflowMenu(std::span<const std::string> names, std::size_t first);
 
 struct MenuWindow
 {

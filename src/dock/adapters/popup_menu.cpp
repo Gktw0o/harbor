@@ -4,6 +4,7 @@
 #include <ole2.h>
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <oleacc.h>
 #include <string>
@@ -22,9 +23,11 @@ struct OwnerItem
     std::wstring text;
     bool separator = false;
     bool title = false;
+    // Premultiplied 32-bit, iconSide square; owned by the open menu.
+    HBITMAP icon = nullptr;
 };
 
-// The open menu: its look, fonts, colors and items. One at a time, on the UI thread.
+// The open menu: its look, fonts, colors, items and their icons. One at a time, on the UI thread.
 struct OpenMenu
 {
     PopupMenu::Look look;
@@ -34,8 +37,25 @@ struct OpenMenu
     COLORREF highlight = 0;
     COLORREF text = 0;
     COLORREF dim = 0;
+    int iconSide = 0;
     std::vector<std::unique_ptr<OwnerItem>> items;
+    std::vector<wil::unique_hbitmap> icons;
 };
+
+// A top-down 32-bit DIB section holding pixels (premultiplied BGRA, side x side).
+wil::unique_hbitmap IconBitmap(const std::vector<std::uint8_t>& pixels, int side)
+{
+    BITMAPINFO info{};
+    info.bmiHeader = {sizeof(BITMAPINFOHEADER), side, -side, 1, 32, BI_RGB};
+    void* bits = nullptr;
+    wil::unique_hbitmap bitmap(CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0));
+    if (bitmap && bits != nullptr && pixels.size() == static_cast<std::size_t>(side) * side * 4)
+    {
+        std::memcpy(bits, pixels.data(), pixels.size());
+        return bitmap;
+    }
+    return {};
+}
 
 thread_local OpenMenu* t_open = nullptr;
 
@@ -96,6 +116,12 @@ void Append(HMENU menu, UINT id, OwnerItem& item, bool enabled, bool highContras
     info.wID = id;
     info.dwItemData = reinterpret_cast<ULONG_PTR>(&item);
     info.dwTypeData = plain.data();
+    if (highContrast && item.icon != nullptr)
+    {
+        // The system menu draws a premultiplied 32-bit bitmap with its alpha.
+        info.fMask |= MIIM_BITMAP;
+        info.hbmpItem = item.icon;
+    }
     InsertMenuItemW(menu, GetMenuItemCount(menu), TRUE, &info);
 }
 
@@ -120,14 +146,15 @@ OwnerItem* ItemOf(ULONG_PTR data) noexcept
 } // namespace
 
 std::optional<std::size_t> PopupMenu::Show(HWND owner, const std::vector<island::MenuItem>& items,
-                                           POINT anchor, const RECT& avoid, const Look& look)
+                                           POINT anchor, const RECT& avoid, const Look& look,
+                                           std::span<const std::vector<std::uint8_t>> icons, int iconSide)
 {
     wil::unique_hmenu menu(CreatePopupMenu());
     if (!menu)
     {
         return std::nullopt;
     }
-    OpenMenu open{.look = look};
+    OpenMenu open{.look = look, .iconSide = iconSide};
     NONCLIENTMETRICSW metrics{sizeof(metrics)};
     if (SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, look.dpi))
     {
@@ -150,6 +177,14 @@ std::optional<std::size_t> PopupMenu::Show(HWND owner, const std::vector<island:
         }
         auto& item = *open.items.emplace_back(std::make_unique<OwnerItem>(
             OwnerItem{.text = Wide(items[i].text), .title = items[i].command == island::MenuCommand::Title}));
+        if (i < icons.size() && !icons[i].empty() && iconSide > 0)
+        {
+            if (auto bitmap = IconBitmap(icons[i], iconSide))
+            {
+                item.icon = bitmap.get();
+                open.icons.push_back(std::move(bitmap));
+            }
+        }
         Append(menu.get(), static_cast<UINT>(i + 1), item, items[i].enabled, look.highContrast);
     }
 
@@ -203,8 +238,11 @@ bool PopupMenu::OnMeasureItem(MEASUREITEMSTRUCT& measure) noexcept
         wil::SelectObject(screen.get(), item->title ? t_open->bold.get() : t_open->font.get());
     SIZE size{};
     GetTextExtentPoint32W(screen.get(), item->text.c_str(), static_cast<int>(item->text.size()), &size);
-    measure.itemWidth = static_cast<UINT>(size.cx + 2 * Scale(14, dpi));
-    measure.itemHeight = static_cast<UINT>(size.cy + 2 * Scale(6, dpi));
+    // Room for an icon before the text when the menu has icons.
+    const int iconRoom = t_open->iconSide > 0 ? t_open->iconSide + Scale(10, dpi) : 0;
+    measure.itemWidth = static_cast<UINT>(size.cx + iconRoom + 2 * Scale(14, dpi));
+    measure.itemHeight =
+        static_cast<UINT>(std::max(size.cy, static_cast<LONG>(t_open->iconSide)) + 2 * Scale(6, dpi));
     return true;
 }
 
@@ -237,6 +275,19 @@ bool PopupMenu::OnDrawItem(const DRAWITEMSTRUCT& draw) noexcept
     SetTextColor(draw.hDC, disabled && !item->title ? open.dim : open.text);
     rect.left += Scale(14, dpi);
     rect.right -= Scale(14, dpi);
+    if (open.iconSide > 0)
+    {
+        if (item->icon != nullptr)
+        {
+            const wil::unique_hdc icons(CreateCompatibleDC(draw.hDC));
+            const auto oldIcon = wil::SelectObject(icons.get(), item->icon);
+            const BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+            const int top = (rect.top + rect.bottom - open.iconSide) / 2;
+            GdiAlphaBlend(draw.hDC, rect.left, top, open.iconSide, open.iconSide, icons.get(), 0, 0,
+                          open.iconSide, open.iconSide, blend);
+        }
+        rect.left += open.iconSide + Scale(10, dpi);
+    }
     DrawTextW(draw.hDC, item->text.c_str(), static_cast<int>(item->text.size()), &rect,
               DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX | DT_END_ELLIPSIS);
     return true;

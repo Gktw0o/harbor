@@ -176,6 +176,22 @@ struct CompositionRenderer::Impl
         });
     }
 
+    // The overflow button: three dots across the middle.
+    wuc::CompositionSurfaceBrush OverflowBrush(int size, island::Color color)
+    {
+        return DrawSurface(size, [&](ID2D1DeviceContext& context, const D2D1_RECT_F& area) {
+            winrt::com_ptr<ID2D1SolidColorBrush> brush;
+            winrt::check_hresult(context.CreateSolidColorBrush(ToD2D(color), brush.put()));
+            const float extent = area.right - area.left;
+            const float radius = extent * 0.06f;
+            const float middle = area.top + extent / 2;
+            for (const float at : {0.3f, 0.5f, 0.7f})
+            {
+                context.FillEllipse({{area.left + extent * at, middle}, radius, radius}, brush.get());
+            }
+        });
+    }
+
     // The Shell's icon, scaled down to size (high-quality cubic), centred if it isn't square.
     wuc::CompositionSurfaceBrush IconBrush(int size, const island::IconView& icon)
     {
@@ -344,8 +360,8 @@ catch (...)
 
 bool CompositionRenderer::Render(const island::Layout& layout, const island::IslandStyle& style,
                                  const IconSource& icons, std::span<const island::ItemMarks> marks,
-                                 std::optional<std::size_t> hovered, UINT committedMessage,
-                                 WPARAM tag) noexcept
+                                 std::optional<std::size_t> hovered, std::optional<std::size_t> overflow,
+                                 UINT committedMessage, WPARAM tag) noexcept
 try
 {
     auto& impl = *m_impl;
@@ -419,7 +435,11 @@ try
         auto visual = impl.compositor.CreateSpriteVisual();
         visual.Size(Size(local));
         visual.Offset({static_cast<float>(local.left), static_cast<float>(local.top), 0});
-        if (const auto icon = icons ? icons(i, file) : std::nullopt)
+        if (overflow == i)
+        {
+            visual.Brush(impl.OverflowBrush(metrics.icon, style.dot));
+        }
+        else if (const auto icon = icons ? icons(i, file) : std::nullopt)
         {
             visual.Brush(impl.IconBrush(metrics.icon, *icon));
         }

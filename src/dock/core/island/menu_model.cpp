@@ -38,6 +38,16 @@ std::string Shorten(std::string_view text, std::size_t maxCharacters)
     return std::string(text);
 }
 
+std::vector<MenuItem> BuildOverflowMenu(std::span<const std::string> names, std::size_t first)
+{
+    std::vector<MenuItem> menu;
+    for (std::size_t i = 0; i < names.size(); ++i)
+    {
+        menu.push_back({.command = MenuCommand::Item, .text = names[i], .item = first + i});
+    }
+    return menu;
+}
+
 std::vector<MenuItem> BuildAppMenu(const MenuFacts& facts)
 {
     std::vector<MenuItem> menu;

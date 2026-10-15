@@ -3,7 +3,9 @@
 #include <windows.h>
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "core/island/appearance.h"
@@ -31,8 +33,12 @@ class PopupMenu
     // owner's window procedure keeps getting messages and must pass WM_MEASUREITEM, WM_DRAWITEM and
     // WM_MENUCHAR to the functions below. owner takes the foreground while the menu is open (or it wouldn't
     // close when clicking elsewhere); afterwards the window that had it gets it back.
+    // icons[i] (if there is one, and not empty): item i's icon, iconSide x iconSide premultiplied BGRA rows
+    // top to bottom; its bitmaps go when the menu closes.
     static std::optional<std::size_t> Show(HWND owner, const std::vector<island::MenuItem>& items,
-                                           POINT anchor, const RECT& avoid, const Look& look);
+                                           POINT anchor, const RECT& avoid, const Look& look,
+                                           std::span<const std::vector<std::uint8_t>> icons = {},
+                                           int iconSide = 0);
 
     // True if it was for the open menu.
     static bool OnMeasureItem(MEASUREITEMSTRUCT& measure) noexcept;

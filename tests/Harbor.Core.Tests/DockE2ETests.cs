@@ -658,6 +658,92 @@ public sealed class DockE2ETests
         }
     }
 
+    // 40 pins and 21 running apps: more than fit on any screen the tests run on (46 at most here, 33 on the CI
+    // runners). The last place is the "…" button.
+    private static async Task<(int Visible, int Total)> FillTheDockAsync(
+        RunningServer server, TestWindows windows, FakeTaskbar taskbar, string dataDir)
+    {
+        await server.WaitForAsync(s => s.Connected);
+        Assert.IsTrue(server.Server.TrySend(new DockItems(
+            [.. Enumerable.Range(1, 40).Select(i => new DockItem(DockItemKind.Path, $@"C:\Harbor test\pin{i}.exe", $"Pin {i}", null))])));
+        for (var i = 1; i <= 21; i++)
+        {
+            await windows.SendAsync($"new {i} Harbor.Test.{taskbar.Id}.Many{i}");
+        }
+        var line = "";
+        var deadline = Stopwatch.StartNew();
+        while (deadline.Elapsed < TimeSpan.FromSeconds(15))
+        {
+            line = (await TestDock.ReadLogAsync(dataDir)).Split('\n').LastOrDefault(l => l.Contains(" of 61 items fit", StringComparison.Ordinal)) ?? "";
+            if (line.Length > 0)
+            {
+                break;
+            }
+            await Task.Delay(50);
+        }
+        Assert.AreNotEqual("", line, await TestDock.ReadLogAsync(dataDir));
+        var words = line[(line.IndexOf("island: ", StringComparison.Ordinal) + 8)..].Split(' ');
+        return (int.Parse(words[0], System.Globalization.CultureInfo.InvariantCulture), 61);
+    }
+
+    // What doesn't fit goes behind a "…" button, which screen readers hear as "More apps" with how many.
+    [TestMethod]
+    public async Task ItemsThatDontFitGoBehindTheOverflowButton()
+    {
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        try
+        {
+            var (visible, total) = await FillTheDockAsync(server, windows, taskbar, dataDir.Path);
+            var island = IslandWindow.Find(dock.Id);
+            var (_, tree) = await TestDock.RunUiaClientAsync(island, "list");
+            var lines = tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
+            // The tool bar, the items that fit, and the button.
+            Assert.HasCount(1 + visible + 1, lines, tree);
+            Assert.AreEqual($"{Button}\tMore apps", lines[^1]);
+            Assert.AreEqual($"status\t{total - visible} more apps",
+                (await TestDock.RunUiaClientAsync(island, "status", "More apps")).Output.TrimEnd('\r', '\n'));
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // The "…" button opens a menu of the rest (UI Automation's Invoke posts it, so the screen reader's call
+    // returns); choosing one does what clicking it would.
+    [TestMethod]
+    public async Task TheOverflowMenuReachesTheItemsThatDidntFit()
+    {
+        TestDock.RequireForegroundTests();
+        const int MenuItem = 50011;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        try
+        {
+            var (visible, total) = await FillTheDockAsync(server, windows, taskbar, dataDir.Path);
+            var island = IslandWindow.Find(dock.Id);
+            Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(island, "invoke", "More apps")).ExitCode);
+
+            var (code, items) = await TestDock.UseMenuAsync(island, "harbor_test_windows");
+            Assert.AreEqual(0, code, string.Join("\n", items));
+            Assert.HasCount(total - visible, items.Where(item => item.StartsWith($"{MenuItem}\t", StringComparison.Ordinal)), string.Join("\n", items));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "(overflow menu): a window comes forward", TimeSpan.FromSeconds(10)),
+                await TestDock.ReadLogAsync(dataDir.Path));
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // WM_CLOSE (what Harbor Shell's "Stop dock" sends) is a normal exit.
     [TestMethod]
     public async Task TheDockExitsNormallyWhenItsWindowIsClosed()

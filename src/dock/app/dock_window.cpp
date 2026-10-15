@@ -46,6 +46,10 @@ constexpr UINT kAppBarStrip = WM_APP + 8;
 constexpr UINT kAppBarCallback = WM_APP + 9;
 // Posted by the window watcher: a new snapshot waits.
 constexpr UINT kWindowsChanged = WM_APP + 12;
+// Posted by UI Automation's Invoke or Expand on the "…" button: open the overflow menu outside that call.
+constexpr UINT kOpenOverflowMessage = WM_APP + 17;
+// The "…" button's UI Automation key: no item has it.
+constexpr std::uint64_t kOverflowKey = std::numeric_limits<std::uint64_t>::max();
 
 static_assert(sizeof(WPARAM) == 8 && sizeof(LPARAM) == 8, "two 32-bit coordinates go in each");
 
@@ -561,6 +565,15 @@ std::vector<island::ItemMarks> DockWindow::VisibleMarks() const
     const auto visible = m_layout ? std::min(m_layout->items.size(), m_model.slots.size()) : 0;
     for (std::size_t i = 0; i < visible; ++i)
     {
+        if (i == m_overflow)
+        {
+            // The "…" button: highlighted while one of the apps behind it needs attention.
+            const bool attention =
+                std::any_of(m_model.slots.begin() + static_cast<std::ptrdiff_t>(i), m_model.slots.end(),
+                            [](const auto& slot) { return slot.marks.attention; });
+            marks.push_back({.attention = attention});
+            continue;
+        }
         marks.push_back(m_model.slots[i].marks);
     }
     return marks;
@@ -610,11 +623,17 @@ void DockWindow::Refresh(bool force)
     {
         return;
     }
-    if (metrics.visibleCount < count)
+    // What doesn't fit goes behind a "…" button in the last place.
+    const std::optional<std::size_t> overflow = metrics.visibleCount < count && metrics.visibleCount > 0
+                                                    ? std::optional(metrics.visibleCount - 1)
+                                                    : std::nullopt;
+    if (overflow && (overflow != m_overflow || count != m_overflowCount))
     {
-        m_log.Warn(
-            std::format("island: {} of {} items fit on the dock's monitor", metrics.visibleCount, count));
+        m_log.Info(
+            std::format("island: {} of {} items fit; the rest are in the overflow menu", *overflow, count));
     }
+    m_overflow = overflow;
+    m_overflowCount = count;
 
     const auto& island = layout.island;
     // Behind a full-screen app, above everything else.
@@ -655,7 +674,7 @@ void DockWindow::Refresh(bool force)
         return view;
     };
 
-    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, kRenderCommitted,
+    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, m_overflow, kRenderCommitted,
                           ++m_renderGeneration))
     {
         m_log.Info(std::format("island: {} items ({} icons), {}x{} at {},{} ({} dpi, {})",
@@ -835,6 +854,20 @@ bool DockWindow::ClickItem(std::size_t index, std::string_view how)
     {
         return false;
     }
+    if (index == m_overflow)
+    {
+        OpenOverflowMenu(how);
+        return true;
+    }
+    return ClickSlot(index, how);
+}
+
+bool DockWindow::ClickSlot(std::size_t index, std::string_view how)
+{
+    if (index >= m_model.slots.size())
+    {
+        return false;
+    }
     // Which window is in front now, not when the last snapshot came.
     std::optional<windows::WindowId> front;
     if (const HWND foreground = GetForegroundWindow(); foreground != nullptr)
@@ -884,10 +917,56 @@ void DockWindow::OnRightClick(LPARAM position)
     }
 }
 
+void DockWindow::OpenOverflowMenu(std::string_view how)
+{
+    if (!m_layout || !m_overflow || *m_overflow >= m_layout->items.size() || m_menuOpen)
+    {
+        return;
+    }
+    // Copies, as for OpenMenu.
+    const auto first = *m_overflow;
+    std::vector<std::string> names;
+    std::vector<std::vector<std::uint8_t>> icons;
+    const auto side = static_cast<std::uint32_t>(island::Scale(16, m_dpi));
+    for (auto slot = m_model.slots.begin() + static_cast<std::ptrdiff_t>(first); slot != m_model.slots.end();
+         ++slot)
+    {
+        names.push_back(slot->name);
+        // Read one at a time and kept only as small as the menu shows them.
+        const auto file = slot->icon ? adapters::ReadIconFile(m_options.iconsDir, *slot->icon)
+                                     : std::vector<std::uint8_t>{};
+        const auto icon = island::ParseIconFile(file);
+        icons.push_back(icon ? island::Downscale(*icon, side) : std::vector<std::uint8_t>{});
+    }
+    const auto menu = island::BuildOverflowMenu(names, first);
+    const auto& button = m_layout->items[first];
+    const auto& island = m_layout->island;
+    HideLabel();
+    m_menuOpen = true;
+    m_overflowMenuOpen = true;
+    const auto chosen = adapters::PopupMenu::Show(
+        m_hwnd, menu, {(button.left + button.right) / 2, island.top},
+        {island.left, island.top, island.right, island.bottom},
+        {.style = m_style, .dpi = m_dpi, .highContrast = m_highContrast}, icons, static_cast<int>(side));
+    m_overflowMenuOpen = false;
+    m_menuOpen = false;
+    m_log.Info(std::format("menu: the overflow menu ({}, {} items){}", how, names.size(),
+                           chosen ? std::format(": item {} chosen", menu[*chosen].item) : ""));
+    if (chosen)
+    {
+        ClickSlot(menu[*chosen].item, "overflow menu");
+    }
+}
+
 void DockWindow::OpenMenu(std::size_t index, std::string_view how)
 {
     if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size() || m_menuOpen)
     {
+        return;
+    }
+    if (index == m_overflow)
+    {
+        OpenOverflowMenu(how);
         return;
     }
     // Copies: the model can change while the menu is open (its loop keeps handling this window's messages).
@@ -1025,12 +1104,21 @@ std::size_t DockWindow::ItemCount() const
 
 std::uint64_t DockWindow::ItemKey(std::size_t index) const
 {
+    if (index == m_overflow)
+    {
+        return kOverflowKey;
+    }
     return index < m_itemKeys.size() ? m_itemKeys[index] : 0;
 }
 
 std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
 {
-    const auto visible = std::min(ItemCount(), m_itemKeys.size());
+    if (key == kOverflowKey)
+    {
+        return m_overflow;
+    }
+    // Items behind the "…" button aren't on the island.
+    const auto visible = std::min(m_overflow.value_or(ItemCount()), m_itemKeys.size());
     for (std::size_t i = 0; i < visible; ++i)
     {
         if (m_itemKeys[i] == key)
@@ -1041,8 +1129,27 @@ std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
     return std::nullopt;
 }
 
+bool DockWindow::IsOverflow(std::size_t index) const
+{
+    return index == m_overflow;
+}
+
+bool DockWindow::IsOverflowMenuOpen() const
+{
+    return m_overflowMenuOpen;
+}
+
+void DockWindow::CloseMenu()
+{
+    EndMenu();
+}
+
 std::wstring DockWindow::ItemName(std::size_t index) const
 {
+    if (index == m_overflow)
+    {
+        return L"More apps";
+    }
     if (index >= m_model.slots.size())
     {
         return {};
@@ -1057,6 +1164,10 @@ std::wstring DockWindow::ItemName(std::size_t index) const
 
 std::wstring DockWindow::ItemStatus(std::size_t index) const
 {
+    if (index == m_overflow)
+    {
+        return std::format(L"{} more apps", m_model.slots.size() - index);
+    }
     if (index >= m_model.slots.size())
     {
         return {};
@@ -1091,6 +1202,11 @@ std::optional<std::size_t> DockWindow::ItemAt(POINT screenPoint) const
 
 bool DockWindow::InvokeItem(std::size_t index)
 {
+    if (index == m_overflow)
+    {
+        // Posted: a menu's loop mustn't run inside the screen reader's call.
+        return PostMessageW(m_hwnd, kOpenOverflowMessage, 0, 0) != FALSE;
+    }
     return ClickItem(index, "UI Automation");
 }
 
@@ -1201,6 +1317,9 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case kControlMessages:
         OnControlMessages();
+        return 0;
+    case kOpenOverflowMessage:
+        OpenOverflowMenu("UI Automation");
         return 0;
     case kWindowsChanged:
         OnWindowsChanged();

@@ -26,6 +26,10 @@ class IIslandAccess
     virtual std::wstring ItemName(std::size_t index) const = 0;
     // UI Automation's ItemStatus: "running, 2 windows", "needs attention"... Empty: nothing to say.
     virtual std::wstring ItemStatus(std::size_t index) const = 0;
+    // The "…" button, which expands into the overflow menu (ExpandCollapse pattern).
+    virtual bool IsOverflow(std::size_t index) const = 0;
+    virtual bool IsOverflowMenuOpen() const = 0;
+    virtual void CloseMenu() = 0;
     // Screen coordinates, physical pixels.
     virtual RECT ItemBounds(std::size_t index) const = 0;
     virtual std::optional<std::size_t> ItemAt(POINT screenPoint) const = 0;

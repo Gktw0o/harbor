@@ -86,6 +86,14 @@ TEST(MenuModel, LongTitlesAreCut)
     EXPECT_EQ(menu[1].text, std::string(59, 'x') + "\xE2\x80\xA6");
 }
 
+TEST(MenuModel, TheOverflowMenuListsTheItemsThatDidntFit)
+{
+    const std::vector<std::string> names{"Paint", "Notepad"};
+    EXPECT_EQ(BuildOverflowMenu(names, 30),
+              (std::vector<MenuItem>{{.command = Command::Item, .text = "Paint", .item = 30},
+                                     {.command = Command::Item, .text = "Notepad", .item = 31}}));
+}
+
 TEST(MenuModel, ShortenCountsCodePointsAndNeverSplitsOne)
 {
     EXPECT_EQ(Shorten("abc", 3), "abc");

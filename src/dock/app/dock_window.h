@@ -143,8 +143,12 @@ class DockWindow : private adapters::IIslandAccess
     void SetHovered(std::optional<std::size_t> hovered);
     std::optional<std::size_t> ItemAtClient(LPARAM position) const;
     // A click or UI Automation's Invoke (docs/adr/0010): brings a window forward, minimizes one, or starts
-    // the item. how is for the log.
+    // the item; the "…" button opens the overflow menu. how is for the log.
     bool ClickItem(std::size_t index, std::string_view how);
+    // The same for dock item index, on the island or behind the "…" button.
+    bool ClickSlot(std::size_t index, std::string_view how);
+    // The "…" button's menu of the items that didn't fit, with their icons.
+    void OpenOverflowMenu(std::string_view how);
     // Starts a pinned item. False for anything else.
     bool LaunchItem(std::size_t index, std::string_view how);
     // Brings another app's window to the front (restoring it first), without waiting on the app.
@@ -167,6 +171,9 @@ class DockWindow : private adapters::IIslandAccess
     std::optional<std::size_t> IndexOfKey(std::uint64_t key) const override;
     std::wstring ItemName(std::size_t index) const override;
     std::wstring ItemStatus(std::size_t index) const override;
+    bool IsOverflow(std::size_t index) const override;
+    bool IsOverflowMenuOpen() const override;
+    void CloseMenu() override;
     RECT ItemBounds(std::size_t index) const override;
     std::optional<std::size_t> ItemAt(POINT screenPoint) const override;
     bool InvokeItem(std::size_t index) override;
@@ -220,8 +227,13 @@ class DockWindow : private adapters::IIslandAccess
     std::optional<std::size_t> m_hovered;
     bool m_trackingMouse = false;
     bool m_highContrast = false;
-    // A menu's loop is running (one at a time).
+    // A menu's loop is running (one at a time), and whether it is the overflow menu.
     bool m_menuOpen = false;
+    bool m_overflowMenuOpen = false;
+    // The "…" button's place, when items don't fit (the items from there on are in its menu), and how many
+    // items there were when that was logged.
+    std::optional<std::size_t> m_overflow;
+    std::size_t m_overflowCount = 0;
     // The name label's window (null if composition can't draw it), and the item it shows, if shown.
     HWND m_label = nullptr;
     std::optional<std::size_t> m_labelItem;

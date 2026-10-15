@@ -38,12 +38,14 @@ The options for a blurred, rounded surface in a plain Win32 process:
 - **Layout** (`core/island/layout`, pure): 48 DIP icons, 8 padding, 6 gap, 8 margin, scaled by the primary
   monitor's DPI; icons shrink to 24 DIP on a narrow screen, then items are left off; an empty dock is one empty
   slot wide. Every point of the island belongs to the nearest item (no dead zones). `WM_DPICHANGED`'s
-  suggested rectangle is ignored: the layout follows the primary monitor wherever the window is.
+  suggested rectangle is ignored: the layout follows the primary monitor wherever the window is (from M3,
+  the dock's monitor: ADR 0011).
 - **Icons are files, not shell code in the dock.** Extracting icons in-process cost 33 MB (spike). Harbor
   Shell extracts them and writes raw premultiplied BGRA files (contracts/README.md); the dock reads them on
   each redraw instead of keeping 10 MB of decoded pixels.
 - **Rule 1:** the taskbar may be hidden only while the island is on screen (`GuardPolicy` rule 7, see
-  ADR 0007): committed, visible, on the primary monitor. Not presentable is a reason not to hide, not a block
+  ADR 0007): committed, visible, on the primary monitor (from M3: not cloaked, inside one connected monitor,
+  ADR 0011). Not presentable is a reason not to hide, not a block
   the user must clear, so the IPC contract didn't change. A lost graphics device takes the island off
   screen (the taskbar comes back), gets a new device and redraws; after 5 failures 2 s apart the dock exits
   with `GraphicsUnavailable` (0x20000003), which Harbor Shell doesn't restart. `DisableProcessWindowsGhosting`

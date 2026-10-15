@@ -17,7 +17,7 @@ must stop above the dock; and the dock must work with screen readers (rule 7's s
 - First run writes File Explorer, Microsoft Edge, Windows Terminal and Settings; apps that aren't installed
   are left off the dock (not out of the file).
 - The file is edited by hand until M5, so decoding says what's wrong and where, and an existing file is
-  never overwritten. A `FileSystemWatcher` (debounced) follows edits; a broken or half-saved file keeps the
+  never overwritten (from M3, pinning from the dock writes it, only if unchanged: ADR 0010). A `FileSystemWatcher` (debounced) follows edits; a broken or half-saved file keeps the
   last good list (no flash of the defaults) and Harbor Shell shows the problem.
 
 **Harbor Shell resolves apps; the dock only draws and launches.** `dockItems` v1 (Shell → dock) carries each
@@ -68,6 +68,6 @@ inspects never loads UI Automation. After the items change, old providers answer
 - No new dependencies: COM, the shell, UI Automation and C++/WinRT come with Windows and its SDK, on both
   architectures.
 - Narrator's keyboard can't reach a never-activated window; a focus hotkey comes with the settings UI (M5).
-- Overflow (more pins than fit) leaves items off with a log line; an overflow menu comes with M3.
+- Overflow (more pins than fit) leaves items off with a log line; an overflow menu comes with M3 (ADR 0010).
 - Changing the taskbar's auto-hide in Windows while Harbor hides it isn't noticed (`ABN_STATECHANGE` can't tell
   the user's change from Harbor's); revisited with onboarding (M5).

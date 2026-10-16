@@ -198,7 +198,7 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
                                      .iconsDir = dataDir.empty() ? dataDir : dataDir / L"icons",
                                      .testAppBar = testMode,
                                      .windowClassPrefix = windowClassPrefix,
-                                     .opensStart = !testMode || options.testForeground});
+                                     .takesForeground = !testMode || options.testForeground});
     switch (window.Create(instance))
     {
     case harbor::dock::DockWindow::CreateResult::Created:

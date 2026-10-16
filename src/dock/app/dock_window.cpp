@@ -79,6 +79,12 @@ constexpr int kTriggerRaise = 2;
 constexpr UINT_PTR kTuckTimer = 7;
 constexpr UINT_PTR kFullScreenTimer = 8;
 constexpr UINT kFullScreenLookMs = 1000;
+// The Start button pressed the island's hotkey: if the island isn't open this much later, Windows' Start
+// opens instead (docs/adr/0015).
+constexpr UINT_PTR kIslandTimer = 9;
+constexpr UINT kIslandAnswerMs = 500;
+// A launch the island asked for, not one of the dock's items (Launcher's index).
+constexpr std::size_t kIslandLaunch = std::numeric_limits<std::size_t>::max();
 // Posted to look at the island's place again after a display change was handled (see UpdatePresentable).
 constexpr UINT kRecheckPresentable = WM_APP + 18;
 constexpr UINT kDeviceRetryMs = 2000;
@@ -380,7 +386,9 @@ void DockWindow::StartControlChannel()
                     guard.PostRequest(setTaskbar->hidden);
                 }
                 else if (std::holds_alternative<ipc::DockItems>(message) ||
-                         std::holds_alternative<ipc::AppInfo>(message))
+                         std::holds_alternative<ipc::AppInfo>(message) ||
+                         std::holds_alternative<ipc::IslandState>(message) ||
+                         std::holds_alternative<ipc::Launch>(message))
                 {
                     // In one queue, in order: an appInfo may name a pin from the dockItems before it.
                     switch (received.Push(message))
@@ -432,6 +440,13 @@ void DockWindow::OnConnectionChanged(bool connected)
     m_lookedUp.clear();
     m_lookupsInFlight.clear();
     SendLookups();
+    // Nor where the dock is. Its island is gone with it until it says otherwise.
+    m_sentDockState.reset();
+    SendDockState();
+    if (!connected)
+    {
+        OnIslandState({});
+    }
 }
 
 void DockWindow::OnControlMessages()
@@ -453,6 +468,14 @@ void DockWindow::OnControlMessages()
             auto& known = m_appInfo[info->id];
             appsChanged = appsChanged || known != *info;
             known = std::move(*info);
+        }
+        else if (const auto* islandState = std::get_if<ipc::IslandState>(&message))
+        {
+            OnIslandState(*islandState);
+        }
+        else if (const auto* launch = std::get_if<ipc::Launch>(&message))
+        {
+            OnIslandLaunch(launch->item);
         }
     }
     if (itemsChanged || appsChanged)
@@ -603,9 +626,15 @@ std::vector<island::ItemMarks> DockWindow::VisibleMarks() const
             marks.push_back({.attention = attention});
             continue;
         }
+        if (place.kind == island::SlotMap::Kind::Start)
+        {
+            // A dot while the island is open, as under a running app.
+            marks.push_back({.running = m_island.open});
+            continue;
+        }
         if (place.kind != island::SlotMap::Kind::Slot || place.slot >= m_model.slots.size())
         {
-            // The Start and tray buttons.
+            // The tray button.
             marks.push_back({});
             continue;
         }
@@ -800,6 +829,8 @@ void DockWindow::UpdatePresentable(bool recheck)
         // The taskbar may only be hidden while the island is on screen.
         m_guard.PostPresentable(presentable);
     }
+    // Whatever moved, tucked, showed or hid the dock went through here: Harbor Shell's island follows.
+    SendDockState();
 }
 
 std::optional<std::size_t> DockWindow::ItemAtClient(LPARAM position) const
@@ -916,7 +947,7 @@ bool DockWindow::ClickItem(std::size_t index, std::string_view how)
     switch (place.kind)
     {
     case island::SlotMap::Kind::Start:
-        OpenWindowsStart(how);
+        OpenStart(how);
         return true;
     case island::SlotMap::Kind::Tray:
         PeekTaskbar(how);
@@ -949,13 +980,125 @@ void DockWindow::OpenWindowsStart(std::string_view how)
     // Until the island opens instead (docs/adr/0015): Windows' Start, as the Windows key would. Windows
     // documents SC_TASKLIST as "activates the Start menu"; no keys are injected, so a held Shift can't make
     // it Ctrl+Shift+Esc, and an elevated window in front doesn't stop it.
-    if (!m_options.opensStart)
+    if (!m_options.takesForeground)
     {
         m_log.Info(std::format("click: Start ({}): Windows Start (a test dock: not opened)", how));
         return;
     }
     PostMessageW(m_hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
     m_log.Info(std::format("click: Start ({}): Windows Start", how));
+}
+
+void DockWindow::OpenStart(std::string_view how)
+{
+    if (!m_island.ready || !m_island.hotkey)
+    {
+        OpenWindowsStart(how);
+        return;
+    }
+    PressIslandHotkey(*m_island.hotkey, how);
+    KillTimer(m_hwnd, kIslandTimer);
+    m_islandAskedAt.reset();
+    // Open already: the same key closes it, nothing to wait for.
+    if (!m_island.open)
+    {
+        m_islandAskedAt = SteadyNow();
+        SetTimer(m_hwnd, kIslandTimer, kIslandAnswerMs, nullptr);
+    }
+}
+
+void DockWindow::PressIslandHotkey(std::uint32_t key, std::string_view how)
+{
+    if (!m_options.takesForeground)
+    {
+        m_log.Info(std::format("click: Start ({}): the island's hotkey (a test dock: not pressed)", how));
+        return;
+    }
+    // Pressed and released at once, in one SendInput: nothing else can come between them. The hotkey's owner,
+    // Harbor Shell, may take the foreground for it (M4 spike).
+    INPUT keys[2]{};
+    for (auto& input : keys)
+    {
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = static_cast<WORD>(key);
+    }
+    keys[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    const UINT sent = SendInput(2, keys, sizeof(INPUT));
+    m_log.Info(sent == 2 ? std::format("click: Start ({}): the island's hotkey", how)
+                         : std::format("click: Start ({}): the island's hotkey wasn't pressed ({})", how,
+                                       GetLastError()));
+}
+
+void DockWindow::OnIslandState(const ipc::IslandState& state)
+{
+    if (state == m_island)
+    {
+        return;
+    }
+    const bool openChanged = state.open != m_island.open;
+    if (state.ready != m_island.ready)
+    {
+        m_log.Info(state.ready ? "island: ready" : "island: not ready");
+    }
+    if (openChanged)
+    {
+        m_log.Info(state.open ? "island: open" : "island: closed");
+    }
+    m_island = state;
+    if (state.open && m_islandAskedAt)
+    {
+        m_log.Info(std::format("island: opened {} ms after the Start button",
+                               (SteadyNow() - *m_islandAskedAt).count()));
+        m_islandAskedAt.reset();
+        KillTimer(m_hwnd, kIslandTimer);
+    }
+    if (openChanged)
+    {
+        // The Start button's dot shows the island is open.
+        m_renderer.SetMarks(VisibleMarks());
+    }
+}
+
+void DockWindow::OnIslandLaunch(const ipc::AppTarget& item)
+{
+    if (!m_launcher)
+    {
+        return;
+    }
+    // The user asked, in the island: whatever starts may take the foreground. Which app is the user's
+    // business.
+    AllowSetForegroundWindow(ASFW_ANY);
+    m_log.Info("launch: from the island");
+    m_launcher->Launch(kIslandLaunch, ipc::DockItem{item.kind, item.target, {}, std::nullopt});
+}
+
+void DockWindow::SendDockState()
+{
+    if (!m_connected || m_hosts.empty())
+    {
+        return;
+    }
+    const auto& host = m_hosts[DockHost()];
+    // Within the contract's bounds, whatever Windows says.
+    const auto clamp = [](const geometry::Rect& rect) {
+        const auto side = [](int value) {
+            return std::clamp(value, -ipc::DockState::kMaxCoordinate, ipc::DockState::kMaxCoordinate);
+        };
+        return geometry::Rect{side(rect.left), side(rect.top), side(rect.right), side(rect.bottom)};
+    };
+    const ipc::DockState state{
+        .monitor = clamp(host.monitor.bounds),
+        .work = clamp(host.monitor.work),
+        .dpi = std::clamp(host.monitor.dpi, ipc::DockState::kMinDpi, ipc::DockState::kMaxDpi),
+        .fullScreen = host.fullScreen.IsOpen(),
+        .visible = m_shown && IsWindowVisible(m_hwnd) != FALSE,
+    };
+    if (state == m_sentDockState)
+    {
+        return;
+    }
+    m_sentDockState = state;
+    m_controlChannel.Send(state);
 }
 
 bool DockWindow::ClickSlot(std::size_t index, std::string_view how)
@@ -1317,6 +1460,10 @@ std::wstring DockWindow::ItemName(std::size_t index) const
 
 std::wstring DockWindow::ItemStatus(std::size_t index) const
 {
+    if (IsKind(index, island::SlotMap::Kind::Start))
+    {
+        return m_island.open ? L"island open" : L"";
+    }
     if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         const auto first = m_places.entries[index].slot;
@@ -1815,20 +1962,23 @@ void DockWindow::OnLaunched(LaunchReport* report)
 {
     const std::unique_ptr<LaunchReport> owned(report);
     const auto& result = owned->result;
+    // Which item, or that the island asked; never which app.
+    const auto what =
+        owned->index == kIslandLaunch ? std::string("from the island") : std::format("item {}", owned->index);
     if (FAILED(result.result))
     {
-        m_log.Warn(std::format("launch: item {} failed: 0x{:08X} (Explorer: 0x{:08X})", owned->index,
+        m_log.Warn(std::format("launch: {} failed: 0x{:08X} (Explorer: 0x{:08X})", what,
                                static_cast<std::uint32_t>(result.result),
                                static_cast<std::uint32_t>(result.explorerResult)));
     }
     else if (result.route == adapters::LaunchRoute::Explorer)
     {
-        m_log.Info(std::format("launch: item {} started via Explorer", owned->index));
+        m_log.Info(std::format("launch: {} started via Explorer", what));
     }
     else
     {
-        m_log.Info(std::format("launch: item {} started via ShellExecuteEx (Explorer: 0x{:08X})",
-                               owned->index, static_cast<std::uint32_t>(result.explorerResult)));
+        m_log.Info(std::format("launch: {} started via ShellExecuteEx (Explorer: 0x{:08X})", what,
+                               static_cast<std::uint32_t>(result.explorerResult)));
     }
 }
 
@@ -2031,6 +2181,18 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         if (wParam == kFullScreenTimer)
         {
             LookAgainAtFullScreen();
+            return 0;
+        }
+        if (wParam == kIslandTimer)
+        {
+            KillTimer(m_hwnd, kIslandTimer);
+            if (m_islandAskedAt && !m_island.open)
+            {
+                m_islandAskedAt.reset();
+                m_log.Warn(std::format("island: not open {} ms after its hotkey; Windows Start instead",
+                                       kIslandAnswerMs));
+                OpenWindowsStart("the island didn't open");
+            }
             return 0;
         }
         if (wParam == kLabelTimer)

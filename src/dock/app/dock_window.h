@@ -59,9 +59,9 @@ class DockWindow : private adapters::IIslandAccess
         bool testAppBar = false;
         // Test docks: follow only windows whose class starts with this (WindowTracker); empty: every window.
         std::string windowClassPrefix;
-        // The Start button opens Windows' Start. Test docks only with --test-foreground: a local test run
-        // must never open the user's Start.
-        bool opensStart = true;
+        // The Start button may do what takes the foreground: open Windows' Start, press the island's hotkey.
+        // Test docks only with --test-foreground: a local test run must never take the user's focus.
+        bool takesForeground = true;
     };
 
     enum class CreateResult
@@ -197,8 +197,17 @@ class DockWindow : private adapters::IIslandAccess
     std::optional<std::size_t> SlotAt(std::size_t index) const;
     // Place index holds that kind of button.
     bool IsKind(std::size_t index, island::SlotMap::Kind kind) const;
-    // The Start button, until the island opens instead (docs/adr/0015): Windows' Start.
+    // The Start button (docs/adr/0015): the island through its hotkey when Harbor Shell has it ready, else
+    // (or if it doesn't open within kIslandAnswerMs) Windows' Start.
+    void OpenStart(std::string_view how);
     void OpenWindowsStart(std::string_view how);
+    // Presses the island's private hotkey (F13-F24): Harbor Shell gets the foreground from it.
+    void PressIslandHotkey(std::uint32_t key, std::string_view how);
+    // Harbor Shell's islandState, and a launch it asks for.
+    void OnIslandState(const ipc::IslandState& state);
+    void OnIslandLaunch(const ipc::AppTarget& item);
+    // Tells Harbor Shell where the dock is (dockState), if that changed since it was last told.
+    void SendDockState();
     // The same for dock item index, on the island or behind the "…" button.
     bool ClickSlot(std::size_t index, std::string_view how);
     // The "…" button's menu of the items that didn't fit, with their icons.
@@ -301,6 +310,11 @@ class DockWindow : private adapters::IIslandAccess
     wil::unique_hwineventhook m_cloakHook;
     UINT m_taskbarCreatedMessage = 0;
     bool m_connected = false;
+    // What Harbor Shell was last told on this connection (dockState), and what it said of the island; and
+    // when the Start button pressed the island's hotkey, while waiting for it to open.
+    std::optional<ipc::DockState> m_sentDockState;
+    ipc::IslandState m_island;
+    std::optional<std::chrono::milliseconds> m_islandAskedAt;
 
     // What is on screen.
     std::optional<island::Layout> m_layout;

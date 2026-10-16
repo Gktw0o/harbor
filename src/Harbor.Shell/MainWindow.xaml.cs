@@ -1,6 +1,5 @@
 using System.Diagnostics;
 using Harbor.Core;
-using Harbor.Core.Apps;
 using Harbor.Core.Ipc;
 using Harbor.Core.Logging;
 using Harbor.Core.Settings;
@@ -10,29 +9,28 @@ using Microsoft.UI.Xaml;
 
 namespace Harbor.Shell;
 
+// Harbor Shell's status window: shows what the host reports and calls its commands. Closing it ends the Shell.
 public sealed partial class MainWindow : Window
 {
-    private readonly string _pipeName;
-    private readonly FileLog _log;
+    private readonly ShellHost _host;
+    private readonly ILog _log;
     private readonly DockSupervisor _supervisor;
     private readonly SettingsFile _settingsFile;
     private bool _updatingToggle;
 
-    public MainWindow(FileLog log)
+    public MainWindow(ShellHost host)
     {
         InitializeComponent();
-        _log = log;
+        _host = host;
+        _log = host.Log;
+        _supervisor = host.Supervisor;
+        _settingsFile = host.Settings;
+        if (host.Options.TestMode)
+        {
+            Title = "Harbor Shell (test)";
+        }
+        StatusText.Text = $"Waiting for the dock on {host.PipeName}";
 
-        using var process = Process.GetCurrentProcess();
-        _pipeName = PipeNames.For(PipeNames.ControlChannel, (uint)process.SessionId);
-        StatusText.Text = $"Waiting for the dock on {_pipeName}";
-
-        var restorer = new TaskbarRestorer(TaskbarTarget.Real, RestoreRecord.PathIn(HarborPaths.DefaultDataDir), log);
-        _supervisor = new DockSupervisor(
-            new DockSupervisorOptions { DockExePath = Path.Combine(AppContext.BaseDirectory, "harbor-dock.exe") },
-            new ControlPipeServer(_pipeName, log),
-            restorer,
-            log);
         _supervisor.LinkStatusChanged += status => DispatcherQueue.TryEnqueue(() => StatusText.Text = Describe(status));
         _supervisor.DockStatusChanged += status => DispatcherQueue.TryEnqueue(() => ShowDockStatus(status));
         _supervisor.TaskbarRestored += restore => DispatcherQueue.TryEnqueue(() => TaskbarText.Text = Describe(restore));
@@ -44,71 +42,27 @@ public sealed partial class MainWindow : Window
             HideToggle.IsOn = hidden;
             _updatingToggle = false;
         });
+        host.SettingsProblemChanged += problem => DispatcherQueue.TryEnqueue(() => ShowSettingsProblem(problem));
+        host.PinnedChanged += items => DispatcherQueue.TryEnqueue(() => ShowPinned(items));
+        host.PinRequestHandled += (request, result) => DispatcherQueue.TryEnqueue(() => ShowPinRequest(request, result));
 
-        // Pinned apps: settings.json -> looked up -> dockItems to whichever dock is connected.
-        _settingsFile = new SettingsFile(HarborPaths.DefaultDataDir, log);
-        var settings = new SettingsWatcher(_settingsFile, log);
-        var icons = new IconStore(HarborPaths.DefaultDataDir, log);
-        var publisher = new DockItemsPublisher(new ShellPinResolver(icons), log, icons);
-        settings.Changed += publisher.Update;
-        settings.ProblemChanged += problem => DispatcherQueue.TryEnqueue(() => ShowSettingsProblem(problem));
-        publisher.Built += _supervisor.SetDockItems;
-        publisher.Built += items => DispatcherQueue.TryEnqueue(() => ShowPinned(items));
-
-        // Running apps: the dock asks (appLookup), the Shell names them (appInfo), after any new dockItems.
-        var apps = new AppLookupService(new ShellAppResolver(icons), log, icons);
-        _supervisor.AppLookupReceived += apps.Lookup;
-        _supervisor.LinkStatusChanged += status =>
-        {
-            if (!status.Connected)
-            {
-                apps.Disconnected();
-            }
-        };
-        publisher.Built += apps.SetPins;
-        apps.Answered += _supervisor.SendToDock;
-        // Pin and unpin from the dock's menu: settings.json changes, and the settings watcher sends the new list.
-        _supervisor.PinRequestReceived += request => _ = ApplyPinRequestAsync(request);
-
-        // Never disposed on purpose: it uses no timer or wait handle, and the supervisor may still observe the
-        // token after the window closes.
+        // Never disposed on purpose: it uses no timer or wait handle, and the host may still observe the token
+        // after the window closes.
         var shutdown = new CancellationTokenSource();
         Closed += (_, _) => shutdown.Cancel();
-        _ = RunSupervisorAsync(shutdown.Token);
-        _ = RunQuietlyAsync("settings", settings.RunAsync, shutdown.Token);
-        _ = RunQuietlyAsync("dock items", publisher.RunAsync, shutdown.Token);
-        _ = RunQuietlyAsync("apps", apps.RunAsync, shutdown.Token);
+        _ = RunHostAsync(shutdown.Token);
     }
 
-    // A background loop that ends with the window; a failure is logged, not thrown at the UI.
-    private async Task RunQuietlyAsync(string name, Func<CancellationToken, Task> run, CancellationToken cancellationToken)
+    private async Task RunHostAsync(CancellationToken cancellationToken)
     {
         try
         {
-            await Task.Run(() => run(cancellationToken), cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (Exception exception)
-        {
-            _log.Error($"{name}: stopped: {exception}");
-        }
-    }
-
-    private async Task RunSupervisorAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            await _supervisor.RunAsync(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
+            await _host.RunAsync(cancellationToken);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            _log.Error($"couldn't serve {_pipeName}: {exception.Message}");
-            DockText.Text = $"Another process already owns {_pipeName}. Is Harbor Shell already running?";
+            _log.Error($"couldn't serve {_host.PipeName}: {exception.Message}");
+            DockText.Text = $"Another process already owns {_host.PipeName}. Is Harbor Shell already running?";
             RestoreButton.IsEnabled = false;
         }
     }
@@ -135,16 +89,12 @@ public sealed partial class MainWindow : Window
             : string.Join("\n", items.Items.Select(item => item.Name));
 
     // A refused request is shown (it may need the user to fix settings.json); one that worked shows in the list.
-    private async Task ApplyPinRequestAsync(PinRequest request)
+    private void ShowPinRequest(PinRequest request, SettingsChangeResult result)
     {
-        var result = await PinChanges.ApplyAsync(_settingsFile, request, _log);
-        DispatcherQueue.TryEnqueue(() =>
-        {
-            PinRequestText.Text = result.Written
-                ? ""
-                : $"Couldn't {(request.Action == PinAction.Pin ? "pin" : "unpin")} that app: {result.Outcome}.";
-            PinRequestText.Visibility = result.Written ? Visibility.Collapsed : Visibility.Visible;
-        });
+        PinRequestText.Text = result.Written
+            ? ""
+            : $"Couldn't {(request.Action == PinAction.Pin ? "pin" : "unpin")} that app: {result.Outcome}.";
+        PinRequestText.Visibility = result.Written ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void ShowSettingsProblem(string? problem)
@@ -233,7 +183,7 @@ public sealed partial class MainWindow : Window
 
     private string Describe(ControlLinkStatus status) => status switch
     {
-        { Connected: false } => $"Waiting for the dock on {_pipeName}",
+        { Connected: false } => $"Waiting for the dock on {_host.PipeName}",
         { LastPongSeq: { } seq, RoundTrip: { } roundTrip } => $"Dock connected · pong {seq} · {roundTrip.TotalMilliseconds:0.0} ms",
         _ => "Dock connected",
     };

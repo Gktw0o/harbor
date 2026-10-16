@@ -14,6 +14,7 @@ add_library(harbor_dock_core STATIC
     core/island/monitors.cpp
     core/island/on_screen.cpp
     core/island/slot_map.cpp
+    core/island/full_screen.cpp
     core/island/tuck.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp

@@ -73,6 +73,11 @@ constexpr UINT_PTR kEdgeTimer = 6;
 constexpr UINT kEdgeRestMs = 400;
 // Explorer's auto-hidden taskbar keeps a monitor's last 2 px: the trigger row sits above them.
 constexpr int kTriggerRaise = 2;
+// The tuck's own timer (island::Tuck::WakeAt), and the look at full-screen apps every second while one is
+// open (docs/adr/0014): Explorer's "closed" is unreliable.
+constexpr UINT_PTR kTuckTimer = 7;
+constexpr UINT_PTR kFullScreenTimer = 8;
+constexpr UINT kFullScreenLookMs = 1000;
 // Posted to look at the island's place again after a display change was handled (see UpdatePresentable).
 constexpr UINT kRecheckPresentable = WM_APP + 18;
 constexpr UINT kDeviceRetryMs = 2000;
@@ -514,6 +519,8 @@ void DockWindow::OnWindowsChanged()
             SendLookups();
         }
     }
+    // The foreground may have changed: a full-screen app may have ended without Explorer saying so.
+    LookAgainAtFullScreen();
 }
 
 void DockWindow::RebuildModel(bool force)
@@ -662,10 +669,10 @@ void DockWindow::Refresh(bool force)
     m_tray = tray;
 
     const auto& island = layout.island;
-    // Behind a full-screen app, above everything else.
+    // Tucked behind a full-screen app, else above everything.
     // One call, never a hide and a show: the island must stay on screen while it moves (docs/adr/0011).
-    SetWindowPos(m_hwnd, host.fullScreen ? HWND_BOTTOM : HWND_TOPMOST, island.left, island.top,
-                 island.Width(), island.Height(), SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    SetWindowPos(m_hwnd, m_tucked ? HWND_BOTTOM : HWND_TOPMOST, island.left, island.top, island.Width(),
+                 island.Height(), SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     // Clicks on the transparent corners go to the window below.
     const int diameter = 2 * metrics.cornerRadius;
     SetWindowRgn(m_hwnd,
@@ -765,6 +772,9 @@ void DockWindow::UpdatePresentable(bool recheck)
     // On screen: drawn, visible, not cloaked, and inside one connected monitor (docs/adr/0011).
     island::WindowFacts facts{.committed = m_committed && m_layout.has_value(),
                               .visible = IsWindowVisible(m_hwnd) != FALSE};
+    // Tucked behind a full-screen app, it counts only while its trigger can bring it back (docs/adr/0014).
+    facts.tucked = m_tucked;
+    facts.triggerArmed = DockTriggerArmed();
     DWORD cloaked = 0;
     facts.cloaked =
         SUCCEEDED(DwmGetWindowAttribute(m_hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0;
@@ -876,6 +886,7 @@ void DockWindow::OnMouseMove(LPARAM position)
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, m_hwnd, 0};
         m_trackingMouse = TrackMouseEvent(&track) != FALSE;
     }
+    ReportPointer(true);
     SetHovered(ItemAtClient(position));
 }
 
@@ -1012,6 +1023,8 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
     const auto& button = m_layout->items[first];
     const auto& island = m_layout->island;
     HideLabel();
+    // An open menu keeps the island on top over a full-screen app.
+    ReportPointer(true);
     m_menuOpen = true;
     m_overflowMenuOpen = true;
     const auto chosen = adapters::PopupMenu::Show(
@@ -1020,6 +1033,7 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
         {.style = m_style, .dpi = m_dpi, .highContrast = m_highContrast}, icons, static_cast<int>(side));
     m_overflowMenuOpen = false;
     m_menuOpen = false;
+    ReportPointer(PointerOverDock());
     m_log.Info(std::format("menu: the overflow menu ({}, {} items){}", how, names.size(),
                            chosen ? std::format(": item {} chosen", menu[*chosen].item) : ""));
     if (chosen)
@@ -1074,12 +1088,14 @@ void DockWindow::OpenMenu(std::size_t index, std::string_view how)
     const auto& item = m_layout->items[index];
     const auto& island = m_layout->island;
     HideLabel();
+    ReportPointer(true);
     m_menuOpen = true;
     const auto chosen =
         adapters::PopupMenu::Show(m_hwnd, menu, {(item.left + item.right) / 2, island.top},
                                   {island.left, island.top, island.right, island.bottom},
                                   {.style = m_style, .dpi = m_dpi, .highContrast = m_highContrast});
     m_menuOpen = false;
+    ReportPointer(PointerOverDock());
     if (!chosen)
     {
         return;
@@ -1366,6 +1382,8 @@ void DockWindow::SyncHosts()
     {
         m_log.Info(std::format("appbar: {} monitors (was {}), notify-only on each: no strip", m_hosts.size(),
                                before));
+        // The island's monitor may have gone with its full-screen app.
+        OnFullScreenChanged();
     }
 }
 
@@ -1412,9 +1430,12 @@ void DockWindow::PlaceTriggers()
     for (std::size_t i = 0; i < m_hosts.size(); ++i)
     {
         auto& host = m_hosts[i];
-        // Not on the dock's own monitor, not while off (panic), not over a full-screen app.
+        // Not while off (panic). Elsewhere, not over a full-screen app (a game, say); on the dock's own
+        // monitor, only over one: there it brings the tucked island back (docs/adr/0014).
+        const bool wanted =
+            i == dock ? host.fullScreen.IsOpen() && !m_testTriggerBroken : !host.fullScreen.IsOpen();
         std::vector<geometry::Rect> triggers;
-        if (i != dock && m_triggersOn && !host.fullScreen && m_shown)
+        if (wanted && m_triggersOn && m_shown)
         {
             const auto height = static_cast<int>(island::Scale(
                 island::kIconDip + 2 * island::kPaddingDip + 2 * island::kMarginDip, host.monitor.dpi));
@@ -1437,10 +1458,17 @@ void DockWindow::PlaceTriggers()
 
 void DockWindow::OnHostMouseMove(std::size_t index)
 {
-    if (!m_triggersOn || index == DockHost() || m_windows.movingOrSizing || m_menuOpen ||
+    const bool here = index == DockHost();
+    if (!m_triggersOn || (here && !m_tuck.FullScreen()) || m_windows.movingOrSizing || m_menuOpen ||
         (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0)
     {
         return;
+    }
+    if (here)
+    {
+        // Leaving it may let the island tuck again.
+        TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, m_hosts[index].window, 0};
+        TrackMouseEvent(&track);
     }
     if (m_triggerHost != index)
     {
@@ -1467,6 +1495,12 @@ void DockWindow::OnEdgeTimer()
     {
         return;
     }
+    if (*index == DockHost())
+    {
+        // The dock's own monitor: the island comes back over the full-screen app.
+        ReportPointer(true);
+        return;
+    }
     MoveDock(*index);
 }
 
@@ -1478,11 +1512,11 @@ void DockWindow::MoveDock(std::size_t index)
     m_log.Info(std::format("island: moves to monitor {} of {}", index + 1, m_hosts.size()));
     m_hovered.reset();
     Refresh(/*force=*/true);
+    OnFullScreenChanged();
 }
 
 void DockWindow::OnAppBarNotification(std::size_t index, WPARAM notification, LPARAM lParam)
 {
-    auto& host = m_hosts[index];
     switch (notification)
     {
     case ABN_POSCHANGED:
@@ -1491,22 +1525,7 @@ void DockWindow::OnAppBarNotification(std::size_t index, WPARAM notification, LP
         PostMessageW(m_hwnd, kWorkAreaMayHaveChanged, 0, 0);
         break;
     case ABN_FULLSCREENAPP:
-        if (host.fullScreen == (lParam != 0))
-        {
-            break;
-        }
-        host.fullScreen = lParam != 0;
-        if (index == DockHost())
-        {
-            // On the island's monitor: step behind it, like the taskbar does. The island stays on screen in
-            // GuardPolicy's sense, as the hidden taskbar would have been covered too.
-            m_log.Info(host.fullScreen ? "appbar: a full-screen app opened; the island steps behind it"
-                                       : "appbar: the full-screen app closed; the island is on top again");
-            SetWindowPos(m_hwnd, host.fullScreen ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-        // Elsewhere: that monitor's trigger goes rather than cover the app (a game, say).
-        PlaceTriggers();
+        OnFullScreenNotice(index, lParam != 0);
         break;
     case ABN_STATECHANGE:
         // The taskbar's auto-hide or always-on-top changed. Harbor sets auto-hide itself while it hides the
@@ -1516,6 +1535,170 @@ void DockWindow::OnAppBarNotification(std::size_t index, WPARAM notification, LP
     default:
         break;
     }
+}
+
+void DockWindow::OnFullScreenNotice(std::size_t index, bool open)
+{
+    auto& host = m_hosts[index];
+    if (host.fullScreen.IsOpen() == open)
+    {
+        return;
+    }
+    if (open)
+    {
+        // The window in front is the app, if it covers the monitor (docs/adr/0014).
+        host.fullScreen.Open(host.monitor.bounds, JudgedForeground());
+    }
+    else
+    {
+        host.fullScreen.Close();
+    }
+    // Which monitor, never which app.
+    m_log.Info(
+        std::format("appbar: monitor {}: a full-screen app {}", index + 1, open ? "opened" : "closed"));
+    OnFullScreenChanged();
+}
+
+void DockWindow::LookAgainAtFullScreen()
+{
+    if (std::none_of(m_hosts.begin(), m_hosts.end(),
+                     [](const MonitorHost& host) { return host.fullScreen.IsOpen(); }))
+    {
+        return;
+    }
+    const auto foreground = JudgedForeground();
+    bool ended = false;
+    for (std::size_t i = 0; i < m_hosts.size(); ++i)
+    {
+        auto& host = m_hosts[i];
+        if (host.fullScreen.IsOpen() && !host.fullScreen.LookAgain(host.monitor.bounds, foreground))
+        {
+            m_log.Info(
+                std::format("appbar: monitor {}: the full-screen app ended (Explorer didn't say)", i + 1));
+            ended = true;
+        }
+    }
+    if (ended)
+    {
+        OnFullScreenChanged();
+    }
+}
+
+std::optional<island::Foreground> DockWindow::JudgedForeground() const
+{
+    const HWND foreground = GetForegroundWindow();
+    RECT bounds{};
+    if (foreground == nullptr || !GetWindowRect(foreground, &bounds))
+    {
+        return std::nullopt;
+    }
+    if (!m_options.windowClassPrefix.empty())
+    {
+        // Test docks judge only their own test windows: the user's never end a test's full screen.
+        std::wstring name(256, L'\0');
+        name.resize(static_cast<std::size_t>(std::max(GetClassNameW(foreground, name.data(), 256), 0)));
+        const std::wstring prefix(m_options.windowClassPrefix.begin(), m_options.windowClassPrefix.end());
+        if (!name.starts_with(prefix))
+        {
+            return std::nullopt;
+        }
+    }
+    return island::Foreground{ToId(foreground), FromRect(bounds)};
+}
+
+void DockWindow::OnFullScreenChanged()
+{
+    if (m_hosts.empty())
+    {
+        return;
+    }
+    const auto& host = m_hosts[DockHost()];
+    if (m_tuckMonitor != host.monitor.bounds)
+    {
+        // What was full screen on the old monitor doesn't apply here.
+        m_tuck.OnMonitorChanged();
+        m_tuckMonitor = host.monitor.bounds;
+    }
+    m_tuck.OnFullScreen(host.fullScreen.IsOpen(), SteadyNow());
+    // Looked at again every second while any monitor has one: no timer otherwise.
+    if (std::any_of(m_hosts.begin(), m_hosts.end(),
+                    [](const MonitorHost& each) { return each.fullScreen.IsOpen(); }))
+    {
+        SetTimer(m_hwnd, kFullScreenTimer, kFullScreenLookMs, nullptr);
+    }
+    else
+    {
+        KillTimer(m_hwnd, kFullScreenTimer);
+    }
+    ApplyTuck();
+}
+
+void DockWindow::ReportPointer(bool over)
+{
+    const auto wakeAt = m_tuck.WakeAt();
+    const bool tucked = m_tuck.Tucked();
+    m_tuck.OnPointer(over, SteadyNow());
+    if (m_tuck.WakeAt() != wakeAt || m_tuck.Tucked() != tucked)
+    {
+        ApplyTuck();
+    }
+}
+
+bool DockWindow::PointerOverDock() const
+{
+    POINT cursor{};
+    if (!GetCursorPos(&cursor))
+    {
+        return false;
+    }
+    const geometry::Point point{cursor.x, cursor.y};
+    // Behind a full-screen app, the island's place is the app's: only its trigger brings it back.
+    RECT island{};
+    if (!m_tucked && GetWindowRect(m_hwnd, &island) && FromRect(island).Contains(point))
+    {
+        return true;
+    }
+    RECT trigger{};
+    const HWND own = m_hosts.empty() ? nullptr : m_hosts[DockHost()].window;
+    return own != nullptr && IsWindowVisible(own) && GetWindowRect(own, &trigger) &&
+           FromRect(trigger).Contains(point);
+}
+
+bool DockWindow::DockTriggerArmed() const
+{
+    if (m_hosts.empty())
+    {
+        return false;
+    }
+    const auto& host = m_hosts[DockHost()];
+    RECT trigger{};
+    return m_triggersOn && host.window != nullptr && IsWindowVisible(host.window) &&
+           GetWindowRect(host.window, &trigger) && island::TriggerAtEdge(FromRect(trigger), host.monitor);
+}
+
+void DockWindow::ApplyTuck()
+{
+    // Its monitor's trigger first, so a tucked island is never without one (rule 7, docs/adr/0014).
+    PlaceTriggers();
+    if (const bool tucked = m_tuck.Tucked(); tucked != m_tucked)
+    {
+        m_tucked = tucked;
+        if (tucked)
+        {
+            HideLabel();
+        }
+        m_log.Info(tucked ? "island: tucked behind a full-screen app" : "island: on top again");
+        // Behind the app, still shown: the window never hides for it.
+        SetWindowPos(m_hwnd, tucked ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    KillTimer(m_hwnd, kTuckTimer);
+    if (const auto wakeAt = m_tuck.WakeAt())
+    {
+        const auto delay = std::max<std::int64_t>((*wakeAt - SteadyNow()).count(), 1);
+        SetTimer(m_hwnd, kTuckTimer, static_cast<UINT>(delay), nullptr);
+    }
+    UpdatePresentable();
 }
 
 LRESULT CALLBACK DockWindow::HostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1546,6 +1729,19 @@ LRESULT CALLBACK DockWindow::HostProc(HWND hwnd, UINT message, WPARAM wParam, LP
     case WM_MOUSEMOVE:
         self->OnHostMouseMove(index);
         return 0;
+    case WM_MOUSELEAVE:
+        if (index == self->DockHost())
+        {
+            self->ReportPointer(self->PointerOverDock());
+        }
+        return 0;
+    case WM_WINDOWPOSCHANGED:
+        // The dock's own trigger shown, hidden or moved: a tucked island may depend on it (rule 7).
+        if (index == self->DockHost())
+        {
+            self->UpdatePresentable();
+        }
+        return DefWindowProcW(hwnd, message, wParam, lParam);
     case kAppBarCallback:
         self->OnAppBarNotification(index, wParam, lParam);
         return 0;
@@ -1696,6 +1892,22 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         m_log.Warn("test hook: hanging the UI thread");
         Sleep(INFINITE);
         return 0;
+    case kTestFullScreenMessage:
+        m_log.Warn(wParam != 0 ? "test hook: full screen on" : "test hook: full screen off");
+        if (!m_hosts.empty())
+        {
+            OnFullScreenNotice(DockHost(), wParam != 0);
+        }
+        return 0;
+    case kTestBreakTriggerMessage:
+        // Only the trigger goes: rule 7 must notice it by itself.
+        m_log.Warn("test hook: breaking the dock's own trigger");
+        m_testTriggerBroken = true;
+        if (!m_hosts.empty())
+        {
+            ShowWindow(m_hosts[DockHost()].window, SW_HIDE);
+        }
+        return 0;
     case TaskbarGuard::kStateMessage:
         if (const bool hidden = wParam != 0; hidden != m_taskbarHidden)
         {
@@ -1745,6 +1957,18 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             OnEdgeTimer();
             return 0;
         }
+        if (wParam == kTuckTimer)
+        {
+            KillTimer(m_hwnd, kTuckTimer);
+            m_tuck.OnTimer(SteadyNow());
+            ApplyTuck();
+            return 0;
+        }
+        if (wParam == kFullScreenTimer)
+        {
+            LookAgainAtFullScreen();
+            return 0;
+        }
         if (wParam == kLabelTimer)
         {
             KillTimer(m_hwnd, kLabelTimer);
@@ -1775,6 +1999,11 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSELEAVE:
         m_trackingMouse = false;
         SetHovered(std::nullopt);
+        // A menu's loop takes the mouse: the island stays while it is open.
+        if (!m_menuOpen)
+        {
+            ReportPointer(PointerOverDock());
+        }
         return 0;
     case WM_LBUTTONUP:
         OnClick(lParam);

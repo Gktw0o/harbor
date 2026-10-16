@@ -35,12 +35,16 @@ The M4 spike, with two monitors:
 
 **The tuck**, a pure `core/island/tuck` state machine:
 - `ABN_FULLSCREENAPP` "open" at the dock's monitor → after 2.5 s the island goes `HWND_BOTTOM`. The window
-  stays shown. Menus and the label close.
+  stays shown. The label closes; an open menu keeps the island on top until it closes.
 - Resting on the trigger → the island comes back on top over the full-screen app; leaving it → 1 s → tucked
   again.
 - On every foreground change (the window watcher already hooks it), the dock checks whether the foreground
   window still covers its monitor. If not, the full screen has ended: the island comes back on top whatever
   Explorer said. This covers the unreliable "closed".
+- (Step 4, `core/island/full_screen`.) Only the window that was in front at "open" counts: with Harbor's
+  auto-hide on, a maximized window covers the monitor too. The check also runs every second while a
+  full-screen app is open, because a browser leaving full screen (Esc) moves no focus. Nothing runs at idle.
+  Test docks judge only their own test windows, so the user's focus changes never end a test's full screen.
 
 **Rule 7, stricter.** `core/island/on_screen` gets two facts: `tucked` and `triggerArmed`.
 - A tucked island counts as on screen **only while its own monitor's trigger is armed**: the window exists,

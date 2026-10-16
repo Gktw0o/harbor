@@ -39,6 +39,7 @@ add_executable(harbor_dock_tests
     environment_tests.cpp
     explorer_worker_tests.cpp
     file_log_tests.cpp
+    full_screen_tests.cpp
     icon_downscale_tests.cpp
     guard_policy_tests.cpp
     latest_value_tests.cpp

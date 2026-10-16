@@ -35,4 +35,8 @@ std::vector<geometry::Rect> EdgeTriggers(std::span<const MonitorInfo> monitors, 
 bool RestsOnTrigger(const geometry::Rect& trigger, const MonitorInfo& monitor,
                     geometry::Point cursor) noexcept;
 
+// A trigger window (its row down to the edge) is where the cursor stops on monitor: inside it and reaching
+// its bottom edge. Part of rule 7 while the island is tucked (docs/adr/0014).
+bool TriggerAtEdge(const geometry::Rect& window, const MonitorInfo& monitor) noexcept;
+
 } // namespace harbor::island

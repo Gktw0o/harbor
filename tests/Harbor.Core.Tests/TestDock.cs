@@ -198,6 +198,21 @@ internal static partial class TestDock
         hook.Set();
     }
 
+    // The test hooks that say a full-screen app opened or closed on the dock's monitor, as Explorer's
+    // ABN_FULLSCREENAPP would (test AppBars hear nothing from Explorer), and that break the dock's own edge
+    // trigger (see DockWindow::kTestFullScreenMessage, docs/adr/0014).
+    public static void SetFullScreen(FakeTaskbar taskbar, bool fullScreen)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.{(fullScreen ? "fullscreen-on" : "fullscreen-off")}");
+        hook.Set();
+    }
+
+    public static void BreakTrigger(FakeTaskbar taskbar)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.break-trigger");
+        hook.Set();
+    }
+
     // The open menu's items as a screen reader sees them ("<control type>\t<name>"), invoking the one named.
     public static async Task<(int ExitCode, string[] Items)> UseMenuAsync(nint island, string? invoke = null)
     {

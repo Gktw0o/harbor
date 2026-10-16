@@ -129,6 +129,55 @@ public sealed class DockE2ETests
         }
     }
 
+    // A full-screen app on the dock's monitor (docs/adr/0014): a moment later the island steps behind it, still
+    // shown, and that monitor's edge trigger waits at the bottom edge to bring it back; when the app closes, the
+    // island is on top again and the trigger goes.
+    [TestMethod]
+    public async Task AFullScreenAppTucksTheIslandAfterAMoment()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        var timeout = TimeSpan.FromSeconds(15);
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+            var (monitor, _) = IslandWindow.PrimaryMonitor();
+            nint Trigger() => DockWindows.FindAppBars((uint)dock.Id).FirstOrDefault(IslandWindow.IsWindowVisible);
+            Assert.AreEqual((nint)0, Trigger(), "a trigger on the dock's own monitor without a full-screen app");
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            TestDock.SetFullScreen(taskbar, fullScreen: true);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: tucked behind a full-screen app", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            // 2.5 s (core/island/tuck has the exact rules); the mouse passing over the island or its trigger meanwhile
+            // tucks it 1 s after it left, so never sooner than that.
+            Assert.IsGreaterThanOrEqualTo(900L, watch.ElapsedMilliseconds, "tucked at once");
+            Assert.AreEqual(0L, IslandWindow.ExStyle(island) & IslandWindow.ExTopmost, "tucked, yet still topmost");
+            Assert.IsTrue(IslandWindow.IsWindowVisible(island), "the island hid instead of stepping behind");
+            var trigger = Trigger();
+            Assert.AreNotEqual((nint)0, trigger, "no trigger to bring the tucked island back");
+            // In this process's DPI-scaled coordinates: a pixel off either way after rounding.
+            var row = IslandWindow.Bounds(trigger);
+            Assert.IsLessThanOrEqualTo(1, Math.Abs(monitor.Bottom - row.Bottom), $"trigger {row} not at the bottom of {monitor}");
+            Assert.IsTrue(row.Left >= monitor.Left && row.Right <= monitor.Right + 1 && row.Top >= monitor.Bottom - 4,
+                $"trigger {row} not along the bottom of {monitor}");
+
+            TestDock.SetFullScreen(taskbar, fullScreen: false);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: on top again", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.AreEqual(IslandWindow.ExTopmost, IslandWindow.ExStyle(island) & IslandWindow.ExTopmost);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(Trigger() == 0), timeout), "the trigger stayed");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // The Shell's icon files reach the island; an item whose file is missing gets a placeholder.
     [TestMethod]
     public async Task DockDrawsTheIconFilesTheShellLeaves()

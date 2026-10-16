@@ -223,8 +223,19 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     std::optional<TestHook> closeMenu;
     std::optional<TestHook> showLabel;
     std::optional<TestHook> hideLabel;
+    // "fullscreen-on" and "fullscreen-off" say what ABN_FULLSCREENAPP would for the dock's monitor;
+    // "break-trigger" takes the dock's own edge trigger away (docs/adr/0014).
+    std::optional<TestHook> fullScreenOn;
+    std::optional<TestHook> fullScreenOff;
+    std::optional<TestHook> breakTrigger;
     if (testMode)
     {
+        fullScreenOn.emplace(*options.testTaskbarId, L"fullscreen-on", window.Hwnd(),
+                             harbor::dock::DockWindow::kTestFullScreenMessage, 1);
+        fullScreenOff.emplace(*options.testTaskbarId, L"fullscreen-off", window.Hwnd(),
+                              harbor::dock::DockWindow::kTestFullScreenMessage, 0);
+        breakTrigger.emplace(*options.testTaskbarId, L"break-trigger", window.Hwnd(),
+                             harbor::dock::DockWindow::kTestBreakTriggerMessage);
         hangUi.emplace(*options.testTaskbarId, L"hang-ui", window.Hwnd(),
                        harbor::dock::DockWindow::kTestHangMessage);
         loseDevice.emplace(*options.testTaskbarId, L"lose-device", window.Hwnd(),

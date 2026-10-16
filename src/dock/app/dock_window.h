@@ -24,8 +24,10 @@
 #include "app/window_watcher.h"
 #include "core/island/appearance.h"
 #include "core/island/dock_model.h"
+#include "core/island/full_screen.h"
 #include "core/island/layout.h"
 #include "core/island/monitors.h"
+#include "core/island/tuck.h"
 #include "ports/ipc_channel.h"
 #include "ports/logger.h"
 
@@ -34,9 +36,9 @@ namespace harbor::dock
 
 // The island: a small topmost popup at the bottom of the dock's monitor that never takes focus, drawn by
 // CompositionRenderer. It follows the monitor's DPI, the work area and the Windows appearance settings; it
-// is shown only once its first frame is committed. Until the AppBar arrives it sits at the bottom of the work
-// area. The taskbar itself is the TaskbarGuard's business. Per-monitor-v2 DPI awareness comes from the
-// application manifest.
+// is shown only once its first frame is committed. It sits at the bottom of the work area, over other windows
+// (an overlay), and steps behind a full-screen app a moment after it opens (docs/adr/0014). The taskbar
+// itself is the TaskbarGuard's business. Per-monitor-v2 DPI awareness comes from the application manifest.
 //
 // Owns the control channel's lifetime: starts it once the window exists and stops it when the window is
 // destroyed. Pings are answered from this window's (UI) thread, so a pong also proves the UI thread is
@@ -103,6 +105,12 @@ class DockWindow : private adapters::IIslandAccess
     // would, so tests can check a cloaked island brings the taskbar back.
     static constexpr UINT kTestCloakMessage = WM_APP + 11;
 
+    // Test docks only (their AppBars hear nothing from Explorer): a full-screen app opened (wParam 1) or
+    // closed (0) on the dock's monitor, as ABN_FULLSCREENAPP would say; and the dock's own trigger breaks, so
+    // tests can check a tucked island without one brings the taskbar back (docs/adr/0014).
+    static constexpr UINT kTestFullScreenMessage = WM_APP + 23;
+    static constexpr UINT kTestBreakTriggerMessage = WM_APP + 24;
+
     // Test docks only: opens the right-click menu of item wParam, or closes an open menu, so tests can reach
     // it without moving the user's mouse.
     static constexpr UINT kTestOpenMenuMessage = WM_APP + 13;
@@ -146,9 +154,26 @@ class DockWindow : private adapters::IIslandAccess
     // Where the island sits on a host's monitor: the bottom height pixels of its work area, reserved by
     // nobody (docs/adr/0014).
     geometry::Rect StripOf(const MonitorHost& host, int height) const;
-    // Shows each other monitor's edge trigger (or hides it: the dock's own monitor, a full-screen app,
-    // panic).
+    // Shows each other monitor's edge trigger (or hides it: a full-screen app, panic), and the dock's own
+    // monitor's while a full-screen app is there (docs/adr/0014).
     void PlaceTriggers();
+    // The dock's own monitor's trigger can bring a tucked island back: shown, at that monitor's bottom edge,
+    // triggers on (rule 7, docs/adr/0014).
+    bool DockTriggerArmed() const;
+    // Explorer's ABN_FULLSCREENAPP for host index's monitor (or a test hook's).
+    void OnFullScreenNotice(std::size_t index, bool open);
+    // Whether the full-screen apps are still there: on foreground changes and every second while one is.
+    void LookAgainAtFullScreen();
+    // The window in front, if this dock may judge it (test docks: only their test windows).
+    std::optional<island::Foreground> JudgedForeground() const;
+    // After a host's full screen began or ended, or the island moved: the tuck follows its monitor's.
+    void OnFullScreenChanged();
+    // The mouse on the island, a menu of it, or resting on its trigger (true), or gone from them (false).
+    void ReportPointer(bool over);
+    // The cursor is on the island or on the dock's own trigger.
+    bool PointerOverDock() const;
+    // Puts the island where the tuck says (behind a full-screen app or on top), with its timer and trigger.
+    void ApplyTuck();
     void OnHostMouseMove(std::size_t index);
     void OnEdgeTimer();
     // The island goes to host index's monitor, in one move (docs/adr/0011).
@@ -236,8 +261,8 @@ class DockWindow : private adapters::IIslandAccess
         island::MonitorInfo monitor;
         HWND window = nullptr;
         std::unique_ptr<AppBarWorker> appBar;
-        // A full-screen app covers this monitor.
-        bool fullScreen = false;
+        // A full-screen app covers this monitor (IsOpen).
+        island::FullScreenApp fullScreen;
     };
     std::vector<MonitorHost> m_hosts;
     HINSTANCE m_instance = nullptr;
@@ -247,6 +272,12 @@ class DockWindow : private adapters::IIslandAccess
     bool m_triggersOn = true;
     // The host whose trigger the cursor reached, while the rest before moving runs.
     std::optional<std::size_t> m_triggerHost;
+    // Behind a full-screen app on the dock's monitor (docs/adr/0014), for the monitor with these bounds.
+    island::Tuck m_tuck;
+    bool m_tucked = false;
+    std::optional<geometry::Rect> m_tuckMonitor;
+    // Test docks: the dock's own trigger was broken by the test hook and stays hidden.
+    bool m_testTriggerBroken = false;
     std::optional<Launcher> m_launcher;
     // Follows the app windows on its own thread; its newest snapshot is m_windows.
     std::unique_ptr<WindowWatcher> m_watcher;

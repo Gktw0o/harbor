@@ -2,10 +2,10 @@
 
 A macOS-style dock and system-stats island for Windows 11, native on **x64 and ARM64**.
 
-> **Status: M2 (the dock window).** A rounded island at the bottom of the primary screen shows your pinned
-> apps and starts them with a click; maximized windows stop above it; screen readers see its apps. Harbor can
-> hide the Windows taskbar and gives it back on exit, crash, hang, sign-out, or **Ctrl+Alt+Shift+H**. Running
-> windows, other monitors and stats come next (M3, M4).
+> **Status: M3 (running windows).** A rounded island at the bottom of the screen shows your pinned apps and
+> the apps you're running, switches between their windows, and follows the mouse to other monitors. Screen
+> readers see its apps. Harbor can hide the Windows taskbar and gives it back on exit, crash, hang, sign-out,
+> or **Ctrl+Alt+Shift+H**; a button on the dock brings it back for a look at the tray. Stats come next (M4).
 
 ## If your taskbar is ever missing
 
@@ -82,10 +82,13 @@ dotnet test --solution Harbor.slnx -c Debug -p:Platform=x64 --no-build
 ```
 
 Set `HARBOR_DOCK_EXE` to a built `harbor-dock.exe` of the same architecture to include the end-to-end tests,
-and `HARBOR_MARKER_EXE` / `HARBOR_UIA_CLIENT_EXE` to `harbor_test_marker.exe` / `harbor_test_uia_client.exe`
-from `build\msvc-<arch>\tests\dock\<Config>\` for the launch and screen-reader tests (`build.ps1` sets all
-three). Tests never touch your real taskbar or work area: they use stand-in windows and an AppBar that
-reserves nothing. Their docks do show a small island at the bottom of the screen for a moment.
+and `HARBOR_MARKER_EXE` / `HARBOR_UIA_CLIENT_EXE` / `HARBOR_TEST_WINDOWS_EXE` to `harbor_test_marker.exe` /
+`harbor_test_uia_client.exe` / `harbor_test_windows.exe` from `build\msvc-<arch>\tests\dock\<Config>\` for
+the launch, screen-reader and running-window tests (`build.ps1` sets all four). Tests never touch your real
+taskbar, work area or apps: they use stand-in windows, an AppBar that reserves nothing, and off-screen test
+windows that only their docks follow. Their docks do show a small island at the bottom of the screen for a
+moment. A few tests move the focus between windows; they run in CI, and locally only with
+`HARBOR_FOREGROUND_TESTS=1` (otherwise they are skipped).
 
 Real-taskbar check (local only, never CI; your taskbar disappears for seconds at a time while it runs):
 
@@ -94,9 +97,11 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Arch arm64 -Config R
 powershell -ExecutionPolicy Bypass -File scripts\safety-check.ps1 -Arch arm64 -ExerciseAutoHide
 ```
 
-It also checks the dock's screen strip (AppBar) and "Stop dock". The rest, by hand:
-[docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md) and
-[docs/testing/m2-checklist.md](docs/testing/m2-checklist.md).
+It also checks the dock's screen strip (AppBar), "Stop dock", the tray button's peek, attention marks, menus
+and moving between monitors (it moves the mouse for those); `-Scenario budget` measures memory with 30
+running apps. The rest, by hand: [docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md),
+[docs/testing/m2-checklist.md](docs/testing/m2-checklist.md) and
+[docs/testing/m3-checklist.md](docs/testing/m3-checklist.md).
 
 Formatting:
 
@@ -113,7 +118,7 @@ Start Harbor Shell; it starts the dock built next to it and watches over it:
 src\Harbor.Shell\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64\Harbor.Shell.exe
 ```
 
-The dock reserves a strip at the bottom of the primary screen and shows the apps pinned in
+The dock reserves a strip at the bottom of every screen, starts on the primary one, and shows the apps pinned in
 `%LOCALAPPDATA%\Harbor\settings.json` (first run: File Explorer, Microsoft Edge, Windows Terminal,
 Settings). **Edit pinned apps…** opens the file; Harbor picks up your changes when you save it:
 
@@ -127,6 +132,24 @@ An `app` is an AppUserModelID (`Get-StartApps` in PowerShell lists them), a `pat
 it. A dock you start yourself (`build\msvc-x64\src\dock\Debug\harbor-dock.exe`) is adopted when it connects.
 How the dock works: [ADR 0008](docs/adr/0008-dock-rendering.md), [ADR 0009](docs/adr/0009-pinned-apps-launching-appbar.md).
 
+### Using the dock
+
+- **Running apps** have a dot under their icon; those that aren't pinned come after a divider, in the order
+  you started them. Click one to bring its most recent window forward, again for its next window; with one
+  window in front, a click minimizes it (another restores it).
+- **Right-click** an app for its windows, a new window, pin or unpin, and closing its windows. Rest the mouse on
+  an item for its name. Apps that don't fit go behind the **…** button.
+- An app that **flashes** its taskbar button (a new message, a finished download) gets a highlight on the dock
+  until you bring it forward.
+- **Other monitors**: rest the mouse on a monitor's bottom edge and the dock moves there. Every monitor keeps
+  its strip, so maximized windows never change size.
+- **The tray**: while Harbor hides the taskbar, the chevron button at the dock's end brings the taskbar back
+  until you click elsewhere: tray icons, the clock, quick settings. **Win+N** (notifications and calendar) and
+  **Win+A** (quick settings) work too.
+
+Running windows, monitors and the tray: [ADR 0010](docs/adr/0010-running-windows.md),
+[ADR 0011](docs/adr/0011-monitors-and-attention.md), [ADR 0012](docs/adr/0012-tray.md).
+
 ## Layout
 
 | Path | Contents |
@@ -136,7 +159,7 @@ How the dock works: [ADR 0008](docs/adr/0008-dock-rendering.md), [ADR 0009](docs
 | `src/Harbor.Core/` | Shared C# code: IPC codec and pipe server, the dock's watchdog, taskbar restore, settings, app lookup and icons, logs |
 | `src/Harbor.Sensors/` | Hardware sensors service (empty until milestone M4) |
 | `contracts/` | IPC message, state-file and icon-file formats with shared test fixtures, see [contracts/README.md](contracts/README.md) |
-| `tests/` | C++ (`dock/`) and C# (`Harbor.Core.Tests/`) tests |
+| `tests/` | C++ (`dock/`, with test helpers: stand-in apps, windows and a screen-reader client) and C# (`Harbor.Core.Tests/`) tests |
 | `scripts/` | `build.ps1` (build and test one architecture), `safety-check.ps1` (real-taskbar check) |
 | `docs/` | Architecture decision records (`adr/`), manual test checklists (`testing/`) |
 

@@ -82,7 +82,7 @@ The M4 spike, read-only on ARM64 (Snapdragon, Turkish UI), from an unpackaged pr
 - **Focus, night light, airplane mode and power mode** have no public API. They are shortcuts that open the
   right Settings page (`ms-settings:`).
 
-**Glass gating** (ADR 0013): the dock's appearance also reads Windows' effective power mode. Under energy
+**Glass gating** (ADR 0013): the dock's appearance also reads `GUID_ENERGY_SAVER_STATUS`. Under energy
 saver the dock uses its solid tint instead of drawing the host backdrop, which is black then (M2 checklist
 2.1).
 

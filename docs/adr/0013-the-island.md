@@ -60,14 +60,16 @@ The M4 spike (2026-10-16, ARM64, 200 % and 100 % monitors) tried three designs:
   hung or hidden island never shows or hides the taskbar.
 
 **Glass, when available.**
-- Glass is used when transparency effects are on and Windows' **effective power mode** is Balanced or higher.
+- Glass is used when transparency effects are on and **energy saver is off**.
 - Otherwise the notch is a solid tint, as are Windows' own flyouts. With energy saver on, the host backdrop
   draws black.
-- The spike found that only the effective power mode reflects energy saver:
-  `PowerRegisterForEffectivePowerModeNotifications` reported `BetterBattery` (on) and `Balanced` (off).
-  `SystemStatusFlag`, `PowerManager.EnergySaverStatus`, `UISettings.AdvancedEffectsEnabled` and the
-  transparency setting stayed the same.
-- The mode is followed live. The dock gets the same rule (amends ADR 0008).
+- The spike found that energy saver is reported by the power setting `GUID_ENERGY_SAVER_STATUS`
+  (Windows 11 24H2+; `RegisterPowerSettingNotification`): 1 with it on, 0 off. `SystemStatusFlag`,
+  `PowerManager.EnergySaverStatus`, `UISettings.AdvancedEffectsEnabled` and the transparency setting stayed
+  the same. The effective power mode also changed (`BetterBattery`), but it does that for "best power
+  efficiency" as well.
+- The status is followed live, and the old battery-saver flag still counts. The dock gets the same rule
+  (amends ADR 0008).
 
 **The code.**
 - `src/Harbor.Platform` (`net10.0-windows10.0.26100.0`) holds the Win32, WinRT and COM adapters: the island

@@ -66,8 +66,8 @@ The options for a blurred, rounded surface in a plain Win32 process:
   dock's working set, and with many apps the measure is private memory, which must stay small and flat. What
   is above private memory is shared system code (composition, Direct2D/WARP, menus) that Windows can trim.
   The dock never trims its own working set. M7's performance check looks at it again.
-- (Explained in M4, ADR 0013/0016: Windows 11's energy saver turns the host backdrop black, and only the
-  effective power mode shows it, so the dock now also chooses its solid tint under energy saver.)
+- (Explained in M4, ADR 0013/0016: Windows 11's energy saver turns the host backdrop black, and only
+  `GUID_ENERGY_SAVER_STATUS` shows it, so the dock now also chooses its solid tint under energy saver.)
   The host backdrop isn't guaranteed: on the development PC it drew black one night (on battery, transparency
   on, energy saver off) in the dock and in the spike alike, while the spike showed real blur earlier the same
   day. The island then looks like dark glass (tint over black). The cause is open (M2 checklist 2.1); light

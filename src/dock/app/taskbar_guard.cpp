@@ -109,9 +109,12 @@ HWND TaskbarGuard::Peek() noexcept
     const HWND target = m_peekTarget.load();
     if (target != nullptr)
     {
-        // Explorer may show the taskbar before this message arrives: OnTaskbarShown begins the peek then.
+        // The show below may be seen before this message arrives: OnTaskbarShown begins the peek then.
         m_peekAsked.store(true);
         Post(kPeekMessage);
+        // Explorer doesn't show a hidden taskbar for the foreground alone (M3 spike and real check): shown
+        // here, auto-hidden, it slides in once it has the foreground.
+        ShowWindowAsync(target, SW_SHOWNA);
     }
     return target;
 }

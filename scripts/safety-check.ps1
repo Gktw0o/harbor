@@ -53,9 +53,7 @@ param(
     [ValidateSet('x64', 'arm64')]
     [string] $Arch,
 
-    [ValidateSet('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle', 'explorer',
-        'appbar-kill', 'appbar-restart', 'stop-dock', 'peek', 'peek-panic', 'peek-kill', 'attention', 'menu-panic', 'island-move',
-        'budget')]
+    # Checked below: with -File, "-Scenario a,b" arrives as one string.
     [string[]] $Scenario = @('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle',
         'appbar-kill', 'appbar-restart', 'stop-dock', 'peek', 'peek-panic', 'peek-kill', 'attention', 'menu-panic', 'island-move'),
 
@@ -71,6 +69,12 @@ Set-StrictMode -Version Latest
 
 if ($env:CI) {
     throw 'safety-check.ps1 works on the real taskbar and never runs in CI.'
+}
+$knownScenarios = @('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle', 'explorer',
+    'appbar-kill', 'appbar-restart', 'stop-dock', 'peek', 'peek-panic', 'peek-kill', 'attention', 'menu-panic', 'island-move', 'budget')
+$Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($name in $Scenario) {
+    if ($knownScenarios -notcontains $name) { throw "Unknown scenario '$name'. Known: $($knownScenarios -join ', ')" }
 }
 if ($IncludeExplorerRestart -and $Scenario -notcontains 'explorer') {
     $Scenario += 'explorer'

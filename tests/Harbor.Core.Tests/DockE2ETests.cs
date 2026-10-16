@@ -554,9 +554,9 @@ public sealed class DockE2ETests
         }
     }
 
-    // While the dock hides the taskbar, the island ends with a tray button (docs/adr/0012). It brings the taskbar
-    // forward; Explorer shows it (played here by the test), and the dock leaves it shown until Explorer slides it
-    // away, then hides it again.
+    // While the dock hides the taskbar, the island ends with a tray button (docs/adr/0012). It shows the taskbar
+    // and brings it forward (Explorer then slides it in), and leaves it shown until Explorer slides it away (played
+    // here by the test), then hides it again.
     [TestMethod]
     public async Task TheTrayButtonLetsTheUserPeekAtTheHiddenTaskbar()
     {
@@ -584,7 +584,8 @@ public sealed class DockE2ETests
             var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "Show taskbar");
             Assert.AreEqual(0, code, output);
             Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "taskbar: peek: the user asked", timeout));
-            FakeTaskbar.Show(taskbar.Primary);
+            // The dock shows it (auto-hidden, Explorer slides it in once it has the foreground).
+            Assert.IsTrue(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: true, timeout), "the dock didn't show the taskbar");
             Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "Explorer shows it for the peek", timeout));
             // Shown while the user is on it (longer than the dock takes to hide it again otherwise).
             Assert.IsFalse(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: false, TimeSpan.FromSeconds(1.5)));

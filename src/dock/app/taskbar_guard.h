@@ -85,9 +85,10 @@ class TaskbarGuard
     void PostRequest(bool hidden) noexcept;
     // Whether the island is on screen (GuardPolicy rule 7).
     void PostPresentable(bool presentable) noexcept;
-    // The user asked to see the hidden taskbar (the tray button, docs/adr/0012). Returns the taskbar window
-    // for the caller to bring forward (SetForegroundWindow, from the thread that took the click), Explorer
-    // then shows it; until the peek ends, the guard leaves it shown. nullptr when the taskbar isn't hidden.
+    // The user asked to see the hidden taskbar (the tray button, docs/adr/0012). Shows the primary taskbar
+    // window and returns it for the caller to bring forward (SetForegroundWindow, from the thread that took
+    // the click); Explorer then slides it in. Until the peek ends, the guard leaves it shown. nullptr when
+    // the taskbar isn't hidden.
     HWND Peek() noexcept;
 
     // The island. kStateMessage goes there whenever the state changes, and on every new connection; the panic

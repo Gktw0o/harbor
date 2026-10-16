@@ -91,16 +91,17 @@ class TaskbarGuardTest : public ::testing::Test
         return std::filesystem::exists(adapters::RestoreRecordPath(dir.Path()));
     }
 
-    // The user clicks the tray button, and Explorer, asked to show the taskbar, does (played here by the
-    // test).
+    // The user clicks the tray button: the guard shows the window (auto-hidden; Explorer then slides it in),
+    // here at once on screen.
     bool Peek()
     {
         if (guard.Peek() != fake.Primary())
         {
             return false;
         }
-        ShowWindow(fake.Primary(), SW_SHOWNA);
-        return WaitFor([&] { return log.Contains("Explorer shows it for the peek"); });
+        return WaitFor([&] {
+            return log.Contains("Explorer shows it for the peek") && IsWindowVisible(fake.Primary());
+        });
     }
 
     // Waits for condition while Harbor Shell keeps pinging (longer than the 3 s ping timeout, say).
@@ -542,13 +543,17 @@ TEST_F(TaskbarGuardTest, APeekLeavesTheTaskbarToExplorerUntilItSlidesOut)
     EXPECT_TRUE(WaitPinging([&] { return !IsWindowVisible(fake.Primary()); }));
 }
 
-// Explorer never showed it (bringing it forward failed): the peek ends by itself (after 3 s).
+// Explorer never slid it in (bringing it forward failed, so it stayed auto-hidden off the screen): the peek
+// ends by itself (after 3 s), and the window is hidden again.
 TEST_F(TaskbarGuardTest, APeekTheTaskbarNeverAnsweredEnds)
 {
     ConnectAndRequestHide();
     ASSERT_TRUE(WaitUntilHidden());
+    SlideOut();
     ASSERT_EQ(guard.Peek(), fake.Primary());
+    ASSERT_TRUE(WaitFor([&] { return IsWindowVisible(fake.Primary()) != FALSE; }));
     EXPECT_TRUE(WaitPinging([&] { return log.Contains("the peek is over"); }));
+    EXPECT_TRUE(WaitPinging([&] { return !IsWindowVisible(fake.Primary()); }));
     EXPECT_TRUE(guard.State().hidden);
 }
 

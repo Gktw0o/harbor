@@ -363,8 +363,8 @@ public sealed partial class DockSupervisorTests
         harness.AssertFullyRestored();
     }
 
-    // Hiding on, then the user's tray button, and Explorer showing the taskbar as asked (played here by the
-    // test). Returns once the dock leaves it shown for the peek.
+    // Hiding on, then the user's tray button: the dock shows the taskbar for Explorer to slide in. Returns once it
+    // leaves it shown for the peek.
     private static async Task HideThenPeekAsync(Harness harness, DockStatus running)
     {
         await harness.WaitForPongAsync();
@@ -377,7 +377,7 @@ public sealed partial class DockSupervisorTests
         Assert.AreEqual(0, code, output);
         Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "taskbar: peek: the user asked", Timeout),
             await TestDock.ReadLogAsync(harness.DataDir));
-        FakeTaskbar.Show(harness.Taskbar.Primary);
+        Assert.IsTrue(FakeTaskbar.WaitUntilVisible(harness.Taskbar.Primary, visible: true, Timeout), "the dock didn't show the taskbar");
         Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "Explorer shows it for the peek", Timeout),
             await TestDock.ReadLogAsync(harness.DataDir));
         Assert.IsTrue(FakeTaskbar.IsVisible(harness.Taskbar.Primary));

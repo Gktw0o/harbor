@@ -68,9 +68,6 @@ internal sealed partial class FakeTaskbar : IDisposable
     // Hides a window the way Harbor will: from another thread.
     public static void Hide(nint window) => ShowWindow(window, SwHide);
 
-    // Shows a window the way Explorer shows its taskbar for a peek (docs/adr/0012).
-    public static void Show(nint window) => ShowWindow(window, SwShowNa);
-
     // Moves a window: off the screen, as Explorer slides an auto-hidden taskbar away, or back.
     public static void Move(nint window, int x, int y)
     {

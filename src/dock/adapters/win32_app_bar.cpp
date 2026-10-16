@@ -70,8 +70,10 @@ void TestAppBar::Remove()
 
 geometry::Rect TestAppBar::Query(const geometry::Rect& proposed)
 {
+    // The monitor the strip is on, as Explorer would answer for it.
+    const RECT rect{proposed.left, proposed.top, proposed.right, proposed.bottom};
     MONITORINFO info{sizeof(info)};
-    if (!GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &info))
+    if (!GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTOPRIMARY), &info))
     {
         return proposed;
     }

@@ -66,6 +66,31 @@ public static class MessageCodec
                 case DockItems dockItems:
                     WriteDockItems(writer, dockItems);
                     break;
+                case AppLookup lookup:
+                    writer.WriteNumber("id", lookup.Id);
+                    WriteOptionalString(writer, "aumid", lookup.Aumid);
+                    WriteOptionalString(writer, "exe", lookup.Exe);
+                    if (lookup.Window is { } window)
+                    {
+                        writer.WriteNumber("window", window);
+                    }
+                    else
+                    {
+                        writer.WriteNull("window");
+                    }
+                    break;
+                case AppInfo info:
+                    writer.WriteNumber("id", info.Id);
+                    writer.WriteString("name", info.Name);
+                    WriteOptionalString(writer, "icon", info.Icon);
+                    WriteTarget(writer, "pinned", info.Pinned);
+                    WriteTarget(writer, "launch", info.Launch);
+                    break;
+                case PinRequest request:
+                    writer.WriteString("action", request.Action == PinAction.Pin ? "pin" : "unpin");
+                    writer.WriteString("kind", WireName(request.Item.Kind));
+                    writer.WriteString("target", request.Item.Target);
+                    break;
             }
             writer.WriteEndObject();
             writer.WriteEndObject();
@@ -133,8 +158,38 @@ public static class MessageCodec
         SetTaskbar => "setTaskbar",
         TaskbarState => "taskbarState",
         DockItems => "dockItems",
+        AppLookup => "appLookup",
+        AppInfo => "appInfo",
+        PinRequest => "pinRequest",
         _ => throw new ArgumentException($"Unknown message type {message.GetType().Name}.", nameof(message)),
     };
+
+    private static string WireName(DockItemKind kind) => kind == DockItemKind.Path ? "path" : "app";
+
+    private static void WriteOptionalString(Utf8JsonWriter writer, string name, string? value)
+    {
+        if (value is null)
+        {
+            writer.WriteNull(name);
+        }
+        else
+        {
+            writer.WriteString(name, value);
+        }
+    }
+
+    private static void WriteTarget(Utf8JsonWriter writer, string name, AppTarget? target)
+    {
+        if (target is null)
+        {
+            writer.WriteNull(name);
+            return;
+        }
+        writer.WriteStartObject(name);
+        writer.WriteString("kind", WireName(target.Kind));
+        writer.WriteString("target", target.Target);
+        writer.WriteEndObject();
+    }
 
     private static void WriteDockItems(Utf8JsonWriter writer, DockItems message)
     {
@@ -142,7 +197,7 @@ public static class MessageCodec
         foreach (var item in message.Items)
         {
             writer.WriteStartObject();
-            writer.WriteString("kind", item.Kind == DockItemKind.Path ? "path" : "app");
+            writer.WriteString("kind", WireName(item.Kind));
             writer.WriteString("target", item.Target);
             writer.WriteString("name", item.Name);
             if (item.Icon is null)
@@ -203,6 +258,9 @@ public static class MessageCodec
             "setTaskbar" => DecodeSetTaskbar,
             "taskbarState" => DecodeTaskbarState,
             "dockItems" => DecodeDockItems,
+            "appLookup" => DecodeAppLookup,
+            "appInfo" => DecodeAppInfo,
+            "pinRequest" => DecodePinRequest,
             _ => null,
         };
         if (decodePayload is null)
@@ -318,6 +376,102 @@ public static class MessageCodec
                 icon.ValueKind == JsonValueKind.Null ? null : icon.GetString()));
         }
         return (new DockItems(list), null);
+    }
+
+    private static (Message?, DecodeError?) DecodeAppLookup(Dictionary<string, JsonElement> fields)
+    {
+        if (CheckKeys(fields, "id", "aumid", "exe", "window") is { } error)
+        {
+            return (null, error);
+        }
+        var window = fields["window"];
+        uint handle = 0;
+        if (!TryGetPositiveUInt32(fields["id"], out var id) ||
+            !TryGetOptionalText(fields["aumid"], AppLookup.MaxAumidLength, out var aumid) ||
+            !TryGetOptionalText(fields["exe"], AppLookup.MaxExeLength, out var exe) ||
+            (window.ValueKind != JsonValueKind.Null && !TryGetPositiveUInt32(window, out handle)))
+        {
+            return (null, DecodeError.InvalidField);
+        }
+        return (new AppLookup(id, aumid, exe, window.ValueKind == JsonValueKind.Null ? null : handle), null);
+    }
+
+    private static (Message?, DecodeError?) DecodeAppInfo(Dictionary<string, JsonElement> fields)
+    {
+        if (CheckKeys(fields, "id", "name", "icon", "pinned", "launch") is { } error)
+        {
+            return (null, error);
+        }
+        var icon = fields["icon"];
+        if (!TryGetPositiveUInt32(fields["id"], out var id) ||
+            !TryGetText(fields["name"], DockItems.MaxNameLength, out var name) ||
+            !(icon.ValueKind == JsonValueKind.Null ||
+              (icon.ValueKind == JsonValueKind.String && IsIconFileName(icon.GetString()!))) ||
+            !TryGetOptionalTarget(fields["pinned"], out var pinned) ||
+            !TryGetOptionalTarget(fields["launch"], out var launch))
+        {
+            return (null, DecodeError.InvalidField);
+        }
+        return (new AppInfo(id, name, icon.ValueKind == JsonValueKind.Null ? null : icon.GetString(), pinned, launch), null);
+    }
+
+    private static (Message?, DecodeError?) DecodePinRequest(Dictionary<string, JsonElement> fields)
+    {
+        if (CheckKeys(fields, "action", "kind", "target") is { } error)
+        {
+            return (null, error);
+        }
+        var action = fields["action"].ValueKind == JsonValueKind.String ? fields["action"].GetString() : null;
+        if (action is not ("pin" or "unpin") || !TryGetKind(fields["kind"], out var kind) ||
+            !TryGetText(fields["target"], DockItems.MaxTargetLength, out var target))
+        {
+            return (null, DecodeError.InvalidField);
+        }
+        return (new PinRequest(action == "pin" ? PinAction.Pin : PinAction.Unpin, new AppTarget(kind, target)), null);
+    }
+
+    // null, or {"kind", "target"} as in dockItems.
+    private static bool TryGetOptionalTarget(JsonElement element, out AppTarget? target)
+    {
+        target = null;
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return true;
+        }
+        if ((ReadFields(element, out var fields) ?? CheckKeys(fields, "kind", "target")) is not null ||
+            !TryGetKind(fields["kind"], out var kind) ||
+            !TryGetText(fields["target"], DockItems.MaxTargetLength, out var text))
+        {
+            return false;
+        }
+        target = new AppTarget(kind, text);
+        return true;
+    }
+
+    private static bool TryGetKind(JsonElement element, out DockItemKind kind)
+    {
+        var name = element.ValueKind == JsonValueKind.String ? element.GetString() : null;
+        kind = name == "path" ? DockItemKind.Path : DockItemKind.App;
+        return name is "app" or "path";
+    }
+
+    // An integer from 1 to 2^32 - 1 (ids and window handles).
+    private static bool TryGetPositiveUInt32(JsonElement element, out uint value)
+    {
+        value = 0;
+        return element.ValueKind == JsonValueKind.Number && element.TryGetUInt32(out value) && value != 0;
+    }
+
+    private static bool TryGetOptionalText(JsonElement element, int maxLength, out string? text)
+    {
+        text = null;
+        if (element.ValueKind == JsonValueKind.Null)
+        {
+            return true;
+        }
+        var ok = TryGetText(element, maxLength, out var value);
+        text = value;
+        return ok;
     }
 
     /// <summary>

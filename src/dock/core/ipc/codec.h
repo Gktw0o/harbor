@@ -32,6 +32,9 @@ DecodeResult Decode(std::string_view line) noexcept;
 
 const char* ToString(DecodeError error) noexcept;
 
+// Whether UTF-8 text fits a bounded string field: 1 to maxLength Unicode characters, no control characters.
+bool IsWireText(std::string_view text, std::size_t maxLength) noexcept;
+
 // TaskbarBlock as it appears on the wire: "none", "hotkeyUnavailable", ...
 std::string_view ToWireName(TaskbarBlock block) noexcept;
 std::optional<TaskbarBlock> TaskbarBlockFromWireName(std::string_view name) noexcept;

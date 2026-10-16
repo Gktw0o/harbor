@@ -37,6 +37,41 @@ public sealed record DockItems(IReadOnlyList<DockItem> Items) : Message
     public override int GetHashCode() => Items.Aggregate(0, (hash, item) => HashCode.Combine(hash, item));
 }
 
+/// <summary>
+/// Dock to Harbor.Shell: a running app the dock hasn't had named yet (contracts/appLookup.schema.json, v1). The Shell
+/// answers with <see cref="AppInfo"/> for the same id.
+/// </summary>
+/// <param name="Id">The dock's number for the app, never reused for another app. Not 0.</param>
+/// <param name="Window">One of its windows (HWND), for its relaunch name and icon.</param>
+public sealed record AppLookup(uint Id, string? Aumid, string? Exe, uint? Window) : Message
+{
+    public const int MaxAumidLength = 130;
+    public const int MaxExeLength = 2048;
+}
+
+/// <summary>
+/// Harbor.Shell to dock: what the Shell knows about a running app (contracts/appInfo.schema.json, v1). May be sent
+/// twice for one id: at once from what the Shell knows, then with the real name and icon.
+/// </summary>
+/// <param name="Pinned">The pinned item this app is, if any.</param>
+/// <param name="Launch">How to start it again, and what pinning it pins, if known.</param>
+public sealed record AppInfo(uint Id, string Name, string? Icon, AppTarget? Pinned, AppTarget? Launch) : Message;
+
+/// <summary>Something the dock can start or pin, as in <see cref="DockItems"/>.</summary>
+public sealed record AppTarget(DockItemKind Kind, string Target);
+
+public enum PinAction
+{
+    Pin,
+    Unpin,
+}
+
+/// <summary>
+/// Dock to Harbor.Shell: the user asked to pin or unpin an app (contracts/pinRequest.schema.json, v1). The dock
+/// changes nothing until the Shell's next <see cref="DockItems"/>.
+/// </summary>
+public sealed record PinRequest(PinAction Action, AppTarget Item) : Message;
+
 /// <summary>One app on the dock.</summary>
 /// <param name="Name">Display name, for people and screen readers.</param>
 /// <param name="Icon">File name of the item's icon in the icons folder (contracts/README.md), or null.</param>

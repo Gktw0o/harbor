@@ -24,8 +24,8 @@ class Win32AppBar final : public appbar::IAppBar
     UINT m_callbackMessage;
 };
 
-// Test docks: answers like Explorer would (the strip goes above the bottom of the primary monitor's work
-// area, so above a visible taskbar) but reserves nothing, so tests never change the user's work area.
+// Test docks: answers like Explorer would (the strip goes above the bottom of its monitor's work area, so
+// above a visible taskbar) but reserves nothing, so tests never change the user's work area.
 class TestAppBar final : public appbar::IAppBar
 {
   public:

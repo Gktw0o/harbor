@@ -241,6 +241,28 @@ public sealed partial class DockSupervisorTests
         Assert.AreEqual(2, log.Split("composition: drawing with a").Length - 1, log);
     }
 
+    // A cloaked island (on another virtual desktop) is no island to the user: the taskbar comes back until it is
+    // uncloaked, then goes again by itself. Only the dock's cloak hook can notice: no window message says so.
+    [TestMethod]
+    public async Task ACloakedIslandBringsTheTaskbarBackUntilItIsUncloaked()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+
+        TestDock.CloakIsland(harness.Taskbar, cloak: true);
+        await harness.WaitForStateAsync(s => !s.Hidden);
+        Assert.IsTrue(FakeTaskbar.WaitUntilVisible(harness.Taskbar.Primary, visible: true, Timeout));
+
+        TestDock.CloakIsland(harness.Taskbar, cloak: false);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+        var log = await TestDock.ReadLogAsync(harness.DataDir);
+        StringAssert.Contains(log, "island: not shown");
+    }
+
     // The panic hotkey gives back the taskbar and takes the island away; turning hiding on again brings back both
     // (the island first: the taskbar only goes while the island is on screen).
     [TestMethod]
@@ -284,6 +306,82 @@ public sealed partial class DockSupervisorTests
         var stopped = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
         Assert.AreEqual(DockExitCodes.KilledByWatchdog, stopped.ExitCode);
         harness.AssertFullyRestored();
+    }
+
+    // The restore paths while the user peeks at the taskbar (docs/adr/0012): each still gives it back in full,
+    // the windows the peek didn't show included.
+    [TestMethod]
+    public async Task WhilePeekingThePanicHotkeyRestoresTheTaskbar()
+    {
+        await using var harness = new Harness(launch: true);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenPeekAsync(harness, running);
+
+        TestDock.PressPanicHotkey(harness.PipeName);
+
+        await harness.WaitForStateAsync(s => s.Blocked == TaskbarBlock.PanicHotkey);
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    public async Task WhilePeekingLosingHarborShellRestoresTheTaskbar()
+    {
+        await using var harness = new Harness(launch: true);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenPeekAsync(harness, running);
+
+        await harness.StopSupervisorAsync();
+
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    public async Task WhilePeekingAKilledDockGetsTheTaskbarFullyRestored()
+    {
+        await using var harness = new Harness(launch: true);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenPeekAsync(harness, running);
+
+        TestDock.KillQuietly((int)running.ProcessId!);
+
+        await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    public async Task WhilePeekingAHungDockGetsTheTaskbarBack()
+    {
+        await using var harness = new Harness(launch: true);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenPeekAsync(harness, running);
+
+        TestDock.HangUi(harness.Taskbar);
+
+        await harness.WaitForHideRequestAsync(false);
+        var stopped = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        Assert.AreEqual(DockExitCodes.KilledByWatchdog, stopped.ExitCode);
+        harness.AssertFullyRestored();
+    }
+
+    // Hiding on, then the user's tray button: the dock shows the taskbar for Explorer to slide in. Returns once it
+    // leaves it shown for the peek.
+    private static async Task HideThenPeekAsync(Harness harness, DockStatus running)
+    {
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+
+        var island = IslandWindow.Find((int)running.ProcessId!);
+        var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "Show taskbar");
+        Assert.AreEqual(0, code, output);
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "taskbar: peek: the user asked", Timeout),
+            await TestDock.ReadLogAsync(harness.DataDir));
+        Assert.IsTrue(FakeTaskbar.WaitUntilVisible(harness.Taskbar.Primary, visible: true, Timeout), "the dock didn't show the taskbar");
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "Explorer shows it for the peek", Timeout),
+            await TestDock.ReadLogAsync(harness.DataDir));
+        Assert.IsTrue(FakeTaskbar.IsVisible(harness.Taskbar.Primary));
+        Assert.IsFalse(FakeTaskbar.IsVisible(harness.Taskbar.Secondaries[0]));
     }
 
     [TestMethod]
@@ -451,9 +549,16 @@ public sealed partial class DockSupervisorTests
         {
             Assert.IsTrue(FakeTaskbar.WaitUntilVisible(Taskbar.Primary, visible: false, Timeout), "primary taskbar still visible");
             Assert.IsTrue(FakeTaskbar.WaitUntilVisible(Taskbar.Secondaries[0], visible: false, Timeout), "secondary taskbar still visible");
-            Assert.AreEqual(1u, Taskbar.AutoHide);
+            // Seen to fail rarely under load (auto-hide 0, windows hidden): the dock's taskbar lines say why.
+            Assert.AreEqual(1u, Taskbar.AutoHide, TaskbarLogLines());
             Assert.IsTrue(RestoreRecord.TryDecode(File.ReadAllBytes(RecordPath), out var record));
             Assert.AreEqual(0u, record.StateBefore);
+        }
+
+        private string TaskbarLogLines()
+        {
+            var log = TestDock.ReadLogAsync(DataDir).GetAwaiter().GetResult();
+            return string.Join('\n', log.Split('\n').Where(line => line.Contains("taskbar", StringComparison.Ordinal)));
         }
 
         // Harbor Shell going away (closed, crashed): its pipe closes.

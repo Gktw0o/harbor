@@ -30,6 +30,12 @@ struct Rect
     {
         return point.x >= left && point.x < right && point.y >= top && point.y < bottom;
     }
+    // inner lies entirely inside this rectangle. An empty inner never does.
+    bool Contains(const Rect& inner) const noexcept
+    {
+        return inner.left < inner.right && inner.top < inner.bottom && inner.left >= left &&
+               inner.top >= top && inner.right <= right && inner.bottom <= bottom;
+    }
     friend bool operator==(const Rect&, const Rect&) = default;
 };
 

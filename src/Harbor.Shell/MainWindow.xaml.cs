@@ -55,6 +55,21 @@ public sealed partial class MainWindow : Window
         publisher.Built += _supervisor.SetDockItems;
         publisher.Built += items => DispatcherQueue.TryEnqueue(() => ShowPinned(items));
 
+        // Running apps: the dock asks (appLookup), the Shell names them (appInfo), after any new dockItems.
+        var apps = new AppLookupService(new ShellAppResolver(icons), log, icons);
+        _supervisor.AppLookupReceived += apps.Lookup;
+        _supervisor.LinkStatusChanged += status =>
+        {
+            if (!status.Connected)
+            {
+                apps.Disconnected();
+            }
+        };
+        publisher.Built += apps.SetPins;
+        apps.Answered += _supervisor.SendToDock;
+        // Pin and unpin from the dock's menu: settings.json changes, and the settings watcher sends the new list.
+        _supervisor.PinRequestReceived += request => _ = ApplyPinRequestAsync(request);
+
         // Never disposed on purpose: it uses no timer or wait handle, and the supervisor may still observe the
         // token after the window closes.
         var shutdown = new CancellationTokenSource();
@@ -62,6 +77,7 @@ public sealed partial class MainWindow : Window
         _ = RunSupervisorAsync(shutdown.Token);
         _ = RunQuietlyAsync("settings", settings.RunAsync, shutdown.Token);
         _ = RunQuietlyAsync("dock items", publisher.RunAsync, shutdown.Token);
+        _ = RunQuietlyAsync("apps", apps.RunAsync, shutdown.Token);
     }
 
     // A background loop that ends with the window; a failure is logged, not thrown at the UI.
@@ -117,6 +133,19 @@ public sealed partial class MainWindow : Window
         PinnedText.Text = items.Items.Count == 0
             ? "None. Add some with \"Edit pinned apps…\"."
             : string.Join("\n", items.Items.Select(item => item.Name));
+
+    // A refused request is shown (it may need the user to fix settings.json); one that worked shows in the list.
+    private async Task ApplyPinRequestAsync(PinRequest request)
+    {
+        var result = await PinChanges.ApplyAsync(_settingsFile, request, _log);
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            PinRequestText.Text = result.Written
+                ? ""
+                : $"Couldn't {(request.Action == PinAction.Pin ? "pin" : "unpin")} that app: {result.Outcome}.";
+            PinRequestText.Visibility = result.Written ? Visibility.Collapsed : Visibility.Visible;
+        });
+    }
 
     private void ShowSettingsProblem(string? problem)
     {

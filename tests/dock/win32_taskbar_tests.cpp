@@ -2,6 +2,8 @@
 // cases against TaskbarRestorer, the Shell's implementation.
 
 #include <gtest/gtest.h>
+#include <thread>
+#include <wil/resource.h>
 
 #include "adapters/win32_taskbar.h"
 #include "capturing_logger.h"
@@ -164,6 +166,47 @@ TEST_F(Win32TaskbarTest, ShowHiddenWindowsNeverTouchesAutoHide)
     EXPECT_TRUE(FakeTaskbar::WaitUntilVisible(fake.Primary(), true));
     EXPECT_EQ(fake.AutoHide(), 1u);
     EXPECT_TRUE(RecordExists());
+}
+
+// Another process (a virus scanner, say) holds the record file for a moment, so it can't be replaced: the
+// dock tries again, and turns auto-hide on once it's free.
+TEST_F(Win32TaskbarTest, TurningAutoHideOnWaitsForARecordAnotherProcessHolds)
+{
+    WriteRecord("an older record");
+    wil::unique_hfile held(CreateFileW(RecordPath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    ASSERT_TRUE(held);
+    // Let go once the dock has found it in use (not after a fixed time: a slow machine may not have tried
+    // yet).
+    std::thread release([&] {
+        for (int i = 0; i < 400 && !log.Contains("the restore record is in use"); ++i)
+        {
+            Sleep(5);
+        }
+        held.reset();
+    });
+
+    const bool on = taskbar.TurnOnAutoHide();
+    release.join();
+    EXPECT_TRUE(on);
+    EXPECT_EQ(fake.AutoHide(), 1u);
+    const auto record = taskbar::DecodeRestoreRecord(test::ReadFileBytes(RecordPath()));
+    ASSERT_TRUE(record);
+    EXPECT_EQ(record->stateBefore, 0u);
+    EXPECT_TRUE(log.Contains("the restore record is in use"));
+}
+
+// Not for long: held too long, auto-hide stays as it was (the taskbar still hides; ADR 0007).
+TEST_F(Win32TaskbarTest, TurningAutoHideOnGivesUpOnARecordHeldTooLong)
+{
+    WriteRecord("an older record");
+    const wil::unique_hfile held(CreateFileW(RecordPath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    ASSERT_TRUE(held);
+
+    EXPECT_FALSE(taskbar.TurnOnAutoHide());
+    EXPECT_EQ(fake.AutoHide(), 0u);
+    EXPECT_TRUE(log.Contains("can't save the restore record"));
 }
 
 // Read-only look at the real taskbar: finding windows never changes anything.

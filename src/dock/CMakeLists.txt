@@ -6,14 +6,21 @@ add_library(harbor_dock_core STATIC
     core/appbar/appbar_state.cpp
     core/ipc/codec.cpp
     core/island/appearance.cpp
+    core/island/click_policy.cpp
+    core/island/dock_model.cpp
     core/island/icon_file.cpp
     core/island/layout.cpp
+    core/island/menu_model.cpp
+    core/island/monitors.cpp
+    core/island/on_screen.cpp
     core/ipc/line_framer.cpp
     core/ipc/pipe_name.cpp
     core/json/strict_json.cpp
     core/logging/log_line.cpp
     core/taskbar/guard_policy.cpp
     core/taskbar/restore_record.cpp
+    core/windows/app_windows.cpp
+    core/windows/eligibility.cpp
 )
 target_include_directories(harbor_dock_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(harbor_dock_core
@@ -29,11 +36,13 @@ add_library(harbor_dock_adapters STATIC
     adapters/file_log.cpp
     adapters/icon_files.cpp
     adapters/named_pipe_client.cpp
+    adapters/popup_menu.cpp
     adapters/process_job.cpp
     adapters/system_appearance.cpp
     adapters/uia_island.cpp
     adapters/win32_app_bar.cpp
     adapters/win32_taskbar.cpp
+    adapters/win32_window_system.cpp
 )
 # Composition, Direct2D and the shell come with the Windows SDK and the OS (C++/WinRT headers included):
 # no packages.
@@ -51,8 +60,10 @@ add_library(harbor_dock_app STATIC
     app/explorer_worker.cpp
     app/launcher.cpp
     app/taskbar_guard.cpp
+    app/window_tracker.cpp
+    app/window_watcher.cpp
 )
-target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore)
+target_link_libraries(harbor_dock_app PUBLIC harbor_dock_adapters PRIVATE Shcore dwmapi)
 
 add_executable(harbor-dock WIN32
     app/main.cpp

@@ -19,6 +19,7 @@
     <TextBlock x:Name="PinnedText" Text="Looking them up…" TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}" />
     <TextBlock x:Name="SettingsProblemText" TextWrapping="Wrap" Visibility="Collapsed"
                Foreground="{ThemeResource SystemFillColorCriticalBrush}" Style="{StaticResource BodyTextBlockStyle}" />
+    <TextBlock x:Name="PinRequestText" TextWrapping="Wrap" Visibility="Collapsed" Style="{StaticResource CaptionTextBlockStyle}" />
     <StackPanel Orientation="Horizontal" Spacing="8">
       <Button Content="Edit pinned apps…" Click="OnEditPinnedClicked" />
     </StackPanel>

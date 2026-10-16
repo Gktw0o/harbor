@@ -40,9 +40,58 @@ internal static partial class TestDock
         return copy;
     }
 
+    // Tests that bring windows to the front move the keyboard focus away from whatever the person at this PC
+    // is typing in: they run in CI, and locally only with HARBOR_FOREGROUND_TESTS=1.
+    public static void RequireForegroundTests()
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase) &&
+            Environment.GetEnvironmentVariable("HARBOR_FOREGROUND_TESTS") != "1")
+        {
+            Assert.Inconclusive("Changes the foreground: runs in CI, or set HARBOR_FOREGROUND_TESTS=1.");
+        }
+    }
+
+    // Polls until check() holds; false after the timeout.
+    public static async Task<bool> WaitUntilAsync(Func<Task<bool>> check, TimeSpan timeout)
+    {
+        var deadline = Stopwatch.StartNew();
+        do
+        {
+            if (await check())
+            {
+                return true;
+            }
+            await Task.Delay(50);
+        }
+        while (deadline.Elapsed < timeout);
+        return false;
+    }
+
     // Runs tests/dock/uia_client.cpp against the island: a UI Automation client in its own process, as a screen
     // reader is. Returns its exit code and output.
     public static async Task<(int ExitCode, string Output)> RunUiaClientAsync(nint island, params string[] arguments)
+    {
+        using var process = StartUiaClient(island, arguments);
+        return await FinishUiaClientAsync(process);
+    }
+
+    // Starts the client's "hold" on the button with that name and waits until it holds the element.
+    public static async Task<Process> HoldUiaElementAsync(nint island, string name)
+    {
+        var process = StartUiaClient(island, "hold", name);
+        Assert.AreEqual("found", await process.StandardOutput.ReadLineAsync(), $"no button named {name}");
+        return process;
+    }
+
+    // Lets a holding client ask its element again. Exit code 0 and "alive\t<name>", or 5 and "gone".
+    public static async Task<(int ExitCode, string Output)> ReleaseUiaElementAsync(Process client)
+    {
+        await client.StandardInput.WriteLineAsync();
+        await client.StandardInput.FlushAsync();
+        return await FinishUiaClientAsync(client);
+    }
+
+    private static Process StartUiaClient(nint island, params string[] arguments)
     {
         var client = Environment.GetEnvironmentVariable("HARBOR_UIA_CLIENT_EXE");
         if (string.IsNullOrEmpty(client))
@@ -51,6 +100,7 @@ internal static partial class TestDock
         }
         var startInfo = new ProcessStartInfo(client)
         {
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             StandardOutputEncoding = System.Text.Encoding.UTF8,
             CreateNoWindow = true,
@@ -60,7 +110,11 @@ internal static partial class TestDock
         {
             startInfo.ArgumentList.Add(argument);
         }
-        using var process = Process.Start(startInfo)!;
+        return Process.Start(startInfo)!;
+    }
+
+    private static async Task<(int ExitCode, string Output)> FinishUiaClientAsync(Process process)
+    {
         var output = await process.StandardOutput.ReadToEndAsync();
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         await process.WaitForExitAsync(timeout.Token);
@@ -114,6 +168,45 @@ internal static partial class TestDock
         lose.Set();
     }
 
+    // The test hooks that cloak or uncloak the island, as a virtual desktop switch would (see
+    // DockWindow::kTestCloakMessage). Each works once per dock.
+    public static void CloakIsland(FakeTaskbar taskbar, bool cloak)
+    {
+        using var hook = EventWaitHandle.OpenExisting(
+            $@"Local\Harbor.Test.{taskbar.Id}.{(cloak ? "cloak-island" : "uncloak-island")}");
+        hook.Set();
+    }
+
+    // The test hooks that open the first item's right-click menu and close an open menu (see
+    // DockWindow::kTestOpenMenuMessage).
+    public static void OpenMenu(FakeTaskbar taskbar)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.open-menu");
+        hook.Set();
+    }
+
+    public static void CloseMenu(FakeTaskbar taskbar)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.close-menu");
+        hook.Set();
+    }
+
+    // The test hooks that show the first item's name label, as resting the mouse on it would, and hide it.
+    public static void ShowLabel(FakeTaskbar taskbar, bool show)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.{(show ? "show-label" : "hide-label")}");
+        hook.Set();
+    }
+
+    // The open menu's items as a screen reader sees them ("<control type>\t<name>"), invoking the one named.
+    public static async Task<(int ExitCode, string[] Items)> UseMenuAsync(nint island, string? invoke = null)
+    {
+        var (code, output) = invoke is null
+            ? await RunUiaClientAsync(island, "menu")
+            : await RunUiaClientAsync(island, "menu", invoke);
+        return (code, output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries));
+    }
+
     public static async Task<string> ReadLogAsync(string dataDir)
     {
         // The dock keeps the file open for appending.
@@ -123,13 +216,18 @@ internal static partial class TestDock
     }
 
     // Waits until the dock's log contains the text; false after the timeout.
-    public static async Task<bool> WaitForLogAsync(string dataDir, string text, TimeSpan timeout)
+    public static Task<bool> WaitForLogAsync(string dataDir, string text, TimeSpan timeout) =>
+        WaitForLogAfterAsync(dataDir, 0, text, timeout);
+
+    // Waits until the dock's log contains the text past the first `from` characters (LogLengthAsync before
+    // an action: what the action caused); false after the timeout.
+    public static async Task<bool> WaitForLogAfterAsync(string dataDir, int from, string text, TimeSpan timeout)
     {
         var deadline = Stopwatch.StartNew();
         do
         {
             if (File.Exists(Path.Combine(dataDir, "logs", "dock.log")) &&
-                (await ReadLogAsync(dataDir)).Contains(text, StringComparison.Ordinal))
+                (await ReadLogAsync(dataDir)).IndexOf(text, from, StringComparison.Ordinal) >= 0)
             {
                 return true;
             }
@@ -138,6 +236,8 @@ internal static partial class TestDock
         while (deadline.Elapsed < timeout);
         return false;
     }
+
+    public static async Task<int> LogLengthAsync(string dataDir) => (await ReadLogAsync(dataDir)).Length;
 
     public static void KillQuietly(int processId)
     {

@@ -52,23 +52,26 @@ std::vector<std::wstring> CommandLineArguments()
     return arguments;
 }
 
-// Test docks only: signaling the named event "Local\Harbor.Test.<id>.<name>" posts a message to the dock
-// window, so tests can make the dock fail in ways that are hard to cause from outside.
+// Test docks only: each signal of the named event "Local\Harbor.Test.<id>.<name>" posts a message to the dock
+// window, so tests can make the dock fail in ways that are hard to cause from outside, or reach what only the
+// mouse would.
 class TestHook
 {
   public:
-    TestHook(const std::wstring& testId, const wchar_t* name, HWND window, UINT message)
-        : m_window(window), m_message(message)
+    TestHook(const std::wstring& testId, const wchar_t* name, HWND window, UINT message, WPARAM wParam = 0)
+        : m_window(window), m_message(message), m_wParam(wParam)
     {
-        if (FAILED(m_event.create(wil::EventOptions::ManualReset,
+        // Auto-reset: the wait is armed again after each signal.
+        if (FAILED(m_event.create(wil::EventOptions::None,
                                   (L"Local\\Harbor.Test." + testId + L"." + name).c_str())))
         {
             return;
         }
         m_wait.reset(CreateThreadpoolWait(
-            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT, TP_WAIT_RESULT) {
+            [](PTP_CALLBACK_INSTANCE, void* context, PTP_WAIT wait, TP_WAIT_RESULT) {
                 const auto* self = static_cast<const TestHook*>(context);
-                PostMessageW(self->m_window, self->m_message, 0, 0);
+                PostMessageW(self->m_window, self->m_message, self->m_wParam, 0);
+                SetThreadpoolWait(wait, self->m_event.get(), nullptr);
             },
             this, nullptr));
         if (m_wait)
@@ -82,6 +85,7 @@ class TestHook
   private:
     HWND m_window;
     UINT m_message;
+    WPARAM m_wParam;
     wil::unique_event_nothrow m_event;
     // Declared after the event: closed first, waiting for a callback in progress.
     wil::unique_threadpool_wait m_wait;
@@ -178,10 +182,22 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     const auto orphanTimeout = testMode
                                    ? std::chrono::milliseconds(options.testOrphanTimeoutMs.value_or(30'000))
                                    : std::chrono::milliseconds::zero();
+    // A test dock follows only the test helper's windows, never the user's (docs/adr/0010). The id is ASCII.
+    std::string windowClassPrefix;
+    if (testMode)
+    {
+        windowClassPrefix = "Harbor.Test.";
+        for (const wchar_t c : *options.testTaskbarId)
+        {
+            windowClassPrefix.push_back(static_cast<char>(c));
+        }
+        windowClassPrefix += ".App";
+    }
     harbor::dock::DockWindow window(controlChannel, guard, renderer, log,
                                     {.orphanTimeout = orphanTimeout,
                                      .iconsDir = dataDir.empty() ? dataDir : dataDir / L"icons",
-                                     .testAppBar = testMode});
+                                     .testAppBar = testMode,
+                                     .windowClassPrefix = windowClassPrefix});
     switch (window.Create(instance))
     {
     case harbor::dock::DockWindow::CreateResult::Created:
@@ -195,15 +211,36 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     }
     }
 
-    // Test docks only: "hang-ui" hangs the UI thread; "lose-device" rehearses losing the graphics device.
+    // Test docks only: "hang-ui" hangs the UI thread; "lose-device" rehearses losing the graphics device;
+    // "cloak-island" and "uncloak-island" do what a virtual desktop switch would.
     std::optional<TestHook> hangUi;
     std::optional<TestHook> loseDevice;
+    std::optional<TestHook> cloakIsland;
+    std::optional<TestHook> uncloakIsland;
+    // "open-menu" opens the first item's right-click menu; "close-menu" closes it. "show-label" and
+    // "hide-label" do the same for the first item's name label.
+    std::optional<TestHook> openMenu;
+    std::optional<TestHook> closeMenu;
+    std::optional<TestHook> showLabel;
+    std::optional<TestHook> hideLabel;
     if (testMode)
     {
         hangUi.emplace(*options.testTaskbarId, L"hang-ui", window.Hwnd(),
                        harbor::dock::DockWindow::kTestHangMessage);
         loseDevice.emplace(*options.testTaskbarId, L"lose-device", window.Hwnd(),
                            harbor::dock::DockWindow::kDeviceLostMessage);
+        cloakIsland.emplace(*options.testTaskbarId, L"cloak-island", window.Hwnd(),
+                            harbor::dock::DockWindow::kTestCloakMessage, 1);
+        uncloakIsland.emplace(*options.testTaskbarId, L"uncloak-island", window.Hwnd(),
+                              harbor::dock::DockWindow::kTestCloakMessage, 0);
+        openMenu.emplace(*options.testTaskbarId, L"open-menu", window.Hwnd(),
+                         harbor::dock::DockWindow::kTestOpenMenuMessage, 0);
+        closeMenu.emplace(*options.testTaskbarId, L"close-menu", window.Hwnd(),
+                          harbor::dock::DockWindow::kTestCloseMenuMessage);
+        showLabel.emplace(*options.testTaskbarId, L"show-label", window.Hwnd(),
+                          harbor::dock::DockWindow::kTestShowLabelMessage, 0);
+        hideLabel.emplace(*options.testTaskbarId, L"hide-label", window.Hwnd(),
+                          harbor::dock::DockWindow::kTestHideLabelMessage);
     }
 
     MSG message{};

@@ -3,9 +3,13 @@
 #include <windows.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string_view>
+#include <vector>
 
 #include "core/island/appearance.h"
 #include "core/island/icon_file.h"
@@ -40,15 +44,37 @@ class CompositionRenderer
     // gone: Render again. False if there is none to be had.
     bool RecreateDevice() noexcept;
 
+    // Reads item index's icon into file and returns a view of it, or nullopt (a placeholder is drawn). Called
+    // once per item, in order, with the same file each time: one icon's pixels at a time (rule 4).
+    using IconSource =
+        std::function<std::optional<island::IconView>(std::size_t index, std::vector<std::uint8_t>& file)>;
+
     // Rebuilds the island for layout (screen coordinates; the window covers layout.island) and style, with
-    // icons[i] drawn for item i (a placeholder where there is none). Posts committedMessage (wParam = tag) to
-    // the window once the frame has been committed for the screen. False if it failed.
-    bool Render(const island::Layout& layout, const island::IslandStyle& style,
-                std::span<const std::optional<island::IconView>> icons, std::optional<std::size_t> hovered,
-                UINT committedMessage, WPARAM tag) noexcept;
+    // the icons from icons and the marks as SetMarks would show them; item overflow, if any, is the "…"
+    // button, item tray the tray button (an upward chevron); icons isn't asked for either. Posts
+    // committedMessage (wParam = tag) to the window once the frame has been committed for the screen. False
+    // if it failed.
+    bool Render(const island::Layout& layout, const island::IslandStyle& style, const IconSource& icons,
+                std::span<const island::ItemMarks> marks, std::optional<std::size_t> hovered,
+                std::optional<std::size_t> overflow, std::optional<std::size_t> tray, UINT committedMessage,
+                WPARAM tag) noexcept;
 
     // Moves the hover highlight; nullopt hides it.
     void SetHovered(std::optional<std::size_t> hovered) noexcept;
+
+    // Shows item i's running dot and attention highlight as marks[i] says (none past the end of marks).
+    // Nothing is redrawn: the dots and highlights are there already, hidden.
+    void SetMarks(std::span<const island::ItemMarks> marks) noexcept;
+
+    // The hover label (docs/adr/0010): another NOREDIRECTIONBITMAP window, drawn by the same compositor.
+    // False if it can't be drawn into (then there are no labels).
+    bool AttachLabel(HWND label) noexcept;
+    // Draws text in a small rounded box in style's colors at dpi and returns the box's size in pixels, to
+    // size the label window by; nullopt if it couldn't. The text is GDI's, drawn into a bitmap.
+    std::optional<SIZE> RenderLabel(std::wstring_view text, const island::IslandStyle& style,
+                                    unsigned dpi) noexcept;
+    // Lets go of the label's font, bitmap and surface (after a quiet while: rule 4).
+    void ReleaseLabelResources() noexcept;
 
   private:
     struct Impl;

@@ -10,6 +10,8 @@ public sealed class IconStore(string dataDir, ILog log)
 {
     private readonly Lock _lock = new();
     private HashSet<string> _previous = [];
+    // Icons running apps' appInfo named on the current connection (docs/adr/0010).
+    private HashSet<string> _held = new(StringComparer.Ordinal);
 
     public string Directory { get; } = Path.Combine(dataDir, "icons");
 
@@ -48,9 +50,28 @@ public sealed class IconStore(string dataDir, ILog log)
         }
     }
 
+    /// <summary>Keeps an icon a running app's appInfo named until <see cref="ReleaseHeld"/>, whatever <see cref="KeepOnly"/> says.</summary>
+    public void Hold(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        lock (_lock)
+        {
+            _held.Add(name);
+        }
+    }
+
+    /// <summary>The dock that was told about those icons went away: they no longer need keeping.</summary>
+    public void ReleaseHeld()
+    {
+        lock (_lock)
+        {
+            _held = new HashSet<string>(StringComparer.Ordinal);
+        }
+    }
+
     /// <summary>
-    /// Deletes the icons neither this list nor the one before it uses: a dock may still draw the previous list
-    /// until it gets the new one.
+    /// Deletes the icons neither this list nor the one before it uses, nor a running app holds: a dock may still
+    /// draw the previous list until it gets the new one.
     /// </summary>
     public void KeepOnly(IEnumerable<string> names)
     {
@@ -59,7 +80,7 @@ public sealed class IconStore(string dataDir, ILog log)
         lock (_lock)
         {
             var current = names.ToHashSet(StringComparer.Ordinal);
-            keep = [.. current, .. _previous];
+            keep = [.. current, .. _previous, .. _held];
             _previous = current;
         }
         if (!System.IO.Directory.Exists(Directory))

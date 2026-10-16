@@ -34,6 +34,15 @@ Both suites list the files when they run, so a new schema or fixture is picked u
 | [`setTaskbar`](setTaskbar.schema.json) v1 | Shell → dock | `control` |
 | [`taskbarState`](taskbarState.schema.json) v1 | dock → Shell | `control` |
 | [`dockItems`](dockItems.schema.json) v1 | Shell → dock | `control` |
+| [`appLookup`](appLookup.schema.json) v1 | dock → Shell | `control` |
+| [`appInfo`](appInfo.schema.json) v1 | Shell → dock | `control` |
+| [`pinRequest`](pinRequest.schema.json) v1 | dock → Shell | `control` |
+
+The running-app messages (docs/adr/0010): the dock sends `appLookup` once for each app it sees running (and
+again for every live one after a reconnect), naming it by a number of its own; the Shell answers with `appInfo`
+for that number, possibly twice (at once, then with the real name and icon). `pinRequest` asks the Shell to pin
+or unpin; the dock changes nothing until the next `dockItems`. All three are far below the line limit at their
+bounds.
 
 Text goes on the wire as UTF-8; only `"`, `\` and control characters are escaped. `dockItems` is bounded so its
 largest form ([`dock-items-largest.json`](fixtures/valid/dock-items-largest.json), 64,888 bytes) fits one

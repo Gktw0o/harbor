@@ -97,9 +97,9 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1 -Arch arm64 -Config R
 powershell -ExecutionPolicy Bypass -File scripts\safety-check.ps1 -Arch arm64 -ExerciseAutoHide
 ```
 
-It also checks the dock's screen strip (AppBar), "Stop dock", the tray button's peek, attention marks, menus
-and moving between monitors (it moves the mouse for those); `-Scenario budget` measures memory with 30
-running apps. The rest, by hand: [docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md),
+It also checks that the dock reserves no screen strip (its AppBars), "Stop dock", the tray button's peek,
+attention marks, menus and moving between monitors (it moves the mouse for those); `-Scenario budget`
+measures memory with 30 running apps. The rest, by hand: [docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md),
 [docs/testing/m2-checklist.md](docs/testing/m2-checklist.md) and
 [docs/testing/m3-checklist.md](docs/testing/m3-checklist.md).
 
@@ -118,7 +118,8 @@ Start Harbor Shell; it starts the dock built next to it and watches over it:
 src\Harbor.Shell\bin\x64\Debug\net10.0-windows10.0.26100.0\win-x64\Harbor.Shell.exe
 ```
 
-The dock reserves a strip at the bottom of every screen, starts on the primary one, and shows the apps pinned in
+The dock floats over the bottom of the screen (it reserves no space: maximized windows reach the bottom edge
+under it), starts on the primary one, and shows the apps pinned in
 `%LOCALAPPDATA%\Harbor\settings.json` (first run: File Explorer, Microsoft Edge, Windows Terminal,
 Settings). **Edit pinned apps…** opens the file; Harbor picks up your changes when you save it:
 
@@ -141,8 +142,7 @@ How the dock works: [ADR 0008](docs/adr/0008-dock-rendering.md), [ADR 0009](docs
   an item for its name. Apps that don't fit go behind the **…** button.
 - An app that **flashes** its taskbar button (a new message, a finished download) gets a highlight on the dock
   until you bring it forward.
-- **Other monitors**: rest the mouse on a monitor's bottom edge and the dock moves there. Every monitor keeps
-  its strip, so maximized windows never change size.
+- **Other monitors**: rest the mouse on a monitor's bottom edge and the dock moves there.
 - **The tray**: while Harbor hides the taskbar, the chevron button at the dock's end brings the taskbar back
   until you click elsewhere: tray icons, the clock, quick settings. **Win+N** (notifications and calendar) and
   **Win+A** (quick settings) work too.

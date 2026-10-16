@@ -40,8 +40,11 @@ constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
 constexpr UINT kControlMessages = WM_APP + 4;          // dockItems and appInfo wait in m_received
 // Posted by the renderer once a frame is on its way to the screen.
 constexpr UINT kRenderCommitted = WM_APP + 5;
-// Posted by the AppBar worker with the strip Explorer granted: wParam = left, top; lParam = right, bottom.
-constexpr UINT kAppBarStrip = WM_APP + 8;
+// Posted to the island's window by a host when Explorer says AppBars may have to move: the work areas may
+// have changed.
+constexpr UINT kWorkAreaMayHaveChanged = WM_APP + 8;
+// Posted by the AppBar worker to its host if Explorer granted a strip, which the dock never asks for.
+constexpr UINT kAppBarGranted = WM_APP + 19;
 // Explorer's AppBar notifications (ABN_*): wParam = notification.
 constexpr UINT kAppBarCallback = WM_APP + 9;
 // Posted by the window watcher: a new snapshot waits.
@@ -51,20 +54,6 @@ constexpr UINT kOpenOverflowMessage = WM_APP + 17;
 // The "…" button's UI Automation key: no item has it.
 constexpr std::uint64_t kOverflowKey = std::numeric_limits<std::uint64_t>::max();
 constexpr std::uint64_t kTrayKey = kOverflowKey - 1;
-
-static_assert(sizeof(WPARAM) == 8 && sizeof(LPARAM) == 8, "two 32-bit coordinates go in each");
-
-std::uint64_t PackPair(int high, int low) noexcept
-{
-    return static_cast<std::uint64_t>(static_cast<std::uint32_t>(high)) << 32 |
-           static_cast<std::uint32_t>(low);
-}
-
-std::pair<int, int> UnpackPair(std::uint64_t packed) noexcept
-{
-    return {static_cast<int>(static_cast<std::uint32_t>(packed >> 32)),
-            static_cast<int>(static_cast<std::uint32_t>(packed))};
-}
 
 constexpr UINT_PTR kOrphanTimer = 1;
 constexpr UINT_PTR kDeviceRetryTimer = 2;
@@ -77,7 +66,7 @@ constexpr UINT kLabelDelayMs = 400;
 constexpr UINT_PTR kLabelReleaseTimer = 5;
 constexpr UINT kLabelReleaseMs = 60'000;
 constexpr wchar_t kLabelClass[] = L"Harbor.Dock.Label";
-// A monitor's host (its AppBar strip and edge trigger), and the trigger's rest before the dock moves there
+// A monitor's host (its AppBar and edge trigger), and the trigger's rest before the dock moves there
 // (docs/adr/0011).
 constexpr wchar_t kHostClass[] = L"Harbor.Dock.Host";
 constexpr UINT_PTR kEdgeTimer = 6;
@@ -258,7 +247,7 @@ void DockWindow::Shutdown() noexcept
 {
     // Its callbacks use this object.
     m_controlChannel.Stop();
-    // The strips go before their windows do, waiting for Explorer a moment at most.
+    // The AppBars go before their windows do, waiting for Explorer a moment at most.
     for (auto& host : m_hosts)
     {
         StopHost(host);
@@ -317,9 +306,17 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     }
 
     m_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
-    // Energy saver turning on or off changes the island's look.
+    // Energy saver turning on or off changes the island's look: the old battery saver flag, and Windows 11's
+    // energy saver status, which turns the host backdrop black (docs/adr/0013). The second sends its value
+    // right away.
     m_powerNotification =
         RegisterPowerSettingNotification(m_hwnd, &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    m_energySaverNotification =
+        RegisterPowerSettingNotification(m_hwnd, &GUID_ENERGY_SAVER_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    if (m_energySaverNotification == nullptr)
+    {
+        m_log.Warn(std::format("island: no energy saver notifications ({})", GetLastError()));
+    }
     // A cloaked island isn't on screen (docs/adr/0011). Only this thread's windows: the hook costs nothing
     // while nothing here is cloaked.
     m_cloakHook.reset(SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, &OnCloakChanged,
@@ -329,7 +326,8 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
         m_log.Warn(std::format("island: no cloak notifications ({})", GetLastError()));
     }
 
-    // A host per monitor holds its strip, so the island can move without the strips moving (docs/adr/0011).
+    // A host per monitor: its AppBar hears of full-screen apps there, and its edge trigger moves the island
+    // there (docs/adr/0011, 0014).
     WNDCLASSEXW hostClass{};
     hostClass.cbSize = sizeof(hostClass);
     hostClass.lpfnWndProc = &DockWindow::HostProc;
@@ -632,20 +630,13 @@ void DockWindow::Refresh(bool force)
     }
     const auto& host = m_hosts[DockHost()];
     const auto& monitor = host.monitor;
-    const auto appearance = adapters::ReadSystemAppearance();
+    const auto appearance = adapters::ReadSystemAppearance(m_energySaver);
     const auto style = island::StyleFor(appearance);
     const auto slots = m_model.slots.size();
     // A divider when running apps follow pinned items; the tray button last while the taskbar is hidden.
     const bool divider = m_model.pinned > 0 && slots > m_model.pinned;
     const auto count = slots + (m_taskbarHidden ? 1 : 0);
     const auto metrics = island::MeasureFor(monitor.bounds.Width(), monitor.dpi, count, divider);
-    // Every monitor keeps a strip as tall as the island would be there, so moving it reflows nothing. The
-    // AppBars ask Explorer (it answers on kAppBarStrip); the same request again does nothing.
-    for (auto& each : m_hosts)
-    {
-        const auto there = island::MeasureFor(each.monitor.bounds.Width(), each.monitor.dpi, count, divider);
-        each.appBar->SetWant({each.monitor.bounds, there.StripHeight()});
-    }
     const geometry::Rect strip = StripOf(host, metrics.StripHeight());
     auto layout = island::Arrange(strip, metrics, m_model.pinned);
     PlaceTriggers();
@@ -785,8 +776,8 @@ void DockWindow::UpdatePresentable(bool recheck)
     if (!presentable && m_presentable && !recheck && facts.committed && facts.visible && !facts.cloaked)
     {
         // Only its place is off: a monitor came or went, and Windows moved the island before this thread
-        // heard of it. Look again once the display change (sent, so ahead of this post) has put it back on
-        // its strip, rather than showing the taskbar for that moment.
+        // heard of it. Look again once the display change (sent, so ahead of this post) has put it back in
+        // its place, rather than showing the taskbar for that moment.
         PostMessageW(m_hwnd, kRecheckPresentable, 0, 0);
         return;
     }
@@ -1311,7 +1302,9 @@ bool DockWindow::InvokeItem(std::size_t index)
 void DockWindow::SyncHosts()
 {
     const auto monitors = ReadMonitors();
-    // A host whose monitor went, or changed size, goes (with its strip).
+    const auto before = m_hosts.size();
+    bool changed = false;
+    // A host whose monitor went, or changed size, goes (with its AppBar).
     for (auto it = m_hosts.begin(); it != m_hosts.end();)
     {
         if (std::none_of(monitors.begin(), monitors.end(), [&](const island::MonitorInfo& monitor) {
@@ -1320,6 +1313,7 @@ void DockWindow::SyncHosts()
         {
             StopHost(*it);
             it = m_hosts.erase(it);
+            changed = true;
         }
         else
         {
@@ -1358,15 +1352,21 @@ void DockWindow::SyncHosts()
         {
             appBar = std::make_unique<adapters::Win32AppBar>(host.window, kAppBarCallback);
         }
+        // Registered only to hear of full-screen apps (ABN_FULLSCREENAPP): it asks for no strip, so Explorer
+        // grants none (docs/adr/0014).
         const HWND window = host.window;
-        host.appBar =
-            std::make_unique<AppBarWorker>(std::move(appBar), [window](const geometry::Rect& strip) {
-                PostMessageW(window, kAppBarStrip, PackPair(strip.left, strip.top),
-                             static_cast<LPARAM>(PackPair(strip.right, strip.bottom)));
-            });
+        host.appBar = std::make_unique<AppBarWorker>(std::move(appBar), [window](const geometry::Rect&) {
+            PostMessageW(window, kAppBarGranted, 0, 0);
+        });
+        host.appBar->SetWant({monitor.bounds, /*height=*/0});
         m_hosts.push_back(std::move(host));
+        changed = true;
     }
-    m_log.Info(std::format("appbar: {} monitors, a strip on each", m_hosts.size()));
+    if (changed)
+    {
+        m_log.Info(std::format("appbar: {} monitors (was {}), notify-only on each: no strip", m_hosts.size(),
+                               before));
+    }
 }
 
 void DockWindow::StopHost(MonitorHost& host) noexcept
@@ -1395,10 +1395,10 @@ std::size_t DockWindow::DockHost() const
 
 geometry::Rect DockWindow::StripOf(const MonitorHost& host, int height) const
 {
-    // Until Explorer answers (or if it never does): the bottom of the work area, above a visible taskbar.
-    // That is usually where the strip goes too.
-    return host.strip.value_or(geometry::Rect{host.monitor.bounds.left, host.monitor.work.bottom - height,
-                                              host.monitor.bounds.right, host.monitor.work.bottom});
+    // Above a visible taskbar; at the monitor's bottom edge while Harbor hides it (auto-hide gives the work
+    // area back). Over maximized windows: nothing reserves it.
+    return {host.monitor.bounds.left, host.monitor.work.bottom - height, host.monitor.bounds.right,
+            host.monitor.work.bottom};
 }
 
 void DockWindow::PlaceTriggers()
@@ -1486,8 +1486,9 @@ void DockWindow::OnAppBarNotification(std::size_t index, WPARAM notification, LP
     switch (notification)
     {
     case ABN_POSCHANGED:
-        // Explorer sends these in bursts; the worker coalesces them.
-        host.appBar->PositionMayHaveChanged();
+        // The taskbar or another AppBar changed, so may the work areas. Explorer sends these in bursts; the
+        // hosts are looked at outside this host's window procedure (a monitor may have gone with its host).
+        PostMessageW(m_hwnd, kWorkAreaMayHaveChanged, 0, 0);
         break;
     case ABN_FULLSCREENAPP:
         if (host.fullScreen == (lParam != 0))
@@ -1545,17 +1546,12 @@ LRESULT CALLBACK DockWindow::HostProc(HWND hwnd, UINT message, WPARAM wParam, LP
     case WM_MOUSEMOVE:
         self->OnHostMouseMove(index);
         return 0;
-    case kAppBarStrip: {
-        const auto [left, top] = UnpackPair(wParam);
-        const auto [right, bottom] = UnpackPair(static_cast<std::uint64_t>(lParam));
-        host->strip = geometry::Rect{left, top, right, bottom};
-        self->m_log.Info(
-            std::format("appbar: monitor {} strip {},{} to {},{}", index + 1, left, top, right, bottom));
-        self->Refresh(/*force=*/false);
-        return 0;
-    }
     case kAppBarCallback:
         self->OnAppBarNotification(index, wParam, lParam);
+        return 0;
+    case kAppBarGranted:
+        self->m_log.Warn(
+            std::format("appbar: monitor {} was granted a strip, though none was asked for", index + 1));
         return 0;
     default:
         return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -1797,22 +1793,19 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
-        // Monitors or the work area changed: so may the strips. A monitor that came gets a host, one that
-        // went takes its host along, and the island goes back to the primary if its monitor went.
-        if (message == WM_DISPLAYCHANGE)
-        {
-            SyncHosts();
-        }
+        // Monitors or the work area changed: so may the island's place. A monitor that came gets a host, one
+        // that went takes its host along, and the island goes back to the primary if its monitor went.
         if (message == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA)
         {
-            for (auto& host : m_hosts)
-            {
-                host.appBar->PositionMayHaveChanged();
-            }
+            SyncHosts();
         }
         Refresh(/*force=*/false);
         UpdatePresentable();
         return DefWindowProcW(m_hwnd, message, wParam, lParam);
+    case kWorkAreaMayHaveChanged:
+        SyncHosts();
+        Refresh(/*force=*/false);
+        return 0;
     case WM_THEMECHANGED:
     case WM_SYSCOLORCHANGE:
         Refresh(/*force=*/false);
@@ -1820,6 +1813,13 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_POWERBROADCAST:
         if (wParam == PBT_POWERSETTINGCHANGE)
         {
+            if (const auto on =
+                    adapters::EnergySaverIn(*reinterpret_cast<const POWERBROADCAST_SETTING*>(lParam));
+                on && *on != m_energySaver)
+            {
+                m_energySaver = *on;
+                m_log.Info(m_energySaver ? "island: energy saver on" : "island: energy saver off");
+            }
             Refresh(/*force=*/false);
         }
         return TRUE;
@@ -1842,10 +1842,13 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             m_accessibility->Disconnect();
         }
         m_controlChannel.Stop();
-        if (m_powerNotification != nullptr)
+        for (auto* notification : {&m_powerNotification, &m_energySaverNotification})
         {
-            UnregisterPowerSettingNotification(m_powerNotification);
-            m_powerNotification = nullptr;
+            if (*notification != nullptr)
+            {
+                UnregisterPowerSettingNotification(*notification);
+                *notification = nullptr;
+            }
         }
         PostQuitMessage(m_exitCode);
         return 0;

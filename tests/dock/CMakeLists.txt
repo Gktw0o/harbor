@@ -52,6 +52,7 @@ add_executable(harbor_dock_tests
     pipe_name_tests.cpp
     restore_record_tests.cpp
     slot_map_tests.cpp
+    system_appearance_tests.cpp
     taskbar_guard_tests.cpp
     tuck_tests.cpp
     win32_taskbar_tests.cpp

@@ -143,7 +143,8 @@ class DockWindow : private adapters::IIslandAccess
     void StopHost(MonitorHost& host) noexcept;
     // Which host's monitor the island is on.
     std::size_t DockHost() const;
-    // A host's granted strip, or until there is one, the bottom height pixels of its work area.
+    // Where the island sits on a host's monitor: the bottom height pixels of its work area, reserved by
+    // nobody (docs/adr/0014).
     geometry::Rect StripOf(const MonitorHost& host, int height) const;
     // Shows each other monitor's edge trigger (or hides it: the dock's own monitor, a full-screen app,
     // panic).
@@ -229,14 +230,12 @@ class DockWindow : private adapters::IIslandAccess
     std::uint64_t m_nextItemKey = 1;
     HWND m_hwnd = nullptr;
     // One per connected monitor (docs/adr/0011): a never-activated window that holds the monitor's AppBar
-    // strip (each with its own worker thread) and is its edge trigger.
+    // (each with its own worker thread; notify-only, docs/adr/0014) and is its edge trigger.
     struct MonitorHost
     {
         island::MonitorInfo monitor;
         HWND window = nullptr;
         std::unique_ptr<AppBarWorker> appBar;
-        // The strip Explorer granted; until then, the bottom of the work area.
-        std::optional<geometry::Rect> strip;
         // A full-screen app covers this monitor.
         bool fullScreen = false;
     };
@@ -254,6 +253,9 @@ class DockWindow : private adapters::IIslandAccess
     WindowWatcher::Snapshot m_windows;
     std::unique_ptr<adapters::IslandAccessibility> m_accessibility;
     HPOWERNOTIFY m_powerNotification = nullptr;
+    HPOWERNOTIFY m_energySaverNotification = nullptr;
+    // GUID_ENERGY_SAVER_STATUS's last value was on.
+    bool m_energySaver = false;
     // This thread's windows being cloaked or uncloaked.
     wil::unique_hwineventhook m_cloakHook;
     UINT m_taskbarCreatedMessage = 0;

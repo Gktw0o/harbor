@@ -73,7 +73,7 @@ public sealed class DockE2ETests
     }
 
     // The island: a small topmost tool window that never takes focus, at the bottom of the primary monitor's
-    // work area (until the AppBar reserves its own strip), as wide as its items.
+    // work area (an overlay: nothing reserved, docs/adr/0014), as wide as its items.
     [TestMethod]
     public async Task DockShowsItsIslandAtTheBottomOfThePrimaryMonitor()
     {
@@ -115,12 +115,12 @@ public sealed class DockE2ETests
             Assert.AreEqual(empty.Height, three.Height);
             Assert.AreEqual(empty.Bottom, three.Bottom);
 
-            // Its strip came from its monitor's AppBar worker (a test AppBar, which reserves nothing); every monitor
-            // has one (docs/adr/0011).
+            // Every monitor has a host whose AppBar only hears of full-screen apps (docs/adr/0011, 0014). A test
+            // AppBar grants whatever is asked for (reserving nothing): it was asked for no strip.
             var log = await TestDock.ReadLogAsync(dataDir.Path);
-            StringAssert.Contains(log, $" strip {monitor.Left},");
-            StringAssert.Contains(log, "monitors, a strip on each");
-            Assert.IsNotEmpty(DockWindows.FindAppBars((uint)dock.Id), "no host window holds a strip");
+            StringAssert.Contains(log, "notify-only on each: no strip");
+            Assert.DoesNotContain("was granted a strip", log);
+            Assert.IsNotEmpty(DockWindows.FindAppBars((uint)dock.Id), "no host window holds an AppBar");
             Assert.AreEqual(work.Bottom, IslandWindow.PrimaryMonitor().Work.Bottom, "a test dock changed the work area");
         }
         finally

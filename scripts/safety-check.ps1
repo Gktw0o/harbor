@@ -22,11 +22,11 @@
       idle         the dock's CPU and memory with the taskbar hidden (rule 4: < 0.5 % CPU, < 40 MB).
       explorer     Explorer restarts (only with -IncludeExplorerRestart; closes File Explorer windows):
                    the dock hides the new taskbar again.
-      appbar-kill     the dock's screen strip (AppBar) is reserved while it runs; with Harbor Shell closed and
-                      the dock killed, Windows frees it (maximized windows reach the taskbar again).
-      appbar-restart  the dock is killed and Harbor Shell starts it again: one strip, not two.
-      stop-dock       "Stop dock" in Harbor Shell: the dock closes, the taskbar and the strip come back, and
-                      the dock isn't started again.
+      appbar-kill     the dock is an overlay (M4): its AppBars reserve no screen strip, so the work area never
+                      shrinks; with Harbor Shell closed and the dock killed, it is the taskbar's again.
+      appbar-restart  the dock is killed and Harbor Shell starts it again: still no strip above the taskbar.
+      stop-dock       "Stop dock" in Harbor Shell: no strip, then the dock closes, the taskbar and its work
+                      area come back, and the dock isn't started again.
       M3 (these move the mouse and click Harbor Shell's title bar):
       peek         the island's tray button: Explorer slides the taskbar in and the dock leaves it; once the
                    user clicks elsewhere and it slides out, the dock hides it again (no breaker trip).
@@ -253,11 +253,18 @@ function Enable-Hide {
     Start-Sleep -Milliseconds 500
 }
 
-# The dock reserved its strip: the work area ends above the bottom edge (the taskbar is hidden then).
-function Wait-StripReserved {
-    $ms = Wait-Until { [HarborSafety.Native]::WorkBottom() -lt [HarborSafety.Native]::MonitorBottom() - 20 } 10000
-    if ($ms -lt 0) { throw 'The dock reserved no strip (the work area reaches the bottom of the screen).' }
-    return [HarborSafety.Native]::MonitorBottom() - [HarborSafety.Native]::WorkBottom()
+# The dock reserves no strip (M4, docs/adr/0014): for 3 s the work area keeps reaching the bottom edge (the
+# taskbar is hidden then, and auto-hide reserves nothing). Returns the most it was short of it, in pixels:
+# a strip would be 56 px or more.
+$script:maxShortfall = 20
+function Get-WorkAreaShortfall {
+    $most = 0
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    while ($watch.ElapsedMilliseconds -lt 3000) {
+        $most = [Math]::Max($most, [HarborSafety.Native]::MonitorBottom() - [HarborSafety.Native]::WorkBottom())
+        Start-Sleep -Milliseconds 50
+    }
+    return $most
 }
 
 function Invoke-ShellButton {
@@ -503,34 +510,36 @@ try {
                     Add-Result $name $passed ("{0:N3} % CPU over {1} s, {2:N1} MB working set, {3:N1} MB private" -f $cpuPercent, $IdleSeconds, $workingSetMb, $privateMb)
                 }
                 'appbar-kill' {
-                    $strip = Wait-StripReserved
-                    # Without Harbor Shell nothing restarts the dock (or sends ABM_REMOVE for it): Windows alone
-                    # must free the strip of a dock that died.
+                    $short = Get-WorkAreaShortfall
+                    # Without Harbor Shell nothing restarts the dock (or sends ABM_REMOVE for it): a dock that
+                    # died leaves the taskbar's work area as it was before the run.
                     $window = Get-ShellWindow
                     $window.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close()
                     Wait-Until { Test-Restored } 5000 | Out-Null
                     Stop-Process -Id $dock.Id -Force
                     $ms = Wait-Until { [HarborSafety.Native]::WorkBottom() -eq $script:runWorkBottom } 5000
-                    Add-Result $name ($ms -ge 0) "strip of $strip px freed $ms ms after the kill (work area bottom $([HarborSafety.Native]::WorkBottom()), was $script:runWorkBottom)"
+                    Add-Result $name ($short -lt $script:maxShortfall -and $ms -ge 0) "work area at most $short px short of the bottom edge while the dock ran (no strip); $ms ms after the kill: bottom $([HarborSafety.Native]::WorkBottom()), was $script:runWorkBottom"
                 }
                 'appbar-restart' {
-                    $strip = Wait-StripReserved
+                    $short = Get-WorkAreaShortfall
                     Stop-Process -Id $dock.Id -Force
-                    # Hiding stays off after a crash: the new dock's strip goes above the visible taskbar.
+                    # Hiding stays off after a crash: the taskbar shows, and the new dock reserves nothing above it.
                     $restarted = (Wait-Until { $null -ne (Get-Process harbor-dock -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $dock.Id }) } 15000) -ge 0
-                    $expected = $script:runWorkBottom - $strip
-                    $ms = Wait-Until { [Math]::Abs([HarborSafety.Native]::WorkBottom() - $expected) -le 1 } 10000
-                    Add-Result $name ($restarted -and $ms -ge 0) "restarted: $restarted; work area bottom $([HarborSafety.Native]::WorkBottom()), one strip would be $expected"
+                    $ms = Wait-Until { [HarborSafety.Native]::WorkBottom() -eq $script:runWorkBottom } 10000
+                    # Time for the new dock to register its AppBars.
+                    Start-Sleep -Seconds 3
+                    $stayed = [HarborSafety.Native]::WorkBottom() -eq $script:runWorkBottom
+                    Add-Result $name ($short -lt $script:maxShortfall -and $restarted -and $ms -ge 0 -and $stayed) "no strip before ($short px short); restarted: $restarted; work area bottom $([HarborSafety.Native]::WorkBottom()), the taskbar's $script:runWorkBottom"
                 }
                 'stop-dock' {
-                    $strip = Wait-StripReserved
+                    $short = Get-WorkAreaShortfall
                     Invoke-ShellButton 'Stop dock'
                     $exited = (Wait-Until { $dock.HasExited } 10000) -ge 0
                     $ms = Wait-Until { (Test-Restored) -and [HarborSafety.Native]::WorkBottom() -eq $script:runWorkBottom } 8000
                     Start-Sleep -Seconds 3
                     $stayedStopped = $null -eq (Get-Process harbor-dock -ErrorAction SilentlyContinue)
                     $code = if ($exited) { $dock.ExitCode } else { 'n/a' }
-                    Add-Result $name ($exited -and $code -eq 0 -and $ms -ge 0 -and $stayedStopped) "exit code $code; taskbar and $strip px strip back in $ms ms; stayed stopped: $stayedStopped"
+                    Add-Result $name ($short -lt $script:maxShortfall -and $exited -and $code -eq 0 -and $ms -ge 0 -and $stayedStopped) "no strip ($short px short); exit code $code; taskbar and its work area back in $ms ms; stayed stopped: $stayedStopped"
                 }
                 'peek' {
                     $rehidesBefore = Get-DockLogCount 'Explorer showed it again'

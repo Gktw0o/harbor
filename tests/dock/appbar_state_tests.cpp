@@ -239,5 +239,42 @@ TEST_F(AppBarStateTest, DoesNothingUntilWanted)
     EXPECT_EQ(explorer.registers + explorer.queries + explorer.removes, 0);
 }
 
+// The overlay dock (docs/adr/0014): registered only to hear full-screen notifications, never a strip.
+TEST_F(AppBarStateTest, NotifyOnlyRegistersAndReservesNothing)
+{
+    WantBottomStrip(0);
+    EXPECT_EQ(Settle(), Decision{});
+    EXPECT_TRUE(explorer.registered);
+    EXPECT_EQ(explorer.queries + explorer.sets, 0);
+    EXPECT_FALSE(explorer.reserved);
+    EXPECT_FALSE(state.Granted());
+
+    // Explorer's notifications and restarts never make it position.
+    state.OnPositionMayHaveChanged();
+    EXPECT_EQ(Settle(), Decision{});
+    explorer.Restart();
+    state.OnTaskbarCreated();
+    EXPECT_EQ(Settle(), Decision{});
+    EXPECT_TRUE(explorer.registered);
+    EXPECT_EQ(explorer.queries + explorer.sets, 0);
+}
+
+TEST_F(AppBarStateTest, GoingNotifyOnlyLetsGoOfTheStrip)
+{
+    explorer.taskbarAutoHide = true;
+    WantBottomStrip();
+    Settle();
+    ASSERT_TRUE(explorer.reserved);
+
+    // The strip is given back by removing the AppBar, then registering it again notify-only.
+    WantBottomStrip(0);
+    EXPECT_EQ(Settle(), Decision{});
+    EXPECT_TRUE(explorer.registered);
+    EXPECT_FALSE(explorer.reserved);
+    EXPECT_FALSE(state.Granted());
+    EXPECT_EQ(explorer.removes, 1);
+    EXPECT_EQ(explorer.registers, 2);
+}
+
 } // namespace
 } // namespace harbor::appbar

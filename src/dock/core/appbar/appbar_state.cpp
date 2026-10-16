@@ -11,6 +11,12 @@ void AppBarState::SetWant(std::optional<Want> want)
 {
     if (want != m_want)
     {
+        // A strip is only given back by removing the AppBar (an ABM_SETPOS of zero height keeps nothing
+        // reserved, but Explorer may hold the old one until then): remove, then register notify-only.
+        if (want && want->height == 0 && m_granted)
+        {
+            m_removeFirst = true;
+        }
         m_want = want;
         m_dirty = true;
     }
@@ -65,6 +71,10 @@ Decision AppBarState::Next(Milliseconds now) const
     {
         return {(m_registered || m_removeFirst) ? Action::Remove : Action::None};
     }
+    if (m_registered && m_removeFirst)
+    {
+        return {Action::Remove};
+    }
     if (!m_registered)
     {
         if (m_registerFailedAt && now < *m_registerFailedAt + m_config.registerRetry)
@@ -73,7 +83,8 @@ Decision AppBarState::Next(Milliseconds now) const
         }
         return {m_removeFirst ? Action::Remove : Action::Register};
     }
-    if (m_dirty)
+    // Notify-only: never ABM_QUERYPOS or ABM_SETPOS, so no strip and no work-area change.
+    if (m_dirty && m_want->height > 0)
     {
         if (m_lastPositioned && now < *m_lastPositioned + m_config.minInterval)
         {

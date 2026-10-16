@@ -17,11 +17,16 @@ struct WindowFacts
     bool cloaked = false;
     // Screen coordinates, physical pixels.
     geometry::Rect window;
+    // Behind a full-screen app on its monitor (docs/adr/0014): shown, but under that app.
+    bool tucked = false;
+    // Its monitor's edge trigger is in place and answering, so the mouse at the bottom brings it back.
+    bool triggerArmed = false;
 };
 
-// GuardPolicy's rule 7 (docs/adr/0007, 0011): the taskbar may be hidden only while this holds. Committed,
-// visible, not cloaked, and entirely inside one of the connected monitors: an island straddling two monitors,
-// or left where a monitor was, doesn't count.
+// GuardPolicy's rule 7 (docs/adr/0007, 0011, 0014): the taskbar may be hidden only while this holds.
+// Committed, visible, not cloaked, and entirely inside one of the connected monitors: an island straddling
+// two monitors, or left where a monitor was, doesn't count. Tucked behind a full-screen app, it counts only
+// while its edge trigger is armed.
 bool IsOnScreen(const WindowFacts& facts, std::span<const geometry::Rect> monitors) noexcept;
 
 } // namespace harbor::island

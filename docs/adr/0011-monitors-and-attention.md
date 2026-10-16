@@ -25,7 +25,9 @@ The spike (M3 step 0) measured on two monitors (ARM64, 192 and 96 dpi) and on bo
 
 ## Decision
 
-**A strip on every monitor; only the island moves.**
+**A strip on every monitor; only the island moves.** (From M4, ADR 0014: no strips. The hosts keep their
+AppBar registration for full-screen notifications and their edge triggers, the dock's own monitor included
+while the island is tucked behind a full-screen app.)
 - Every monitor gets a host window (`Harbor.Dock.Host`) that never activates and holds that monitor's AppBar
   strip, each with its own `AppBarWorker` thread; hosts come and go with the monitors. The strips stay while
   the island is elsewhere, so moving the dock never changes a work area. Each strip is as tall as the island

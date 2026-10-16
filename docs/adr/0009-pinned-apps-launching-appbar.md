@@ -39,8 +39,10 @@ can take the foreground (the click allows it with `AllowSetForegroundWindow(ASFW
 (not running, hung, or refusing, as on the ARM CI runner), the dock calls `ShellExecuteEx`. Launches run on
 their own STA thread; the route is logged.
 
-**The AppBar.** A bottom-edge strip as tall as the island plus its margins (`core/appbar/appbar_state`, pure;
-`app/appbar_worker` runs it on its own thread, since `SHAppBarMessage` is a synchronous call into Explorer).
+**The AppBar.** (From M4, ADR 0014: the dock is an overlay. The AppBars stay registered only to hear
+`ABN_FULLSCREENAPP` and reserve no strip.) A bottom-edge strip as tall as the island plus its margins
+(`core/appbar/appbar_state`, pure; `app/appbar_worker` runs it on its own thread, since `SHAppBarMessage` is a
+synchronous call into Explorer).
 - `ABM_QUERYPOS` then our height back on its bottom, `ABM_SETPOS` only when the strip changes, repositioning
   at most every 250 ms: `ABN_POSCHANGED` comes in bursts and can't feed itself.
 - `TaskbarCreated` (Explorer restarted, or the primary DPI changed) removes and registers again;

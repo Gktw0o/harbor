@@ -338,9 +338,19 @@ function Move-FocusToShell {
     [HarborSafety.Native]::Click($false)
 }
 
-# Peeks and waits until Explorer shows the taskbar for it.
+# Peeks and waits until Explorer shows the taskbar for it. First lets Explorer settle: right after hiding is
+# turned on it shows the taskbar again several times within a second, and a peek then may not slide in.
 function Start-Peek {
     param($Dock)
+    $script:lastRehides = -1
+    $settled = Wait-Until {
+        $count = Get-DockLogCount 'Explorer showed it again'
+        $quiet = $count -eq $script:lastRehides
+        $script:lastRehides = $count
+        if (-not $quiet) { Start-Sleep -Milliseconds 1500 }
+        $quiet
+    } 15000
+    if ($settled -lt 0) { throw 'Explorer kept showing the taskbar again.' }
     Invoke-TrayButton $Dock
     $ms = Wait-Until { [HarborSafety.Native]::PrimarySlidIn() } 5000
     if ($ms -lt 0) { throw 'The taskbar did not slide in for the peek.' }

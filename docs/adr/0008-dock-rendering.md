@@ -58,6 +58,14 @@ The options for a blurred, rounded surface in a plain Win32 process:
 - Working set with the island drawn: 34.2 MB (safety check, ARM64, 200 %, with UI Automation loaded by the
   script's own UIA queries); 0.006 % CPU idle. Under rule 4, with less headroom than M1's 18.7 MB: the next
   milestones must measure.
+- M3 measured (safety check `budget`, ARM64, two monitors). Icons are scaled down on the CPU before Direct2D
+  sees them: WARP kept about 1.5 MB for every 256 px bitmap it scaled, 80 MB private memory with 30 more
+  apps. After the fix, the idle dock on the user's desktop is at 31.5 MB working set and 8.4 MB private.
+  With 30 more apps it is at 41.1 MB working set and 10.5 MB private; right after a label and a menu it
+  briefly reaches 46.5 MB. The user decided (2026-10-16) how rule 4's 40 MB applies: it holds for the idle
+  dock's working set, and with many apps the measure is private memory, which must stay small and flat. What
+  is above private memory is shared system code (composition, Direct2D/WARP, menus) that Windows can trim.
+  The dock never trims its own working set. M7's performance check looks at it again.
 - The host backdrop isn't guaranteed: on the development PC it drew black one night (on battery, transparency
   on, energy saver off) in the dock and in the spike alike, while the spike showed real blur earlier the same
   day. The island then looks like dark glass (tint over black). The cause is open (M2 checklist 2.1); light

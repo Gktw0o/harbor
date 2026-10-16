@@ -1439,7 +1439,13 @@ void DockWindow::PlaceTriggers()
         {
             const auto height = static_cast<int>(island::Scale(
                 island::kIconDip + 2 * island::kPaddingDip + 2 * island::kMarginDip, host.monitor.dpi));
-            triggers = island::EdgeTriggers(monitors, i, StripOf(host, height), kTriggerRaise);
+            // Over a full-screen app the monitor's bottom edge is the app's, even with a taskbar under it:
+            // the trigger sits there, never over that taskbar.
+            const auto& bounds = host.monitor.bounds;
+            const auto strip =
+                i == dock ? geometry::Rect{bounds.left, bounds.bottom - height, bounds.right, bounds.bottom}
+                          : StripOf(host, height);
+            triggers = island::EdgeTriggers(monitors, i, strip, kTriggerRaise);
         }
         if (triggers.empty())
         {

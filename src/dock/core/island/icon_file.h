@@ -27,8 +27,9 @@ inline constexpr std::size_t kMaxIconFileBytes = 12 + std::size_t{kMaxIconSide} 
 std::optional<IconView> ParseIconFile(std::span<const std::uint8_t> file) noexcept;
 
 // The icon scaled down to fit a side x side square (centred, transparent around it), as premultiplied BGRA
-// rows top to bottom: each pixel the average of the source pixels it covers. For the overflow menu's small
-// icons. Empty for side 0.
+// rows top to bottom: each pixel the average of the source pixels it covers. For the island's icons (Direct2D
+// on WARP keeps memory for every large bitmap it scales) and the overflow menu's small ones. Empty for side
+// 0.
 std::vector<std::uint8_t> Downscale(const IconView& icon, std::uint32_t side);
 
 } // namespace harbor::island

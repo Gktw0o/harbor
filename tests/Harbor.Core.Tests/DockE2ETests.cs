@@ -500,6 +500,60 @@ public sealed class DockE2ETests
         }
     }
 
+    // Rule 4: the dock stays lean with many apps running. Each app's 256 px icon is scaled down before Direct2D
+    // sees it: handing WARP the full icons left about 1.5 MB each (M3 budget: 50 MB more private memory for
+    // 30 apps). Now about 5 MB more, in Debug too. Measured from the dock's own start, which differs by build
+    // and machine (x64 emulated on ARM64 starts higher).
+    [TestMethod]
+    public async Task ThirtyRunningAppsWithIconsKeepTheDockSmall()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        using var windows = new TestWindows(taskbar.Id);
+        var store = new IconStore(dataDir.Path, new CapturingLog());
+        var pixels = new byte[256 * 256 * 4];
+        for (var i = 0; i < pixels.Length; i += 4)
+        {
+            pixels[i] = (byte)(i % 251);
+            pixels[i + 1] = 80;
+            pixels[i + 2] = 160;
+            pixels[i + 3] = 255;
+        }
+        try
+        {
+            await server.WaitForAsync(s => s.Connected);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", TimeSpan.FromSeconds(10)));
+            await Task.Delay(TimeSpan.FromSeconds(1));
+            dock.Refresh();
+            var startMb = dock.PrivateMemorySize64 / 1048576.0;
+            for (var n = 1; n <= 30; n++)
+            {
+                var aumid = $"Harbor.Test.{taskbar.Id}.Busy{n}";
+                await windows.SendAsync($"new {n} {aumid}");
+                var lookup = await server.WaitForMessageAsync<AppLookup>(l => l.Aumid == aumid);
+                // A different icon file for each.
+                pixels[0] = (byte)n;
+                var icon = store.Save(new IconImage(256, 256, pixels));
+                Assert.IsTrue(server.Server.TrySend(new AppInfo(lookup.Id, $"Busy {n}", icon, null, null)));
+            }
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "windows: 30 apps, 30 windows", TimeSpan.FromSeconds(10)));
+            // Every appInfo redraws the island; let the last one land.
+            await Task.Delay(TimeSpan.FromSeconds(3));
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), "icons)");
+
+            dock.Refresh();
+            var privateMb = dock.PrivateMemorySize64 / 1048576.0;
+            Assert.IsTrue(privateMb - startMb < 15,
+                $"{startMb:F1} MB private at the start, {privateMb:F1} MB with 30 apps ({dock.WorkingSet64 / 1048576.0:F1} MB working set)");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
     // While the dock hides the taskbar, the island ends with a tray button (docs/adr/0012). It brings the taskbar
     // forward; Explorer shows it (played here by the test), and the dock leaves it shown until Explorer slides it
     // away, then hides it again.

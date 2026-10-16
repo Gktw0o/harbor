@@ -549,9 +549,16 @@ public sealed partial class DockSupervisorTests
         {
             Assert.IsTrue(FakeTaskbar.WaitUntilVisible(Taskbar.Primary, visible: false, Timeout), "primary taskbar still visible");
             Assert.IsTrue(FakeTaskbar.WaitUntilVisible(Taskbar.Secondaries[0], visible: false, Timeout), "secondary taskbar still visible");
-            Assert.AreEqual(1u, Taskbar.AutoHide);
+            // Seen to fail rarely under load (auto-hide 0, windows hidden): the dock's taskbar lines say why.
+            Assert.AreEqual(1u, Taskbar.AutoHide, TaskbarLogLines());
             Assert.IsTrue(RestoreRecord.TryDecode(File.ReadAllBytes(RecordPath), out var record));
             Assert.AreEqual(0u, record.StateBefore);
+        }
+
+        private string TaskbarLogLines()
+        {
+            var log = TestDock.ReadLogAsync(DataDir).GetAwaiter().GetResult();
+            return string.Join('\n', log.Split('\n').Where(line => line.Contains("taskbar", StringComparison.Ordinal)));
         }
 
         // Harbor Shell going away (closed, crashed): its pipe closes.

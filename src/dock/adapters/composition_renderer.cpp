@@ -6,7 +6,7 @@
 #include <d3d11_4.h>
 #include <DispatcherQueue.h>
 #include <dwmapi.h>
-#include <dxgi.h>
+#include <dxgi1_3.h>
 #include <format>
 #include <string>
 #include <vector>
@@ -91,7 +91,8 @@ struct CompositionRenderer::Impl
         StopWatchingDevice();
         std::string kind;
         winrt::com_ptr<ID3D11Device> d3d;
-        const auto d2d = CreateD2DDevice(kind, d3d);
+        d2d = CreateD2DDevice(kind, d3d);
+        dxgi = d3d.try_as<IDXGIDevice3>();
         if (!graphics)
         {
             winrt::check_hresult(compositor.as<abi::ICompositorInterop>()->CreateGraphicsDevice(
@@ -138,6 +139,19 @@ struct CompositionRenderer::Impl
             device = nullptr;
         }
         removed.reset();
+    }
+
+    // Direct2D's cached resources and the device's spare memory: after drawing, before going idle.
+    void ReleaseDrawingMemory() noexcept
+    {
+        if (d2d)
+        {
+            d2d->ClearResources(0);
+        }
+        if (dxgi)
+        {
+            dxgi->Trim();
+        }
     }
 
     // A size x size surface drawn by draw(context, area): area is the surface's square in the context's
@@ -215,23 +229,30 @@ struct CompositionRenderer::Impl
         });
     }
 
-    // The Shell's icon, scaled down to size (high-quality cubic), centred if it isn't square.
+    // The Shell's icon at size, centred if it isn't square. A larger icon (the Shell's are 256 px) is scaled
+    // down here first and copied as is: handed to Direct2D at 256 px, each one left about 1 MB that WARP
+    // kept (M3 budget, rule 4). A smaller one is scaled up by Direct2D (high-quality cubic).
     wuc::CompositionSurfaceBrush IconBrush(int size, const island::IconView& icon)
     {
+        const auto side = static_cast<std::uint32_t>(size);
+        const bool larger = std::max(icon.width, icon.height) > side;
+        const auto scaled = larger ? island::Downscale(icon, side) : std::vector<std::uint8_t>{};
+        const island::IconView source = larger ? island::IconView{side, side, scaled} : icon;
         return DrawSurface(size, [&](ID2D1DeviceContext& context, const D2D1_RECT_F& area) {
             const D2D1_BITMAP_PROPERTIES properties{
                 {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED}, 96.0f, 96.0f};
             winrt::com_ptr<ID2D1Bitmap> bitmap;
-            winrt::check_hresult(context.CreateBitmap({icon.width, icon.height}, icon.pixels.data(),
-                                                      icon.width * 4, properties, bitmap.put()));
+            winrt::check_hresult(context.CreateBitmap({source.width, source.height}, source.pixels.data(),
+                                                      source.width * 4, properties, bitmap.put()));
             const float extent = area.right - area.left;
-            const float scale = extent / static_cast<float>(std::max(icon.width, icon.height));
-            const float width = icon.width * scale;
-            const float height = icon.height * scale;
+            const float scale = extent / static_cast<float>(std::max(source.width, source.height));
+            const float width = source.width * scale;
+            const float height = source.height * scale;
             const float left = area.left + (extent - width) / 2;
             const float top = area.top + (extent - height) / 2;
             context.DrawBitmap(bitmap.get(), D2D1_RECT_F{left, top, left + width, top + height}, 1.0f,
-                               D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+                               larger ? D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR
+                                      : D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         });
     }
 
@@ -270,6 +291,10 @@ struct CompositionRenderer::Impl
     // Window-relative item rectangles and the hover highlight's margin around one, for SetHovered.
     std::vector<geometry::Rect> items;
     int hoverInset = 0;
+
+    // To let go of what drawing left behind (rule 4): Direct2D's caches and the device's spare memory.
+    winrt::com_ptr<ID2D1Device> d2d;
+    winrt::com_ptr<IDXGIDevice3> dxgi;
 
     winrt::com_ptr<ID3D11Device4> device;
     DWORD removedCookie = 0;
@@ -505,6 +530,8 @@ try
 
     SetHovered(hovered);
     SetMarks(marks);
+    // Every surface is drawn: nothing is drawn again until the next Render.
+    impl.ReleaseDrawingMemory();
 
     const HWND window = impl.window.load();
     impl.compositor.RequestCommitAsync().Completed(

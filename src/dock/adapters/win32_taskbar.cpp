@@ -15,6 +15,10 @@ namespace
 {
 
 // The file's bytes, or nullopt if it can't be opened.
+// Saving the restore record: tries while another process holds the file, and the wait between them.
+constexpr int kRecordAttempts = 5;
+constexpr DWORD kRecordRetryMs = 50;
+
 std::optional<std::string> ReadWholeFile(const std::filesystem::path& path)
 {
     std::ifstream file(path, std::ios::binary);
@@ -250,11 +254,29 @@ bool Win32Taskbar::TurnOnAutoHide()
             return false;
         }
     }
-    if (!MoveFileExW(temporary.c_str(), m_recordPath.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    // A virus scanner looking at the new file can hold it for a moment: a few short tries (this runs on the
+    // Explorer worker, which may wait).
+    DWORD error = ERROR_SUCCESS;
+    for (int attempt = 1; attempt <= kRecordAttempts; ++attempt)
     {
-        m_log.Error(std::format("taskbar: can't save the restore record (error {}); leaving auto-hide off",
-                                GetLastError()));
+        if (MoveFileExW(temporary.c_str(), m_recordPath.c_str(),
+                        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        {
+            error = ERROR_SUCCESS;
+            break;
+        }
+        error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED)
+        {
+            break;
+        }
+        m_log.Warn(std::format("taskbar: the restore record is in use (error {}); trying again", error));
+        Sleep(kRecordRetryMs);
+    }
+    if (error != ERROR_SUCCESS)
+    {
+        m_log.Error(
+            std::format("taskbar: can't save the restore record (error {}); leaving auto-hide off", error));
         return false;
     }
 

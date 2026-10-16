@@ -7,6 +7,8 @@
 #include <variant>
 #include <vector>
 
+#include "core/geometry/rect.h"
+
 namespace harbor::ipc
 {
 
@@ -144,6 +146,51 @@ struct PinRequest
     friend bool operator==(const PinRequest&, const PinRequest&) = default;
 };
 
-using Message = std::variant<Ping, Pong, SetTaskbar, TaskbarState, DockItems, AppLookup, AppInfo, PinRequest>;
+// Dock to Harbor.Shell: where the dock is and what is happening on its monitor, for the island at the top of
+// the same monitor (contracts/dockState.schema.json, v1). Sent on every connect and whenever it changes.
+// Physical pixels in virtual-screen space.
+struct DockState
+{
+    static constexpr int kMaxCoordinate = 65536;
+    static constexpr unsigned kMinDpi = 48;
+    static constexpr unsigned kMaxDpi = 960;
+
+    geometry::Rect monitor;
+    geometry::Rect work;
+    unsigned dpi = 96;
+    // A full-screen app is in front on that monitor (docs/adr/0014).
+    bool fullScreen = false;
+    // The dock is shown: false after the panic hotkey, until hiding is turned on again.
+    bool visible = true;
+    friend bool operator==(const DockState&, const DockState&) = default;
+};
+
+// Harbor.Shell to dock: the island's state (contracts/islandState.schema.json, v1). Sent on every connect and
+// whenever it changes.
+struct IslandState
+{
+    // F13 to F24, without modifiers.
+    static constexpr std::uint32_t kMinHotkey = 0x7C;
+    static constexpr std::uint32_t kMaxHotkey = 0x87;
+
+    // The island exists and can open.
+    bool ready = false;
+    // It is expanded now.
+    bool open = false;
+    // The virtual-key code of its private hotkey, which opens it (docs/adr/0015); none if the Shell got none.
+    std::optional<std::uint32_t> hotkey;
+    friend bool operator==(const IslandState&, const IslandState&) = default;
+};
+
+// Harbor.Shell to dock: start an app the user chose in the island (contracts/launch.schema.json, v1), through
+// Explorer as the dock starts its own items.
+struct Launch
+{
+    AppTarget item;
+    friend bool operator==(const Launch&, const Launch&) = default;
+};
+
+using Message = std::variant<Ping, Pong, SetTaskbar, TaskbarState, DockItems, AppLookup, AppInfo, PinRequest,
+                             DockState, IslandState, Launch>;
 
 } // namespace harbor::ipc

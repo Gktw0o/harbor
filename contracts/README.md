@@ -37,12 +37,27 @@ Both suites list the files when they run, so a new schema or fixture is picked u
 | [`appLookup`](appLookup.schema.json) v1 | dock → Shell | `control` |
 | [`appInfo`](appInfo.schema.json) v1 | Shell → dock | `control` |
 | [`pinRequest`](pinRequest.schema.json) v1 | dock → Shell | `control` |
+| [`dockState`](dockState.schema.json) v1 | dock → Shell | `control` |
+| [`islandState`](islandState.schema.json) v1 | Shell → dock | `control` |
+| [`launch`](launch.schema.json) v1 | Shell → dock | `control` |
 
 The running-app messages (docs/adr/0010): the dock sends `appLookup` once for each app it sees running (and
 again for every live one after a reconnect), naming it by a number of its own; the Shell answers with `appInfo`
 for that number, possibly twice (at once, then with the real name and icon). `pinRequest` asks the Shell to pin
 or unpin; the dock changes nothing until the next `dockItems`. All three are far below the line limit at their
 bounds.
+
+The island messages (M4, docs/adr/0013–0016):
+- `dockState`: the dock's monitor, its work area and DPI, whether a full-screen app is in front there, and
+  whether the dock is shown. Sent on connect and on every change. The island sits at the top of that monitor and
+  hides with the dock.
+- `islandState`: whether the island is ready and open, and its private hotkey (F13–F24). The dock opens the
+  island by pressing that hotkey, which gives Harbor Shell the foreground (ADR 0015), and counts it as opened
+  when `open` turns true.
+- `launch`: an app the user chose in the island. The dock starts it through Explorer, like its own items, so it
+  isn't Harbor Shell's child.
+
+The schemas can't compare two fields, so neither codec checks that a rectangle's right is past its left.
 
 Text goes on the wire as UTF-8; only `"`, `\` and control characters are escaped. `dockItems` is bounded so its
 largest form ([`dock-items-largest.json`](fixtures/valid/dock-items-largest.json), 64,888 bytes) fits one

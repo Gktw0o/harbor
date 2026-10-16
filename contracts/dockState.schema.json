@@ -1,0 +1,39 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:contract:dockState",
+  "title": "dockState v1",
+  "description": "Dock to Harbor.Shell, on the control channel: where the dock is and what is happening on its monitor, for the island at the top of the same monitor (docs/adr/0013). Sent on every connect and whenever any of it changes: the dock moving to another monitor, a display or work-area change, a full-screen app opening or ending there, the panic hotkey. Coordinates are physical pixels in virtual-screen space, right and bottom exclusive. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "definitions": {
+    "coordinate": { "type": "integer", "minimum": -65536, "maximum": 65536 },
+    "rect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["left", "top", "right", "bottom"],
+      "properties": {
+        "left": { "$ref": "#/definitions/coordinate" },
+        "top": { "$ref": "#/definitions/coordinate" },
+        "right": { "$ref": "#/definitions/coordinate" },
+        "bottom": { "$ref": "#/definitions/coordinate" }
+      }
+    }
+  },
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "dockState" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["monitor", "work", "dpi", "fullScreen", "visible"],
+      "properties": {
+        "monitor": { "description": "The bounds of the dock's monitor.", "$ref": "#/definitions/rect" },
+        "work": { "description": "That monitor's work area.", "$ref": "#/definitions/rect" },
+        "dpi": { "description": "That monitor's DPI (96 = 100 %).", "type": "integer", "minimum": 48, "maximum": 960 },
+        "fullScreen": { "description": "A full-screen app is in front on that monitor (docs/adr/0014).", "type": "boolean" },
+        "visible": { "description": "The dock is shown: false after the panic hotkey, until hiding the taskbar is turned on again.", "type": "boolean" }
+      }
+    }
+  }
+}

@@ -91,6 +91,29 @@ public static class MessageCodec
                     writer.WriteString("kind", WireName(request.Item.Kind));
                     writer.WriteString("target", request.Item.Target);
                     break;
+                case DockStateMessage state:
+                    WriteRect(writer, "monitor", state.Monitor);
+                    WriteRect(writer, "work", state.Work);
+                    writer.WriteNumber("dpi", state.Dpi);
+                    writer.WriteBoolean("fullScreen", state.FullScreen);
+                    writer.WriteBoolean("visible", state.Visible);
+                    break;
+                case IslandState island:
+                    writer.WriteBoolean("ready", island.Ready);
+                    writer.WriteBoolean("open", island.Open);
+                    if (island.Hotkey is { } hotkey)
+                    {
+                        writer.WriteNumber("hotkey", hotkey);
+                    }
+                    else
+                    {
+                        writer.WriteNull("hotkey");
+                    }
+                    break;
+                case Launch launch:
+                    writer.WriteString("kind", WireName(launch.Item.Kind));
+                    writer.WriteString("target", launch.Item.Target);
+                    break;
             }
             writer.WriteEndObject();
             writer.WriteEndObject();
@@ -161,8 +184,21 @@ public static class MessageCodec
         AppLookup => "appLookup",
         AppInfo => "appInfo",
         PinRequest => "pinRequest",
+        DockStateMessage => "dockState",
+        IslandState => "islandState",
+        Launch => "launch",
         _ => throw new ArgumentException($"Unknown message type {message.GetType().Name}.", nameof(message)),
     };
+
+    private static void WriteRect(Utf8JsonWriter writer, string name, ScreenRect rect)
+    {
+        writer.WriteStartObject(name);
+        writer.WriteNumber("left", rect.Left);
+        writer.WriteNumber("top", rect.Top);
+        writer.WriteNumber("right", rect.Right);
+        writer.WriteNumber("bottom", rect.Bottom);
+        writer.WriteEndObject();
+    }
 
     private static string WireName(DockItemKind kind) => kind == DockItemKind.Path ? "path" : "app";
 
@@ -261,6 +297,9 @@ public static class MessageCodec
             "appLookup" => DecodeAppLookup,
             "appInfo" => DecodeAppInfo,
             "pinRequest" => DecodePinRequest,
+            "dockState" => DecodeDockState,
+            "islandState" => DecodeIslandState,
+            "launch" => DecodeLaunch,
             _ => null,
         };
         if (decodePayload is null)
@@ -428,6 +467,83 @@ public static class MessageCodec
             return (null, DecodeError.InvalidField);
         }
         return (new PinRequest(action == "pin" ? PinAction.Pin : PinAction.Unpin, new AppTarget(kind, target)), null);
+    }
+
+    private static (Message?, DecodeError?) DecodeDockState(Dictionary<string, JsonElement> fields)
+    {
+        if (CheckKeys(fields, "monitor", "work", "dpi", "fullScreen", "visible") is { } error)
+        {
+            return (null, error);
+        }
+        var dpi = fields["dpi"];
+        if (!TryGetRect(fields["monitor"], out var monitor) || !TryGetRect(fields["work"], out var work) ||
+            dpi.ValueKind != JsonValueKind.Number || !dpi.TryGetInt32(out var dots) || dots < DockStateMessage.MinDpi ||
+            dots > DockStateMessage.MaxDpi || !IsBoolean(fields["fullScreen"], out var fullScreen) ||
+            !IsBoolean(fields["visible"], out var visible))
+        {
+            return (null, DecodeError.InvalidField);
+        }
+        return (new DockStateMessage(monitor, work, dots, fullScreen, visible), null);
+    }
+
+    private static (Message?, DecodeError?) DecodeIslandState(Dictionary<string, JsonElement> fields)
+    {
+        if (CheckKeys(fields, "ready", "open", "hotkey") is { } error)
+        {
+            return (null, error);
+        }
+        var hotkey = fields["hotkey"];
+        int? key = null;
+        if (hotkey.ValueKind != JsonValueKind.Null)
+        {
+            if (hotkey.ValueKind != JsonValueKind.Number || !hotkey.TryGetInt32(out var code) ||
+                code < IslandState.MinHotkey || code > IslandState.MaxHotkey)
+            {
+                return (null, DecodeError.InvalidField);
+            }
+            key = code;
+        }
+        if (!IsBoolean(fields["ready"], out var ready) || !IsBoolean(fields["open"], out var open))
+        {
+            return (null, DecodeError.InvalidField);
+        }
+        return (new IslandState(ready, open, key), null);
+    }
+
+    private static (Message?, DecodeError?) DecodeLaunch(Dictionary<string, JsonElement> fields)
+    {
+        if (CheckKeys(fields, "kind", "target") is { } error)
+        {
+            return (null, error);
+        }
+        if (!TryGetKind(fields["kind"], out var kind) || !TryGetText(fields["target"], DockItems.MaxTargetLength, out var target))
+        {
+            return (null, DecodeError.InvalidField);
+        }
+        return (new Launch(new AppTarget(kind, target)), null);
+    }
+
+    // {"left", "top", "right", "bottom"}, each an integer within DockStateMessage.MaxCoordinate.
+    private static bool TryGetRect(JsonElement element, [NotNullWhen(true)] out ScreenRect? rect)
+    {
+        rect = null;
+        if ((ReadFields(element, out var fields) ?? CheckKeys(fields, "left", "top", "right", "bottom")) is not null)
+        {
+            return false;
+        }
+        var sides = new int[4];
+        string[] names = ["left", "top", "right", "bottom"];
+        for (var i = 0; i < names.Length; i++)
+        {
+            var side = fields[names[i]];
+            if (side.ValueKind != JsonValueKind.Number || !side.TryGetInt32(out sides[i]) ||
+                sides[i] < -DockStateMessage.MaxCoordinate || sides[i] > DockStateMessage.MaxCoordinate)
+            {
+                return false;
+            }
+        }
+        rect = new ScreenRect(sides[0], sides[1], sides[2], sides[3]);
+        return true;
     }
 
     // null, or {"kind", "target"} as in dockItems.

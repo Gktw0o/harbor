@@ -176,8 +176,13 @@ TEST_F(Win32TaskbarTest, TurningAutoHideOnWaitsForARecordAnotherProcessHolds)
     wil::unique_hfile held(CreateFileW(RecordPath().c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     ASSERT_TRUE(held);
+    // Let go once the dock has found it in use (not after a fixed time: a slow machine may not have tried
+    // yet).
     std::thread release([&] {
-        Sleep(120);
+        for (int i = 0; i < 400 && !log.Contains("the restore record is in use"); ++i)
+        {
+            Sleep(5);
+        }
         held.reset();
     });
 

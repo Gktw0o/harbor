@@ -85,6 +85,22 @@ TEST(CommandLine, AcceptsATestOrphanTimeoutInTestModeOnly)
                        L"--test-orphan-timeout-ms", L"500", L"--test-orphan-timeout-ms", L"500"})));
 }
 
+TEST(CommandLine, AcceptsTestForegroundInTestModeOnly)
+{
+    EXPECT_TRUE(std::get<DockOptions>(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t",
+                                             L"--test-taskbar", L"ab", L"--test-foreground"}))
+                    .testForeground);
+    EXPECT_FALSE(std::get<DockOptions>(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t",
+                                              L"--test-taskbar", L"ab"}))
+                     .testForeground);
+    // A dock started by the user never opens Start in a test's place, and the flag takes no value.
+    EXPECT_TRUE(IsError(Parse({L"--test-foreground"})));
+    EXPECT_TRUE(IsError(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t", L"--test-taskbar",
+                               L"ab", L"--test-foreground", L"--test-foreground"})));
+    EXPECT_TRUE(IsError(Parse({L"--pipe-name", L"harbor.test.1", L"--data-dir", L"C:\\t", L"--test-taskbar",
+                               L"ab", L"--test-foreground", L"1"})));
+}
+
 TEST(CommandLine, RejectsInvalidTestIds)
 {
     EXPECT_TRUE(IsError(Parse({L"--test-taskbar", L"AB"})));

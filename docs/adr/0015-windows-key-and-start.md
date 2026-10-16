@@ -40,6 +40,10 @@ The M4 spike (2026-10-16, ARM64; three rounds with the user pressing the keys):
 **The Start button** is the dock's first item: a glyph drawn like the tray chevron, UI Automation button
 "Start". A new `core/island/slot_map` places it with the slots, "…" and the tray button. Clicking it does what
 a lone Windows key does.
+- (Step 5.) Until the island exists, and as the button's fallback after it, the button opens Windows' Start
+  with `WM_SYSCOMMAND`/`SC_TASKLIST`, which Windows documents as "activates the Start menu". No keys are
+  injected: a held Shift can't turn Ctrl+Esc into Ctrl+Shift+Esc (Task Manager), and an elevated window in
+  front can't block it. The hook thread, which has no window, keeps Ctrl+Esc.
 
 **The hook** lives in the dock (C++), on its own `app/keyboard_hook` thread. It is never in .NET, where a
 garbage-collection pause would stall typing system-wide.

@@ -51,9 +51,10 @@ constexpr UINT kAppBarCallback = WM_APP + 9;
 constexpr UINT kWindowsChanged = WM_APP + 12;
 // Posted by UI Automation's Invoke or Expand on the "…" button: open the overflow menu outside that call.
 constexpr UINT kOpenOverflowMessage = WM_APP + 17;
-// The "…" button's UI Automation key: no item has it.
+// The UI Automation keys of the "…", tray and Start buttons: no item has them.
 constexpr std::uint64_t kOverflowKey = std::numeric_limits<std::uint64_t>::max();
 constexpr std::uint64_t kTrayKey = kOverflowKey - 1;
+constexpr std::uint64_t kStartKey = kOverflowKey - 2;
 
 constexpr UINT_PTR kOrphanTimer = 1;
 constexpr UINT_PTR kDeviceRetryTimer = 2;
@@ -589,24 +590,26 @@ void DockWindow::RebuildModel(bool force)
 std::vector<island::ItemMarks> DockWindow::VisibleMarks() const
 {
     std::vector<island::ItemMarks> marks;
-    const auto visible = m_layout ? std::min(m_layout->items.size(), m_model.slots.size()) : 0;
+    const auto visible = m_layout ? std::min(m_layout->items.size(), m_places.entries.size()) : 0;
     for (std::size_t i = 0; i < visible; ++i)
     {
-        if (i == m_tray)
-        {
-            marks.push_back({});
-            continue;
-        }
-        if (i == m_overflow)
+        const auto& place = m_places.entries[i];
+        if (place.kind == island::SlotMap::Kind::Overflow && place.slot <= m_model.slots.size())
         {
             // The "…" button: highlighted while one of the apps behind it needs attention.
             const bool attention =
-                std::any_of(m_model.slots.begin() + static_cast<std::ptrdiff_t>(i), m_model.slots.end(),
-                            [](const auto& slot) { return slot.marks.attention; });
+                std::any_of(m_model.slots.begin() + static_cast<std::ptrdiff_t>(place.slot),
+                            m_model.slots.end(), [](const auto& slot) { return slot.marks.attention; });
             marks.push_back({.attention = attention});
             continue;
         }
-        marks.push_back(m_model.slots[i].marks);
+        if (place.kind != island::SlotMap::Kind::Slot || place.slot >= m_model.slots.size())
+        {
+            // The Start and tray buttons.
+            marks.push_back({});
+            continue;
+        }
+        marks.push_back(m_model.slots[place.slot].marks);
     }
     return marks;
 }
@@ -640,33 +643,30 @@ void DockWindow::Refresh(bool force)
     const auto appearance = adapters::ReadSystemAppearance(m_energySaver);
     const auto style = island::StyleFor(appearance);
     const auto slots = m_model.slots.size();
-    // A divider when running apps follow pinned items; the tray button last while the taskbar is hidden.
+    // The Start button first (docs/adr/0015); a divider when running apps follow pinned items; the tray
+    // button last while the taskbar is hidden.
     const bool divider = m_model.pinned > 0 && slots > m_model.pinned;
-    const auto count = slots + (m_taskbarHidden ? 1 : 0);
+    const auto count = 1 + slots + (m_taskbarHidden ? 1 : 0);
     const auto metrics = island::MeasureFor(monitor.bounds.Width(), monitor.dpi, count, divider);
     const geometry::Rect strip = StripOf(host, metrics.StripHeight());
-    auto layout = island::Arrange(strip, metrics, m_model.pinned);
+    auto layout = island::Arrange(strip, metrics, 1 + m_model.pinned);
+    // What doesn't fit goes behind a "…" button before the tray button.
+    auto places = island::ArrangeSlots(/*start=*/true, slots, m_taskbarHidden, metrics.visibleCount);
     PlaceTriggers();
 
     if (!force && m_layout && layout.island == m_layout->island && layout.items == m_layout->items &&
-        layout.divider == m_layout->divider && style == m_style && monitor.dpi == m_dpi)
+        layout.divider == m_layout->divider && places == m_places && style == m_style && monitor.dpi == m_dpi)
     {
         return;
     }
-    // The tray button keeps the last place; what doesn't fit before it goes behind a "…" button.
-    const std::optional<std::size_t> tray =
-        m_taskbarHidden && metrics.visibleCount > 0 ? std::optional(metrics.visibleCount - 1) : std::nullopt;
-    const auto room = metrics.visibleCount - (tray ? 1 : 0);
-    const std::optional<std::size_t> overflow =
-        room < slots && room > 0 ? std::optional(room - 1) : std::nullopt;
-    if (overflow && (overflow != m_overflow || slots != m_overflowCount))
+    if (const auto overflow = places.IndexOf(island::SlotMap::Kind::Overflow);
+        overflow && (places != m_places || slots != m_overflowCount))
     {
-        m_log.Info(
-            std::format("island: {} of {} items fit; the rest are in the overflow menu", *overflow, slots));
+        m_log.Info(std::format("island: {} of {} items fit; the rest are in the overflow menu",
+                               places.entries[*overflow].slot, slots));
     }
-    m_overflow = overflow;
+    m_places = std::move(places);
     m_overflowCount = slots;
-    m_tray = tray;
 
     const auto& island = layout.island;
     // Tucked behind a full-screen app, else above everything.
@@ -701,23 +701,25 @@ void DockWindow::Refresh(bool force)
     const auto& iconsDir = m_options.iconsDir;
     const adapters::CompositionRenderer::IconSource icons =
         [&](std::size_t index, std::vector<std::uint8_t>& file) -> std::optional<island::IconView> {
-        if (index >= items.size())
+        const auto slot = SlotAt(index);
+        if (!slot || *slot >= items.size())
         {
             return std::nullopt;
         }
-        const auto& icon = items[index].icon;
+        const auto& icon = items[*slot].icon;
         file = icon ? adapters::ReadIconFile(iconsDir, *icon) : std::vector<std::uint8_t>{};
         auto view = island::ParseIconFile(file);
         drawn += view.has_value() ? 1 : 0;
         return view;
     };
 
-    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, m_overflow, m_tray,
-                          kRenderCommitted, ++m_renderGeneration))
+    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, m_places, kRenderCommitted,
+                          ++m_renderGeneration))
     {
-        m_log.Info(std::format("island: {} items ({} icons), {}x{} at {},{} ({} dpi, {})",
-                               m_layout->items.size(), drawn, island.Width(), island.Height(), island.left,
-                               island.top, m_dpi, m_style.backdrop ? "backdrop" : "solid"));
+        // The items after the Start button: the dock's slots, the "…" and tray buttons.
+        m_log.Info(std::format("island: {} items ({} icons) after Start, {}x{} at {},{} ({} dpi, {})",
+                               m_layout->items.size() - 1, drawn, island.Width(), island.Height(),
+                               island.left, island.top, m_dpi, m_style.backdrop ? "backdrop" : "solid"));
     }
     UpdatePresentable();
 }
@@ -862,7 +864,12 @@ void DockWindow::ShowLabel(std::size_t index)
     {
         m_labelItem = index;
         // Which item, never what it says.
-        m_log.Info(std::format("label: shown for item {}", index));
+        const auto slot = SlotAt(index);
+        const char* button = IsKind(index, island::SlotMap::Kind::Start)  ? "Start"
+                             : IsKind(index, island::SlotMap::Kind::Tray) ? "tray"
+                                                                          : "overflow";
+        m_log.Info(slot ? std::format("label: shown for item {}", *slot)
+                        : std::format("label: shown for the {} button", button));
     }
 }
 
@@ -901,25 +908,54 @@ void DockWindow::OnClick(LPARAM position)
 
 bool DockWindow::ClickItem(std::size_t index, std::string_view how)
 {
-    if (!m_layout || index >= m_layout->items.size())
+    if (!m_layout || index >= m_layout->items.size() || index >= m_places.entries.size())
     {
         return false;
     }
-    if (index == m_tray)
+    const auto& place = m_places.entries[index];
+    switch (place.kind)
     {
+    case island::SlotMap::Kind::Start:
+        OpenWindowsStart(how);
+        return true;
+    case island::SlotMap::Kind::Tray:
         PeekTaskbar(how);
         return true;
-    }
-    if (index >= m_model.slots.size())
-    {
-        return false;
-    }
-    if (index == m_overflow)
-    {
+    case island::SlotMap::Kind::Overflow:
         OpenOverflowMenu(how);
         return true;
+    case island::SlotMap::Kind::Slot:
+        return ClickSlot(place.slot, how);
     }
-    return ClickSlot(index, how);
+    return false;
+}
+
+std::optional<std::size_t> DockWindow::SlotAt(std::size_t index) const
+{
+    if (index >= m_places.entries.size() || m_places.entries[index].kind != island::SlotMap::Kind::Slot)
+    {
+        return std::nullopt;
+    }
+    return m_places.entries[index].slot;
+}
+
+bool DockWindow::IsKind(std::size_t index, island::SlotMap::Kind kind) const
+{
+    return index < m_places.entries.size() && m_places.entries[index].kind == kind;
+}
+
+void DockWindow::OpenWindowsStart(std::string_view how)
+{
+    // Until the island opens instead (docs/adr/0015): Windows' Start, as the Windows key would. Windows
+    // documents SC_TASKLIST as "activates the Start menu"; no keys are injected, so a held Shift can't make
+    // it Ctrl+Shift+Esc, and an elevated window in front doesn't stop it.
+    if (!m_options.opensStart)
+    {
+        m_log.Info(std::format("click: Start ({}): Windows Start (a test dock: not opened)", how));
+        return;
+    }
+    PostMessageW(m_hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
+    m_log.Info(std::format("click: Start ({}): Windows Start", how));
 }
 
 bool DockWindow::ClickSlot(std::size_t index, std::string_view how)
@@ -1000,12 +1036,13 @@ void DockWindow::OnRightClick(LPARAM position)
 
 void DockWindow::OpenOverflowMenu(std::string_view how)
 {
-    if (!m_layout || !m_overflow || *m_overflow >= m_layout->items.size() || m_menuOpen)
+    const auto at = m_places.IndexOf(island::SlotMap::Kind::Overflow);
+    if (!m_layout || !at || *at >= m_layout->items.size() || m_menuOpen)
     {
         return;
     }
-    // Copies, as for OpenMenu.
-    const auto first = *m_overflow;
+    // Copies, as for OpenMenu. The slots from first on are behind the button.
+    const auto first = m_places.entries[*at].slot;
     std::vector<std::string> names;
     std::vector<std::vector<std::uint8_t>> icons;
     const auto side = static_cast<std::uint32_t>(island::Scale(16, m_dpi));
@@ -1020,7 +1057,7 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
         icons.push_back(icon ? island::Downscale(*icon, side) : std::vector<std::uint8_t>{});
     }
     const auto menu = island::BuildOverflowMenu(names, first);
-    const auto& button = m_layout->items[first];
+    const auto& button = m_layout->items[*at];
     const auto& island = m_layout->island;
     HideLabel();
     // An open menu keeps the island on top over a full-screen app.
@@ -1044,19 +1081,20 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
 
 void DockWindow::OpenMenu(std::size_t index, std::string_view how)
 {
-    // The tray button has no menu.
-    if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size() || m_menuOpen ||
-        index == m_tray)
-    {
-        return;
-    }
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         OpenOverflowMenu(how);
         return;
     }
+    // The Start and tray buttons have no menu.
+    const auto slotIndex = SlotAt(index);
+    if (!m_layout || index >= m_layout->items.size() || !slotIndex || *slotIndex >= m_model.slots.size() ||
+        m_menuOpen)
+    {
+        return;
+    }
     // Copies: the model can change while the menu is open (its loop keeps handling this window's messages).
-    const auto slot = m_model.slots[index];
+    const auto slot = m_model.slots[*slotIndex];
     auto windows = WindowsOf(slot);
     std::sort(windows.begin(), windows.end(), [](const auto& a, const auto& b) { return a.seen < b.seen; });
     std::optional<ipc::DockItem> pin;
@@ -1103,7 +1141,7 @@ void DockWindow::OpenMenu(std::size_t index, std::string_view how)
 
     const auto& command = menu[*chosen];
     // Which item and what was done, never which app or window.
-    m_log.Info(std::format("menu: item {} ({}): {}", index, how, Describe(command.command)));
+    m_log.Info(std::format("menu: item {} ({}): {}", *slotIndex, how, Describe(command.command)));
     switch (command.command)
     {
     case island::MenuCommand::Title:
@@ -1121,8 +1159,9 @@ void DockWindow::OpenMenu(std::size_t index, std::string_view how)
         if (m_launcher)
         {
             AllowSetForegroundWindow(ASFW_ANY);
-            m_launcher->Launch(
-                index, pin ? *pin : ipc::DockItem{launch->kind, launch->target, slot.name, std::nullopt});
+            m_launcher->Launch(*slotIndex,
+                               pin ? *pin
+                                   : ipc::DockItem{launch->kind, launch->target, slot.name, std::nullopt});
         }
         break;
     case island::MenuCommand::Pin:
@@ -1192,35 +1231,43 @@ std::size_t DockWindow::ItemCount() const
 
 std::uint64_t DockWindow::ItemKey(std::size_t index) const
 {
-    if (index == m_tray)
+    if (IsKind(index, island::SlotMap::Kind::Start))
+    {
+        return kStartKey;
+    }
+    if (IsKind(index, island::SlotMap::Kind::Tray))
     {
         return kTrayKey;
     }
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         return kOverflowKey;
     }
-    return index < m_itemKeys.size() ? m_itemKeys[index] : 0;
+    const auto slot = SlotAt(index);
+    return slot && *slot < m_itemKeys.size() ? m_itemKeys[*slot] : 0;
 }
 
 std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
 {
+    if (key == kStartKey)
+    {
+        return m_places.IndexOf(island::SlotMap::Kind::Start);
+    }
     if (key == kOverflowKey)
     {
-        return m_overflow;
+        return m_places.IndexOf(island::SlotMap::Kind::Overflow);
     }
     if (key == kTrayKey)
     {
-        return m_tray;
+        return m_places.IndexOf(island::SlotMap::Kind::Tray);
     }
-    // Items behind the "…" button aren't on the island, nor is anything from the tray button on.
-    const auto visible =
-        std::min({m_overflow.value_or(ItemCount()), m_tray.value_or(ItemCount()), m_itemKeys.size()});
-    for (std::size_t i = 0; i < visible; ++i)
+    // Items behind the "…" button aren't on the island.
+    for (std::size_t slot = 0; slot < m_itemKeys.size(); ++slot)
     {
-        if (m_itemKeys[i] == key)
+        if (m_itemKeys[slot] == key)
         {
-            return i;
+            const auto place = m_places.IndexOfSlot(slot);
+            return place && *place < ItemCount() ? place : std::nullopt;
         }
     }
     return std::nullopt;
@@ -1228,7 +1275,7 @@ std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
 
 bool DockWindow::IsOverflow(std::size_t index) const
 {
-    return index == m_overflow;
+    return IsKind(index, island::SlotMap::Kind::Overflow);
 }
 
 bool DockWindow::IsOverflowMenuOpen() const
@@ -1243,19 +1290,24 @@ void DockWindow::CloseMenu()
 
 std::wstring DockWindow::ItemName(std::size_t index) const
 {
-    if (index == m_tray)
+    if (IsKind(index, island::SlotMap::Kind::Start))
+    {
+        return L"Start";
+    }
+    if (IsKind(index, island::SlotMap::Kind::Tray))
     {
         return L"Show taskbar";
     }
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         return L"More apps";
     }
-    if (index >= m_model.slots.size())
+    const auto slot = SlotAt(index);
+    if (!slot || *slot >= m_model.slots.size())
     {
         return {};
     }
-    const auto& name = m_model.slots[index].name;
+    const auto& name = m_model.slots[*slot].name;
     const int length =
         MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
     std::wstring wide(static_cast<std::size_t>(std::max(length, 0)), L'\0');
@@ -1265,25 +1317,24 @@ std::wstring DockWindow::ItemName(std::size_t index) const
 
 std::wstring DockWindow::ItemStatus(std::size_t index) const
 {
-    if (index == m_tray)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
+        const auto first = m_places.entries[index].slot;
+        return std::format(L"{} more apps", m_model.slots.size() - std::min(first, m_model.slots.size()));
+    }
+    const auto slot = SlotAt(index);
+    if (!slot || *slot >= m_model.slots.size())
+    {
+        // The Start and tray buttons.
         return {};
     }
-    if (index == m_overflow)
-    {
-        return std::format(L"{} more apps", m_model.slots.size() - index);
-    }
-    if (index >= m_model.slots.size())
-    {
-        return {};
-    }
-    const auto windows = WindowsOf(m_model.slots[index]).size();
+    const auto windows = WindowsOf(m_model.slots[*slot]).size();
     if (windows == 0)
     {
         return {};
     }
     std::wstring status = windows == 1 ? L"running, 1 window" : std::format(L"running, {} windows", windows);
-    if (m_model.slots[index].marks.attention)
+    if (m_model.slots[*slot].marks.attention)
     {
         status += L", needs attention";
     }
@@ -1307,7 +1358,7 @@ std::optional<std::size_t> DockWindow::ItemAt(POINT screenPoint) const
 
 bool DockWindow::InvokeItem(std::size_t index)
 {
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         // Posted: a menu's loop mustn't run inside the screen reader's call.
         return PostMessageW(m_hwnd, kOpenOverflowMessage, 0, 0) != FALSE;
@@ -1859,13 +1910,20 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         PlaceTriggers();
         return 0;
     case kTestShowLabelMessage:
-        ShowLabel(wParam);
+        // wParam is a dock item (a slot), wherever it is on the island.
+        if (const auto place = m_places.IndexOfSlot(wParam))
+        {
+            ShowLabel(*place);
+        }
         return 0;
     case kTestHideLabelMessage:
         HideLabel();
         return 0;
     case kTestOpenMenuMessage:
-        OpenMenu(wParam, "test hook");
+        if (const auto place = m_places.IndexOfSlot(wParam))
+        {
+            OpenMenu(*place, "test hook");
+        }
         return 0;
     case kTestCloseMenuMessage:
         EndMenu();

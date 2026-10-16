@@ -129,6 +129,46 @@ public sealed class DockE2ETests
         }
     }
 
+    // The Start button comes first and opens Windows' Start, until the island opens instead (docs/adr/0015).
+    // Start opens on the screen, so CI only; Esc closes it again.
+    [TestMethod]
+    public async Task TheStartButtonOpensWindowsStart()
+    {
+        TestDock.RequireForegroundTests();
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        var timeout = TimeSpan.FromSeconds(15);
+        static bool StartIsOpen() => IslandWindow.ForegroundProcessName() is "StartMenuExperienceHost" or "SearchHost";
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+            var (_, tree) = await TestDock.RunUiaClientAsync(island, "list");
+            Assert.AreEqual($"{Button}\tStart", tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[1], tree);
+            Assert.IsFalse(StartIsOpen(), "Start was open before the test");
+
+            var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "Start");
+            Assert.AreEqual(0, code, output);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "click: Start (UI Automation): Windows Start", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(StartIsOpen()), timeout),
+                $"Start didn't open; in front: {IslandWindow.ForegroundProcessName()}");
+        }
+        finally
+        {
+            if (StartIsOpen())
+            {
+                IslandWindow.PressEscape();
+                await TestDock.WaitUntilAsync(() => Task.FromResult(!StartIsOpen()), TimeSpan.FromSeconds(5));
+            }
+            await StopAsync(dock);
+        }
+    }
+
     // A full-screen app on the dock's monitor (docs/adr/0014): a moment later the island steps behind it, still
     // shown, and that monitor's edge trigger waits at the bottom edge to bring it back; when the app closes, the
     // island is on top again and the trigger goes.
@@ -221,9 +261,10 @@ public sealed class DockE2ETests
             Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", TimeSpan.FromSeconds(10)));
             var island = IslandWindow.Find(dock.Id);
 
-            // The only item's middle: the island is as tall as one item plus its padding.
-            var size = IslandWindow.Bounds(island).Height;
-            IslandWindow.Click(island, size / 2, size / 2);
+            // The only item's middle, after the Start button: the island is as tall as one item plus its padding,
+            // and the item is last.
+            var bounds = IslandWindow.Bounds(island);
+            IslandWindow.Click(island, bounds.Width - bounds.Height / 2, bounds.Height / 2);
 
             var marker = app + ".launched";
             var deadline = Stopwatch.StartNew();
@@ -270,7 +311,7 @@ public sealed class DockE2ETests
             var (listed, tree) = await TestDock.RunUiaClientAsync(island, "list");
             Assert.AreEqual(0, listed, tree);
             CollectionAssert.AreEqual(
-                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tÜnïcødé \U0001D538", $"{Button}\tMarker" },
+                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tStart", $"{Button}\tÜnïcødé \U0001D538", $"{Button}\tMarker" },
                 tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), tree);
 
             var (invoked, _) = await TestDock.RunUiaClientAsync(island, "invoke", "Marker");
@@ -418,7 +459,7 @@ public sealed class DockE2ETests
             var (listed, tree) = await TestDock.RunUiaClientAsync(island, "list");
             Assert.AreEqual(0, listed, tree);
             CollectionAssert.AreEqual(
-                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tIdle", $"{Button}\tPinned app", $"{Button}\tharbor_test_windows" },
+                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tStart", $"{Button}\tIdle", $"{Button}\tPinned app", $"{Button}\tharbor_test_windows" },
                 tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), tree);
             async Task<string> StatusAsync(string name) =>
                 (await TestDock.RunUiaClientAsync(island, "status", name)).Output.TrimEnd('\r', '\n');
@@ -623,12 +664,12 @@ public sealed class DockE2ETests
             var island = IslandWindow.Find(dock.Id);
             async Task<string[]> ItemsAsync() =>
                 (await TestDock.RunUiaClientAsync(island, "list")).Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[1..];
-            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle" }, await ItemsAsync());
+            CollectionAssert.AreEqual(new[] { $"{Button}\tStart", $"{Button}\tIdle" }, await ItemsAsync());
 
             Assert.IsTrue(server.Server.TrySend(new SetTaskbar(Hidden: true)));
             await server.WaitForMessageAsync<TaskbarState>(s => s.Hidden);
             Assert.IsTrue(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: false));
-            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle", $"{Button}\tShow taskbar" }, await ItemsAsync());
+            CollectionAssert.AreEqual(new[] { $"{Button}\tStart", $"{Button}\tIdle", $"{Button}\tShow taskbar" }, await ItemsAsync());
 
             var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "Show taskbar");
             Assert.AreEqual(0, code, output);
@@ -649,7 +690,7 @@ public sealed class DockE2ETests
             FakeTaskbar.Move(taskbar.Primary, 0, 0);
             Assert.IsTrue(server.Server.TrySend(new SetTaskbar(Hidden: false)));
             await server.WaitForMessageAsync<TaskbarState>(s => !s.Hidden);
-            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle" }, await ItemsAsync());
+            CollectionAssert.AreEqual(new[] { $"{Button}\tStart", $"{Button}\tIdle" }, await ItemsAsync());
         }
         finally
         {
@@ -851,10 +892,11 @@ public sealed class DockE2ETests
             var islandBounds = IslandWindow.Bounds(island);
             Assert.IsTrue(bounds.Bottom < islandBounds.Top, $"label {bounds} island {islandBounds}");
             Assert.IsTrue(bounds.Width > 0 && bounds.Height > 0, bounds.ToString());
-            // One item: centred on the island too (within a pixel of rounding).
+            // Centred on its item, the last one after the Start button, as wide as the island is tall (within a
+            // pixel or two of rounding).
             var labelCentre = (bounds.Left + bounds.Right) / 2;
-            var islandCentre = (islandBounds.Left + islandBounds.Right) / 2;
-            Assert.IsTrue(Math.Abs(labelCentre - islandCentre) <= 1, $"label {bounds} island {islandBounds}");
+            var itemCentre = islandBounds.Right - islandBounds.Height / 2;
+            Assert.IsTrue(Math.Abs(labelCentre - itemCentre) <= 2, $"label {bounds} island {islandBounds}");
             Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains("A name", StringComparison.Ordinal), "the log names an app");
 
             TestDock.PressPanicHotkey(server.PipeName);
@@ -915,8 +957,8 @@ public sealed class DockE2ETests
             var island = IslandWindow.Find(dock.Id);
             var (_, tree) = await TestDock.RunUiaClientAsync(island, "list");
             var lines = tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
-            // The tool bar, the items that fit, and the button.
-            Assert.HasCount(1 + visible + 1, lines, tree);
+            // The tool bar, the Start button, the items that fit, and the "…" button.
+            Assert.HasCount(1 + 1 + visible + 1, lines, tree);
             Assert.AreEqual($"{Button}\tMore apps", lines[^1]);
             Assert.AreEqual($"status\t{total - visible} more apps",
                 (await TestDock.RunUiaClientAsync(island, "status", "More apps")).Output.TrimEnd('\r', '\n'));

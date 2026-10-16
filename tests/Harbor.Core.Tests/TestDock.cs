@@ -44,12 +44,15 @@ internal static partial class TestDock
     // is typing in: they run in CI, and locally only with HARBOR_FOREGROUND_TESTS=1.
     public static void RequireForegroundTests()
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase) &&
-            Environment.GetEnvironmentVariable("HARBOR_FOREGROUND_TESTS") != "1")
+        if (!ForegroundTestsAllowed)
         {
             Assert.Inconclusive("Changes the foreground: runs in CI, or set HARBOR_FOREGROUND_TESTS=1.");
         }
     }
+
+    public static bool ForegroundTestsAllowed =>
+        string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase) ||
+        Environment.GetEnvironmentVariable("HARBOR_FOREGROUND_TESTS") == "1";
 
     // Polls until check() holds; false after the timeout.
     public static async Task<bool> WaitUntilAsync(Func<Task<bool>> check, TimeSpan timeout)
@@ -121,9 +124,12 @@ internal static partial class TestDock
         return (process.ExitCode, output);
     }
 
-    // A short ping timeout (the real one is 5 s) keeps the tests that wait for it quick.
+    // A short ping timeout (the real one is 5 s) keeps the tests that wait for it quick. Only where tests may take
+    // the focus does a test dock's Start button open Windows' Start (--test-foreground).
     public static string[] Arguments(string pipeName, string dataDir, FakeTaskbar taskbar) =>
-        ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];
+        ForegroundTestsAllowed
+            ? ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500", "--test-foreground"]
+            : ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];
 
     public static Process Start(string pipeName, string dataDir, FakeTaskbar taskbar, params string[] extraArguments)
     {

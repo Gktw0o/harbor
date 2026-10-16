@@ -113,4 +113,35 @@ internal static partial class IslandWindow
 
     [LibraryImport("user32.dll")]
     public static partial nint GetForegroundWindow();
+
+    // The process of the window in front ("" if none), e.g. "StartMenuExperienceHost" while Windows' Start is open.
+    public static string ForegroundProcessName()
+    {
+        var window = GetForegroundWindow();
+        if (window == 0 || GetWindowThreadProcessId(window, out var processId) == 0)
+        {
+            return "";
+        }
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(processId);
+            return process.ProcessName;
+        }
+        catch (ArgumentException)
+        {
+            return "";
+        }
+    }
+
+    // Presses and releases Esc (CI and foreground tests only: it goes to whatever is in front).
+    public static void PressEscape()
+    {
+        const byte Escape = 0x1B;
+        const uint KeyUp = 0x2;
+        KeybdEvent(Escape, 0, 0, 0);
+        KeybdEvent(Escape, 0, KeyUp, 0);
+    }
+
+    [LibraryImport("user32.dll", EntryPoint = "keybd_event")]
+    private static partial void KeybdEvent(byte key, byte scan, uint flags, nuint extraInfo);
 }

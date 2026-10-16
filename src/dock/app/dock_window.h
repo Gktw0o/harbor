@@ -27,6 +27,7 @@
 #include "core/island/full_screen.h"
 #include "core/island/layout.h"
 #include "core/island/monitors.h"
+#include "core/island/slot_map.h"
 #include "core/island/tuck.h"
 #include "ports/ipc_channel.h"
 #include "ports/logger.h"
@@ -58,6 +59,9 @@ class DockWindow : private adapters::IIslandAccess
         bool testAppBar = false;
         // Test docks: follow only windows whose class starts with this (WindowTracker); empty: every window.
         std::string windowClassPrefix;
+        // The Start button opens Windows' Start. Test docks only with --test-foreground: a local test run
+        // must never open the user's Start.
+        bool opensStart = true;
     };
 
     enum class CreateResult
@@ -185,10 +189,16 @@ class DockWindow : private adapters::IIslandAccess
     void OnLaunched(LaunchReport* report);
     void SetHovered(std::optional<std::size_t> hovered);
     std::optional<std::size_t> ItemAtClient(LPARAM position) const;
-    // A click or UI Automation's Invoke (docs/adr/0010): brings a window forward, minimizes one, or starts
-    // the item; the "…" button opens the overflow menu, the tray button peeks at the taskbar. how is for the
-    // log.
+    // A click or UI Automation's Invoke on place index (docs/adr/0010): brings a window forward, minimizes
+    // one, or starts the item; the "…" button opens the overflow menu, the tray button peeks at the taskbar,
+    // the Start button opens Windows' Start. how is for the log.
     bool ClickItem(std::size_t index, std::string_view how);
+    // The dock item (slot) at place index, if one is there.
+    std::optional<std::size_t> SlotAt(std::size_t index) const;
+    // Place index holds that kind of button.
+    bool IsKind(std::size_t index, island::SlotMap::Kind kind) const;
+    // The Start button, until the island opens instead (docs/adr/0015): Windows' Start.
+    void OpenWindowsStart(std::string_view how);
     // The same for dock item index, on the island or behind the "…" button.
     bool ClickSlot(std::size_t index, std::string_view how);
     // The "…" button's menu of the items that didn't fit, with their icons.
@@ -302,13 +312,13 @@ class DockWindow : private adapters::IIslandAccess
     // A menu's loop is running (one at a time), and whether it is the overflow menu.
     bool m_menuOpen = false;
     bool m_overflowMenuOpen = false;
-    // The "…" button's place, when items don't fit (the items from there on are in its menu), and how many
-    // items there were when that was logged.
-    std::optional<std::size_t> m_overflow;
+    // What each place on the island holds: the Start button, the dock items, the "…" button when they don't
+    // fit (the items from there on are in its menu), the tray button. And how many items there were when an
+    // overflow was logged.
+    island::SlotMap m_places;
     std::size_t m_overflowCount = 0;
-    // The guard hides the taskbar (its last report): the island ends with the tray button, at this place.
+    // The guard hides the taskbar (its last report): the island ends with the tray button.
     bool m_taskbarHidden = false;
-    std::optional<std::size_t> m_tray;
     // The name label's window (null if composition can't draw it), and the item it shows, if shown.
     HWND m_label = nullptr;
     std::optional<std::size_t> m_labelItem;

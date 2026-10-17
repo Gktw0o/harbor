@@ -1,9 +1,11 @@
 using Harbor.Core;
+using Harbor.Core.Controls;
 using Harbor.Core.Ipc;
 using Harbor.Core.Island;
 using Harbor.Core.Media;
 using Harbor.Core.Power;
 using Harbor.Core.Stats;
+using Harbor.Platform.Controls;
 using Harbor.Platform.Island;
 using Harbor.Platform.Media;
 using Microsoft.UI.Dispatching;
@@ -22,6 +24,7 @@ internal sealed partial class IslandController : IDisposable
     private readonly IPowerActions _power;
     private readonly StatsSampler _stats;
     private readonly IMediaSource _media;
+    private readonly ISystemControls _controls;
     private IslandState? _sent;
     private bool _connected;
 
@@ -35,7 +38,16 @@ internal sealed partial class IslandController : IDisposable
         _power = ShellHost.PowerActionsFor(host.Options, host.Log, () => new WindowsPowerActions(host.Log, () => _window.Handle));
         // Read only while the island is open; a test Shell reads the real stats too (reading changes nothing).
         _stats = new StatsSampler(() => new WindowsStatsSource(), host.Log);
-        _panel = new IslandPanel(host.Apps, _power.Capabilities);
+        // A test Shell's controls are made up: it never touches the machine's volume, display, radios or theme.
+        _controls = ShellHost.ControlsFor(host.Options, host.Log, () => new WindowsSystemControls(host.Log, new WinRtRadioSwitches(host.Log)));
+        _controls.Changed += () => _queue.TryEnqueue(ShowControls);
+        _panel = new IslandPanel(host.Apps, _power.Capabilities, _controls);
+        _panel.SettingsRequested += page =>
+        {
+            // Closed first, so Settings comes up in front of nothing of Harbor's.
+            Change(_model.OnDismiss);
+            _controls.OpenSettings(page);
+        };
         _panel.PowerRequested += action =>
         {
             // Closed first: locking or sleeping with the island open would leave it open on return.
@@ -108,11 +120,14 @@ internal sealed partial class IslandController : IDisposable
             }));
             _media.ArtworkWanted = true;
             ShowMedia();
+            _controls.Watching = true;
+            ShowControls();
         }
         else if (!_model.Open && wasOpen)
         {
             _stats.Stop();
             _media.ArtworkWanted = false;
+            _controls.Watching = false;
         }
         var (monitor, dpi) = _model.Dock is { } dock ? (dock.Monitor, dock.Dpi) : IslandWindow.PrimaryMonitor();
         _window.Apply(_model.Shape, monitor, dpi);
@@ -133,10 +148,19 @@ internal sealed partial class IslandController : IDisposable
         }
     }
 
+    private void ShowControls()
+    {
+        if (_model.Open)
+        {
+            _panel.ShowControls(_controls.Current);
+        }
+    }
+
     public void Dispose()
     {
         _stats.Dispose();
         _media.Dispose();
+        _controls.Dispose();
         _window.Dispose();
     }
 }

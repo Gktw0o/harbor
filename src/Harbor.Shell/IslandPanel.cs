@@ -1,5 +1,6 @@
 using System.Globalization;
 using Harbor.Core.Apps;
+using Harbor.Core.Controls;
 using Harbor.Core.Ipc;
 using Harbor.Core.Media;
 using Harbor.Core.Power;
@@ -7,6 +8,7 @@ using Harbor.Core.Stats;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
@@ -36,10 +38,22 @@ internal sealed partial class IslandPanel
     private TextBlock? _confirmText;
     private Button? _confirmButton;
     private PowerAction? _confirming;
+    private readonly ISystemControls _controls;
+    private Grid? _volumeRow;
+    private Grid? _brightnessRow;
+    private ToggleButton? _mute;
+    private Slider? _volume;
+    private Slider? _brightness;
+    private ToggleButton? _wifi;
+    private ToggleButton? _bluetooth;
+    private ToggleButton? _dark;
+    // While the controls show what was read, their change events aren't the user's.
+    private bool _showingControls;
 
-    public IslandPanel(AppIndex apps, PowerCapabilities power)
+    public IslandPanel(AppIndex apps, PowerCapabilities power, ISystemControls controls)
     {
         _apps = apps;
+        _controls = controls;
         Search = new TextBox { PlaceholderText = "Search apps", Width = 420, HorizontalAlignment = HorizontalAlignment.Center };
         AutomationProperties.SetName(Search, "Search apps");
         Search.TextChanged += (_, _) => ShowResults();
@@ -60,8 +74,7 @@ internal sealed partial class IslandPanel
         _sections.Children.Add(Card("Stats", _stats));
         _sections.Children.Add(Card("Power", PowerSection(power)));
         _sections.Children.Add(Card("Media", MediaSection()));
-        // The Controls section comes with M4 step 15.
-        _sections.Children.Add(Card("Controls", new StackPanel()));
+        _sections.Children.Add(Card("Controls", ControlsSection(), width: 230));
 
         var windowsStart = new HyperlinkButton { Content = "Windows Start", HorizontalAlignment = HorizontalAlignment.Center };
         windowsStart.Click += (_, _) => WindowsStartRequested?.Invoke();
@@ -90,6 +103,9 @@ internal sealed partial class IslandPanel
 
     /// <summary>The media buttons: -1 previous, 0 play or pause, 1 next.</summary>
     public event Action<int>? MediaRequested;
+
+    /// <summary>A Settings page was asked for (the island should close first).</summary>
+    public event Action<SettingsPage>? SettingsRequested;
 
     /// <summary>What is playing, or that nothing is; the position as of nowUtc.</summary>
     public void ShowMedia(MediaState? media, DateTime nowUtc)
@@ -274,11 +290,139 @@ internal sealed partial class IslandPanel
         _confirmRow!.Visibility = Visibility.Collapsed;
     }
 
-    private static Border Card(string name, UIElement content)
+    // Volume, brightness, Wi-Fi, Bluetooth and dark mode, each only where this PC has it (docs/adr/0016); they act
+    // at once. Focus, night light, airplane mode and power mode have no public API: links to their Settings pages.
+    private StackPanel ControlsSection()
+    {
+        _mute = Toggle("", null, "Mute", _controls.SetMuted);
+        _volume = Level("Volume", value => _controls.SetVolume(value / 100));
+        _volumeRow = Row(_mute, _volume);
+        _brightness = Level("Brightness", value => _controls.SetBrightness((int)Math.Round(value)));
+        _brightnessRow = Row(new FontIcon { Glyph = "", FontSize = 14, Width = 32 }, _brightness);
+        _wifi = Toggle("", "Wi-Fi", "Wi-Fi", on => _controls.SetRadio(RadioKind.WiFi, on));
+        _bluetooth = Toggle("", "Bluetooth", "Bluetooth", on => _controls.SetRadio(RadioKind.Bluetooth, on));
+        _dark = Toggle("", "Dark", "Dark mode", _controls.SetDark);
+        var tiles = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { _wifi, _bluetooth, _dark } };
+        var links = new StackPanel
+        {
+            Spacing = 4,
+            Children = { LinkRow(SettingsPage.Focus, SettingsPage.NightLight), LinkRow(SettingsPage.AirplaneMode, SettingsPage.PowerMode) },
+        };
+        ShowControls(ControlsState.None);
+        return new StackPanel { Spacing = 8, Children = { _volumeRow, _brightnessRow, tiles, links } };
+    }
+
+    private ToggleButton Toggle(string glyph, string? label, string name, Action<bool> changed)
+    {
+        var icon = new FontIcon { Glyph = glyph, FontSize = 14 };
+        var toggle = new ToggleButton
+        {
+            Content = label is null
+                ? icon
+                : new StackPanel { Spacing = 2, Children = { icon, new TextBlock { Text = label, FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center } } },
+            Width = label is null ? 32 : 62,
+            Padding = new Thickness(2, 6, 2, 6),
+        };
+        AutomationProperties.SetName(toggle, name);
+        // Checked/Unchecked, not Click: UI Automation's Toggle raises them too.
+        toggle.Checked += (_, _) =>
+        {
+            if (!_showingControls)
+            {
+                changed(true);
+            }
+        };
+        toggle.Unchecked += (_, _) =>
+        {
+            if (!_showingControls)
+            {
+                changed(false);
+            }
+        };
+        return toggle;
+    }
+
+    private Slider Level(string name, Action<double> changed)
+    {
+        var slider = new Slider { Minimum = 0, Maximum = 100, StepFrequency = 1, VerticalAlignment = VerticalAlignment.Center };
+        AutomationProperties.SetName(slider, name);
+        slider.ValueChanged += (_, e) =>
+        {
+            if (!_showingControls)
+            {
+                changed(e.NewValue);
+            }
+        };
+        return slider;
+    }
+
+    private static Grid Row(FrameworkElement icon, Slider slider)
+    {
+        var row = new Grid { ColumnSpacing = 6 };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        icon.VerticalAlignment = VerticalAlignment.Center;
+        Grid.SetColumn(slider, 1);
+        row.Children.Add(icon);
+        row.Children.Add(slider);
+        return row;
+    }
+
+    private StackPanel LinkRow(SettingsPage first, SettingsPage second)
+    {
+        var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        foreach (var page in new[] { first, second })
+        {
+            var link = new Button { Content = LinkName(page), FontSize = 12, Padding = new Thickness(6, 3, 6, 3) };
+            link.Click += (_, _) => SettingsRequested?.Invoke(page);
+            row.Children.Add(link);
+        }
+        return row;
+    }
+
+    private static string LinkName(SettingsPage page) => page switch
+    {
+        SettingsPage.Focus => "Focus",
+        SettingsPage.NightLight => "Night light",
+        SettingsPage.AirplaneMode => "Airplane mode",
+        SettingsPage.PowerMode => "Power mode",
+        _ => page.ToString(),
+    };
+
+    /// <summary>The controls as read; those this PC doesn't have are hidden.</summary>
+    public void ShowControls(ControlsState state)
+    {
+        ArgumentNullException.ThrowIfNull(state);
+        _showingControls = true;
+        try
+        {
+            var shown = state.Shown();
+            _volumeRow!.Visibility = VisibleIf(shown.Contains(QuickControl.Volume));
+            _volume!.Value = Math.Round((state.Volume ?? 0) * 100);
+            _mute!.IsChecked = state.Muted;
+            ((FontIcon)_mute.Content).Glyph = state.Muted ? "" : "";
+            _brightnessRow!.Visibility = VisibleIf(shown.Contains(QuickControl.Brightness));
+            _brightness!.Value = state.Brightness ?? 0;
+            _wifi!.Visibility = VisibleIf(shown.Contains(QuickControl.WiFi));
+            _wifi.IsChecked = state.WiFi == true;
+            _bluetooth!.Visibility = VisibleIf(shown.Contains(QuickControl.Bluetooth));
+            _bluetooth.IsChecked = state.Bluetooth == true;
+            _dark!.Visibility = VisibleIf(shown.Contains(QuickControl.Dark));
+            _dark.IsChecked = state.Dark == true;
+        }
+        finally
+        {
+            _showingControls = false;
+        }
+    }
+
+    private static Visibility VisibleIf(bool shown) => shown ? Visibility.Visible : Visibility.Collapsed;
+
+    private static Border Card(string name, UIElement content, double width = 200)
     {
         var card = new Border
         {
-            Width = 200,
+            Width = width,
             MinHeight = 250,
             CornerRadius = new CornerRadius(16),
             Padding = new Thickness(14),

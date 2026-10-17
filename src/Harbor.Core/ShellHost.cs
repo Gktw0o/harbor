@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using Harbor.Core.Apps;
+using Harbor.Core.Controls;
 using Harbor.Core.Ipc;
 using Harbor.Core.Logging;
 using Harbor.Core.Media;
@@ -89,6 +90,17 @@ public sealed class ShellHost
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(real);
         return options.TestMode ? new NoMediaSource() : real();
+    }
+
+    /// <summary>
+    /// The quick controls for a Shell: a test Shell gets made-up ones, and the real ones (the machine's volume,
+    /// display, radios, theme, Settings app) are not even made for it.
+    /// </summary>
+    public static ISystemControls ControlsFor(ShellOptions options, ILog log, Func<ISystemControls> real)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(real);
+        return options.TestMode ? new TestSystemControls(log) : real();
     }
 
     /// <summary>

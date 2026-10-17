@@ -101,3 +101,20 @@ saver the dock uses its solid tint instead of drawing the host backdrop, which i
 - The light/dark switch can break with a Windows update; it is isolated and removable.
 - Power actions are destructive by nature: the confirmations, and the fact that tests never execute them,
   are the guard.
+
+## Notes from the implementation (M4 steps 13-15)
+
+- **Where the adapters live**: `Harbor.Core` keeps no WinRT, but it does hold the Win32 and COM adapters
+  (PDH, power, Core Audio, WMI, the registry) behind their ports. The WinRT ones (media sessions, radios)
+  and the XAML live in `Harbor.Platform` and `Harbor.Shell`.
+- **Test Shells never touch the machine**: `ShellHost.PowerActionsFor`, `MediaSourceFor` and `ControlsFor`
+  hand a test Shell its stand-ins and never even make the real ones. The test Shell's controls are made up
+  (no brightness, like a desktop PC) and only log what was asked.
+- **Controls** are read when the island opens and followed only while it is open: Core Audio's volume
+  callback, the radios' `StateChanged`. Brightness (WMI) has no event, so it is read on opening and after a
+  change. WMI and the theme broadcast run on the thread pool (the WMI proxy belongs to the MTA); a dragged
+  brightness slider sends only its latest value.
+- Harbor's own volume changes carry an event context and are not echoed back, so the slider never jumps
+  while it is dragged. A refused radio switch shows the radio as it still is.
+- **Settings links**: `ms-settings:quiethours` (focus), `nightlight`, `network-airplanemode` and `powersleep`
+  (power mode). These come from public lists of the Settings app's pages; they are checked by hand in step 16.

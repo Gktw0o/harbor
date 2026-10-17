@@ -5,7 +5,9 @@
 // harbor_test_uia_client <window> tree
 //     The same for every element under the window, not only its children (Harbor Shell's island: its XAML).
 // harbor_test_uia_client <island window> invoke <name>
-//     Invokes the child button with that name.
+//     Invokes the button with that name (any element under the window, as for the commands below).
+// harbor_test_uia_client <window> toggle <name>
+//     Toggles the toggle button with that name and prints "toggle\t<On|Off>" (its new state).
 // harbor_test_uia_client <island window> hold <name>
 //     Finds the child button with that name and prints "found". After a line on standard input, asks that
 //     same element for its name again and prints "alive\t<name>", or "gone" if it is no longer available.
@@ -15,8 +17,8 @@
 //     Waits up to 5 s for the island's process to show a popup menu, prints "<control type id>\t<name>" for
 //     each of its items, then invokes the item with that name, if one is given.
 //
-// Exit codes: 0 done, 1 bad arguments, 2 UI Automation failed, 3 no such button, 4 Invoke failed, 5 gone,
-// 6 no menu.
+// Exit codes: 0 done, 1 bad arguments, 2 UI Automation failed, 3 no such button, 4 Invoke (or Toggle) failed,
+// 5 gone, 6 no menu.
 
 #include <windows.h>
 
@@ -185,7 +187,7 @@ int wmain(int argc, wchar_t** argv)
                                 IID_PPV_ARGS(&automation))) ||
         FAILED(automation->ElementFromHandle(island, &root)) || !root ||
         FAILED(automation->CreateTrueCondition(&all)) ||
-        FAILED(root->FindAll(command == L"tree" ? TreeScope_Descendants : TreeScope_Children, all.get(),
+        FAILED(root->FindAll(command == L"list" ? TreeScope_Children : TreeScope_Descendants, all.get(),
                              &children)) ||
         !children)
     {
@@ -231,6 +233,18 @@ int wmain(int argc, wchar_t** argv)
                     return 2;
                 }
                 PrintLine(L"status", status.get());
+                return 0;
+            }
+            if (command == L"toggle")
+            {
+                wil::com_ptr_nothrow<IUIAutomationTogglePattern> toggle;
+                ToggleState state = ToggleState_Indeterminate;
+                if (FAILED(child->GetCurrentPatternAs(UIA_TogglePatternId, IID_PPV_ARGS(&toggle))) ||
+                    !toggle || FAILED(toggle->Toggle()) || FAILED(toggle->get_CurrentToggleState(&state)))
+                {
+                    return 4;
+                }
+                PrintLine(L"toggle", state == ToggleState_On ? L"On" : L"Off");
                 return 0;
             }
             wil::com_ptr_nothrow<IUIAutomationInvokePattern> invoke;

@@ -281,6 +281,71 @@ public sealed partial class ShellE2ETests
         }
     }
 
+    [TestMethod]
+    public async Task ATestShellsControlsAreMadeUpAndTouchNothing()
+    {
+        TestDock.RequireForegroundTests();
+        var exe = ShellExe();
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var themeBefore = ReadTheme();
+        using var shell = StartShell(exe, dataDir.Path, taskbar, foreground: true);
+        int? dockId = null;
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: ready", Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            dockId = ProcessIdIn(await TestDock.ReadLogAsync(dataDir.Path));
+            var dock = IslandWindow.Find(dockId!.Value);
+            var island = IslandWindow.FindShellIsland(shell.Id);
+            Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(dock, "invoke", "Start")).ExitCode);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(IslandWindow.GetForegroundWindow() == island), Timeout),
+                "the island didn't get the focus: " + await ShellLogAsync(dataDir.Path));
+
+            const int Button = 50000;
+            const int Slider = 50015;
+            var tree = "";
+            Assert.IsTrue(await TestDock.WaitUntilAsync(async () =>
+            {
+                tree = (await TestDock.RunUiaClientAsync(island, "tree")).Output;
+                return tree.Contains($"{Slider}\tVolume", StringComparison.Ordinal);
+            }, Timeout), "no volume in the open island:\n" + tree);
+            foreach (var control in new[] { "Mute", "Wi-Fi", "Bluetooth", "Dark mode", "Focus", "Night light", "Airplane mode", "Power mode" })
+            {
+                StringAssert.Contains(tree, $"{Button}\t{control}", tree);
+            }
+            // The made-up controls have no brightness, like a desktop PC: the island hides it.
+            Assert.IsFalse(tree.Contains("\tBrightness", StringComparison.Ordinal), tree);
+
+            var dark = await TestDock.RunUiaClientAsync(island, "toggle", "Dark mode");
+            Assert.AreEqual(0, dark.ExitCode, dark.Output);
+            StringAssert.Contains(dark.Output, "toggle\tOn");
+            Assert.IsTrue(await WaitForShellLogAsync(dataDir.Path, "controls: test dark"), await ShellLogAsync(dataDir.Path));
+            var wifi = await TestDock.RunUiaClientAsync(island, "toggle", "Wi-Fi");
+            Assert.AreEqual(0, wifi.ExitCode, wifi.Output);
+            Assert.IsTrue(await WaitForShellLogAsync(dataDir.Path, "controls: test WiFi off"), await ShellLogAsync(dataDir.Path));
+
+            // A Settings link closes the island first; a test Shell only says which page it would open.
+            Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(island, "invoke", "Night light")).ExitCode);
+            Assert.IsTrue(await WaitForShellLogAsync(dataDir.Path, "controls: test settings NightLight"), await ShellLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: closed", Timeout), await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.AreEqual(themeBefore, ReadTheme(), "a test Shell changed the theme");
+        }
+        finally
+        {
+            await StopShellAsync(shell, dockId);
+        }
+    }
+
+    private static (object? Apps, object? Windows) ReadTheme()
+    {
+        using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        return (key?.GetValue("AppsUseLightTheme"), key?.GetValue("SystemUsesLightTheme"));
+    }
+
+    private static Task<bool> WaitForShellLogAsync(string dataDir, string text) =>
+        TestDock.WaitUntilAsync(async () => (await ShellLogAsync(dataDir)).Contains(text, StringComparison.Ordinal), Timeout);
+
     private static Process StartShell(string exe, string dataDir, FakeTaskbar taskbar, bool foreground = false)
     {
         var startInfo = new ProcessStartInfo(exe) { UseShellExecute = false };

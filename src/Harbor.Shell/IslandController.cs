@@ -1,9 +1,11 @@
 using Harbor.Core;
 using Harbor.Core.Ipc;
 using Harbor.Core.Island;
+using Harbor.Core.Media;
 using Harbor.Core.Power;
 using Harbor.Core.Stats;
 using Harbor.Platform.Island;
+using Harbor.Platform.Media;
 using Microsoft.UI.Dispatching;
 
 namespace Harbor.Shell;
@@ -19,6 +21,7 @@ internal sealed partial class IslandController : IDisposable
     private readonly IslandPanel _panel;
     private readonly IPowerActions _power;
     private readonly StatsSampler _stats;
+    private readonly IMediaSource _media;
     private IslandState? _sent;
     private bool _connected;
 
@@ -39,6 +42,16 @@ internal sealed partial class IslandController : IDisposable
             Change(_model.OnDismiss);
             _power.Run(action);
         };
+        // What is playing: a test Shell never sees (or controls) the machine's media.
+        _media = ShellHost.MediaSourceFor(host.Options, () => new GsmtcMediaSource(host.Log));
+        _media.Changed += () => _queue.TryEnqueue(ShowMedia);
+        _panel.MediaRequested += which => _ = which switch
+        {
+            < 0 => _media.PreviousAsync(),
+            0 => _media.PlayPauseAsync(),
+            _ => _media.NextAsync(),
+        };
+        _ = _media.StartAsync();
         _window.SetPanel(_panel.Root, _panel.Search);
         // Starting an app or Windows' Start closes the island first, so the app comes up in front of nothing of
         // Harbor's.
@@ -87,11 +100,19 @@ internal sealed partial class IslandController : IDisposable
             // A fresh search, over a list read again if it is old (apps come and go); the stats read while it shows.
             _panel.Reset();
             _ = _host.Apps.RefreshAsync();
-            _stats.Start(reading => _queue.TryEnqueue(() => _panel.ShowStats(reading)));
+            // Each second while open: the stats, and the playback position moving on.
+            _stats.Start(reading => _queue.TryEnqueue(() =>
+            {
+                _panel.ShowStats(reading);
+                ShowMedia();
+            }));
+            _media.ArtworkWanted = true;
+            ShowMedia();
         }
         else if (!_model.Open && wasOpen)
         {
             _stats.Stop();
+            _media.ArtworkWanted = false;
         }
         var (monitor, dpi) = _model.Dock is { } dock ? (dock.Monitor, dock.Dpi) : IslandWindow.PrimaryMonitor();
         _window.Apply(_model.Shape, monitor, dpi);
@@ -103,9 +124,19 @@ internal sealed partial class IslandController : IDisposable
         }
     }
 
+    // Only while open: the collapsed notch stays empty (docs/adr/0013).
+    private void ShowMedia()
+    {
+        if (_model.Open)
+        {
+            _panel.ShowMedia(_media.Current, DateTime.UtcNow);
+        }
+    }
+
     public void Dispose()
     {
         _stats.Dispose();
+        _media.Dispose();
         _window.Dispose();
     }
 }

@@ -1,6 +1,7 @@
 using System.Globalization;
 using Harbor.Core.Apps;
 using Harbor.Core.Ipc;
+using Harbor.Core.Media;
 using Harbor.Core.Power;
 using Harbor.Core.Stats;
 using Microsoft.UI.Xaml;
@@ -8,6 +9,8 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Storage.Streams;
 
 namespace Harbor.Shell;
 
@@ -20,6 +23,15 @@ internal sealed partial class IslandPanel
     private readonly ListView _results;
     private readonly StackPanel _sections;
     private readonly StackPanel _stats;
+    private Image? _artwork;
+    private byte[]? _artworkShown;
+    private TextBlock? _title;
+    private TextBlock? _artist;
+    private TextBlock? _time;
+    private ProgressBar? _progress;
+    private Button? _previous;
+    private Button? _playPause;
+    private Button? _next;
     private StackPanel? _confirmRow;
     private TextBlock? _confirmText;
     private Button? _confirmButton;
@@ -47,11 +59,9 @@ internal sealed partial class IslandPanel
         _stats = new StackPanel { Spacing = 6 };
         _sections.Children.Add(Card("Stats", _stats));
         _sections.Children.Add(Card("Power", PowerSection(power)));
-        // The Media and Controls sections come with M4 steps 14-15.
-        foreach (var name in new[] { "Media", "Controls" })
-        {
-            _sections.Children.Add(Card(name, new StackPanel()));
-        }
+        _sections.Children.Add(Card("Media", MediaSection()));
+        // The Controls section comes with M4 step 15.
+        _sections.Children.Add(Card("Controls", new StackPanel()));
 
         var windowsStart = new HyperlinkButton { Content = "Windows Start", HorizontalAlignment = HorizontalAlignment.Center };
         windowsStart.Click += (_, _) => WindowsStartRequested?.Invoke();
@@ -77,6 +87,103 @@ internal sealed partial class IslandPanel
 
     /// <summary>A power action was chosen (and confirmed, where it asks).</summary>
     public event Action<PowerAction>? PowerRequested;
+
+    /// <summary>The media buttons: -1 previous, 0 play or pause, 1 next.</summary>
+    public event Action<int>? MediaRequested;
+
+    /// <summary>What is playing, or that nothing is; the position as of nowUtc.</summary>
+    public void ShowMedia(MediaState? media, DateTime nowUtc)
+    {
+        if (media is null)
+        {
+            _title!.Text = "Nothing playing";
+            _artist!.Text = "";
+            _time!.Text = "";
+            _progress!.Visibility = Visibility.Collapsed;
+            _artwork!.Source = null;
+            _artworkShown = null;
+            foreach (var button in new[] { _previous!, _playPause!, _next! })
+            {
+                button.IsEnabled = false;
+            }
+            return;
+        }
+        _title!.Text = media.Title;
+        _artist!.Text = media.Artist;
+        _previous!.IsEnabled = media.CanPrevious;
+        _playPause!.IsEnabled = media.CanPlayPause;
+        _next!.IsEnabled = media.CanNext;
+        ((FontIcon)_playPause.Content).Glyph = media.Playing ? "" : "";
+        AutomationProperties.SetName(_playPause, media.Playing ? "Pause" : "Play");
+        var position = media.PositionAt(nowUtc);
+        _time!.Text = position is { } at
+            ? media.Duration is { } duration ? $"{MediaState.Clock(at)} / {MediaState.Clock(duration)}" : MediaState.Clock(at)
+            : "";
+        _progress!.Visibility = media.ProgressAt(nowUtc) is null ? Visibility.Collapsed : Visibility.Visible;
+        _progress.Value = (media.ProgressAt(nowUtc) ?? 0) * 100;
+        if (!ReferenceEquals(media.Artwork, _artworkShown))
+        {
+            // Decoded only when it changes, and small; never waited for on this thread.
+            _artworkShown = media.Artwork;
+            _artwork!.Source = null;
+            if (media.Artwork is { } bytes)
+            {
+                _ = ShowArtworkAsync(bytes);
+            }
+        }
+    }
+
+    private async Task ShowArtworkAsync(byte[] bytes)
+    {
+        try
+        {
+            using var stream = new InMemoryRandomAccessStream();
+            using (var writer = new DataWriter(stream.GetOutputStreamAt(0)))
+            {
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync();
+                writer.DetachStream();
+            }
+            stream.Seek(0);
+            var image = new BitmapImage { DecodePixelWidth = 128 };
+            await image.SetSourceAsync(stream);
+            // Still the same artwork when the decode ends.
+            if (ReferenceEquals(bytes, _artworkShown))
+            {
+                _artwork!.Source = image;
+            }
+        }
+        catch (Exception exception) when (exception is System.Runtime.InteropServices.COMException or ArgumentException)
+        {
+            // An image Windows can't decode: no artwork.
+        }
+    }
+
+    private StackPanel MediaSection()
+    {
+        _artwork = new Image { Width = 64, Height = 64, HorizontalAlignment = HorizontalAlignment.Left };
+        AutomationProperties.SetAccessibilityView(_artwork, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        _title = new TextBlock { TextWrapping = TextWrapping.Wrap, MaxLines = 2, TextTrimming = TextTrimming.CharacterEllipsis };
+        _artist = new TextBlock { TextTrimming = TextTrimming.CharacterEllipsis, Opacity = 0.8 };
+        _time = new TextBlock { Opacity = 0.8, FontSize = 12 };
+        _progress = new ProgressBar { Minimum = 0, Maximum = 100 };
+        AutomationProperties.SetName(_progress, "Playback progress");
+        _previous = MediaButton("", "Previous", -1);
+        _playPause = MediaButton("", "Play", 0);
+        _next = MediaButton("", "Next", 1);
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { _previous, _playPause, _next } };
+        var section = new StackPanel { Spacing = 6, Children = { _artwork, _title, _artist, _progress, _time, buttons } };
+        ShowMedia(null, DateTime.UtcNow);
+        return section;
+    }
+
+    private Button MediaButton(string glyph, string name, int which)
+    {
+        var button = new Button { Content = new FontIcon { Glyph = glyph, FontSize = 14 } };
+        AutomationProperties.SetName(button, name);
+        button.Click += (_, _) => MediaRequested?.Invoke(which);
+        return button;
+    }
 
     /// <summary>The latest stats (docs/adr/0016); parts that aren't available aren't shown.</summary>
     public void ShowStats(StatsReading reading)

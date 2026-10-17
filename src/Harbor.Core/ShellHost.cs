@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Harbor.Core.Apps;
 using Harbor.Core.Ipc;
 using Harbor.Core.Logging;
+using Harbor.Core.Media;
 using Harbor.Core.Power;
 using Harbor.Core.Settings;
 using Harbor.Core.Supervision;
@@ -80,6 +81,14 @@ public sealed class ShellHost
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(real);
         return options.TestMode ? new RecordingPowerActions(log) : real();
+    }
+
+    /// <summary>What is playing, for a Shell: a test Shell never sees (or controls) the machine's media.</summary>
+    public static IMediaSource MediaSourceFor(ShellOptions options, Func<IMediaSource> real)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(real);
+        return options.TestMode ? new NoMediaSource() : real();
     }
 
     /// <summary>

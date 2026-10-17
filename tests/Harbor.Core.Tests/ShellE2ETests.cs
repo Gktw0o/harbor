@@ -264,6 +264,12 @@ public sealed partial class ShellE2ETests
             {
                 StringAssert.Contains(tree, $"{Button}\t{action}", tree);
             }
+            // A test Shell never sees the machine's media: nothing playing, its buttons there but off.
+            StringAssert.Contains(tree, $"{Text}\tNothing playing", tree);
+            foreach (var media in new[] { "Previous", "Play", "Next" })
+            {
+                StringAssert.Contains(tree, $"{Button}\t{media}", tree);
+            }
 
             IslandWindow.PressEscape();
             Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: closed", Timeout), await TestDock.ReadLogAsync(dataDir.Path));

@@ -37,6 +37,17 @@ public sealed class ShellOptionsTests
         Assert.IsNotNull(ShellOptions.Parse(["--test-taskbar", "ab"]).Error);
     }
 
+    // Where tests may take the focus, the test Shell's dock may too; never outside test mode.
+    [TestMethod]
+    public void TestForegroundGoesOnToTheDockInTestModeOnly()
+    {
+        var (options, error) = ShellOptions.Parse(["--test-foreground", "--pipe-name", "harbor.test.1", "--data-dir", @"C:\t", "--test-taskbar", "ab"]);
+        Assert.IsNull(error);
+        Assert.AreEqual("--test-foreground", options!.DockArguments[^1]);
+        Assert.IsNotNull(ShellOptions.Parse(["--test-foreground"]).Error);
+        Assert.IsNotNull(ShellOptions.Parse(["--test-foreground", "--test-foreground", "--pipe-name", "harbor.test.1", "--data-dir", @"C:\t", "--test-taskbar", "ab"]).Error);
+    }
+
     // A refused command line still says where its log should go, so the user's own log is never written to.
     [TestMethod]
     public void ARefusedCommandLineStillNamesItsDataDir()

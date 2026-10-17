@@ -55,9 +55,19 @@ public sealed partial class ShellE2ETests
             Assert.AreNotEqual((nint)0, window, "the test Shell has no window");
             Assert.AreNotEqual(window, IslandWindow.GetForegroundWindow(), "the test Shell took the focus");
 
+            // Closing the island changes nothing (it closes to its notch); closing the main window ends the Shell.
+            var island = IslandWindow.FindShellIsland(shell.Id);
+            if (island != 0)
+            {
+                Assert.IsTrue(PostMessage(island, 0x0010 /* WM_CLOSE */, 0, 0));
+                await Task.Delay(500);
+                Assert.IsFalse(shell.HasExited, "closing the island ended the Shell");
+                Assert.AreEqual(island, IslandWindow.FindShellIsland(shell.Id), "the island went");
+            }
             Assert.IsTrue(PostMessage(window, 0x0010 /* WM_CLOSE */, 0, 0));
-            using var exited = new CancellationTokenSource(Timeout);
-            await shell.WaitForExitAsync(exited.Token);
+            var exit = shell.WaitForExitAsync();
+            var ended = await Task.WhenAny(exit, Task.Delay(Timeout)) == exit;
+            Assert.IsTrue(ended, "closing its main window didn't end the Shell: " + await ShellLogAsync(dataDir.Path));
             Assert.AreEqual(0, shell.ExitCode);
         }
         finally
@@ -71,6 +81,134 @@ public sealed partial class ShellE2ETests
             {
                 TestDock.KillQuietly(id);
             }
+        }
+    }
+
+    // The island (docs/adr/0013): a glass notch flush with the top edge of the dock's monitor, a tool window that
+    // stays on top and never takes the focus; it tells the dock it is ready, with its hotkey, and hides while a
+    // full-screen app is in front there.
+    [TestMethod]
+    public async Task TheIslandSitsAtTheTopOfTheDocksMonitorAndHidesForFullScreen()
+    {
+        var exe = ShellExe();
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var shell = StartShell(exe, dataDir.Path, taskbar);
+        int? dockId = null;
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: ready", Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            dockId = ProcessIdIn(await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.FindShellIsland(shell.Id);
+            Assert.AreNotEqual((nint)0, island, "no island window");
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(IslandWindow.IsWindowVisible(island)), Timeout), "the island isn't shown");
+            var style = IslandWindow.ExStyle(island);
+            foreach (var flag in new[] { IslandWindow.ExToolWindow, IslandWindow.ExTopmost, IslandWindow.ExNoActivate, IslandWindow.ExNoRedirectionBitmap })
+            {
+                Assert.AreEqual(flag, style & flag, $"extended style 0x{style:X} lacks 0x{flag:X}");
+            }
+            Assert.AreNotEqual(island, IslandWindow.GetForegroundWindow(), "the island took the focus");
+
+            // Flush with the top of the primary monitor (the test dock's), centred, the notch's size.
+            var (monitor, _) = IslandWindow.PrimaryMonitor();
+            var bounds = IslandWindow.Bounds(island);
+            Assert.AreEqual(monitor.Top, bounds.Top, $"island {bounds} on {monitor}");
+            Assert.IsLessThanOrEqualTo(1, Math.Abs((bounds.Left - monitor.Left) - (monitor.Right - bounds.Right)), $"island {bounds} on {monitor}");
+            Assert.IsTrue(bounds.Width is > 100 and < 400 && bounds.Height is > 10 and < 80, $"not a notch: {bounds}");
+            StringAssert.Contains(await TestDock.ReadLogAsync(dataDir.Path), "island: ready");
+
+            TestDock.SetFullScreen(taskbar, fullScreen: true);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(!IslandWindow.IsWindowVisible(island)), Timeout),
+                "the island stayed over a full-screen app");
+            TestDock.SetFullScreen(taskbar, fullScreen: false);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(IslandWindow.IsWindowVisible(island)), Timeout),
+                "the island didn't come back after full screen");
+        }
+        finally
+        {
+            await StopShellAsync(shell, dockId);
+        }
+    }
+
+    // For real (CI only: it takes the focus and may open Windows' Start): the dock's Start button opens the island in
+    // front with its focus, Esc closes it, and with Harbor Shell gone the Start button opens Windows' Start instead.
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task TheStartButtonOpensTheIslandAndEscClosesIt()
+    {
+        TestDock.RequireForegroundTests();
+        var exe = ShellExe();
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var shell = StartShell(exe, dataDir.Path, taskbar, foreground: true);
+        int? dockId = null;
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: ready", Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            dockId = ProcessIdIn(await TestDock.ReadLogAsync(dataDir.Path));
+            var dock = IslandWindow.Find(dockId!.Value);
+            var island = IslandWindow.FindShellIsland(shell.Id);
+            var collapsed = IslandWindow.Bounds(island);
+
+            Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(dock, "invoke", "Start")).ExitCode);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "ms after the Start button", Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(IslandWindow.GetForegroundWindow() == island), Timeout),
+                "the island didn't get the focus: " + await ShellLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(IslandWindow.Bounds(island).Width > collapsed.Width * 2), Timeout),
+                $"not open: {IslandWindow.Bounds(island)}");
+
+            IslandWindow.PressEscape();
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: closed", Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains("Windows Start instead", StringComparison.Ordinal));
+
+            // Harbor Shell gone: the dock forgets the island, and its Start button opens Windows' Start.
+            shell.Kill();
+            await shell.WaitForExitAsync();
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: not ready", Timeout), await TestDock.ReadLogAsync(dataDir.Path));
+            var from = await TestDock.LogLengthAsync(dataDir.Path);
+            Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(dock, "invoke", "Start")).ExitCode);
+            Assert.IsTrue(await TestDock.WaitForLogAfterAsync(dataDir.Path, from, "click: Start (UI Automation): Windows Start", Timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+        }
+        finally
+        {
+            await Task.Delay(500);
+            if (IslandWindow.ForegroundProcessName() is "StartMenuExperienceHost" or "SearchHost")
+            {
+                IslandWindow.PressEscape();
+            }
+            await StopShellAsync(shell, dockId);
+        }
+    }
+
+    private static Process StartShell(string exe, string dataDir, FakeTaskbar taskbar, bool foreground = false)
+    {
+        var startInfo = new ProcessStartInfo(exe) { UseShellExecute = false };
+        foreach (var argument in new[] { "--pipe-name", RunningServer.UniquePipeName(), "--data-dir", dataDir, "--test-taskbar", taskbar.Id })
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
+        if (foreground)
+        {
+            startInfo.ArgumentList.Add("--test-foreground");
+        }
+        return Process.Start(startInfo)!;
+    }
+
+    private static async Task StopShellAsync(Process shell, int? dockId)
+    {
+        if (!shell.HasExited)
+        {
+            shell.Kill();
+            await shell.WaitForExitAsync();
+        }
+        if (dockId is { } id)
+        {
+            TestDock.KillQuietly(id);
         }
     }
 
@@ -115,20 +253,31 @@ public sealed partial class ShellE2ETests
         return int.TryParse(digits, System.Globalization.CultureInfo.InvariantCulture, out var id) ? id : null;
     }
 
+    // By its title: Process.MainWindowHandle may be the island, another visible window of the Shell's.
     private static async Task<nint> MainWindowOfAsync(Process process)
     {
         var deadline = Stopwatch.StartNew();
         while (deadline.Elapsed < Timeout)
         {
-            process.Refresh();
-            if (process.MainWindowHandle != 0)
+            nint window = 0;
+            while ((window = FindWindowEx(0, window, null, "Harbor Shell (test)")) != 0)
             {
-                return process.MainWindowHandle;
+                _ = GetWindowThreadProcessId(window, out var owner);
+                if (owner == process.Id)
+                {
+                    return window;
+                }
             }
             await Task.Delay(100);
         }
         return 0;
     }
+
+    [LibraryImport("user32.dll", EntryPoint = "FindWindowExW", StringMarshalling = StringMarshalling.Utf16)]
+    private static partial nint FindWindowEx(nint parent, nint childAfter, string? className, string? windowName);
+
+    [LibraryImport("user32.dll")]
+    private static partial uint GetWindowThreadProcessId(nint window, out int processId);
 
     [LibraryImport("user32.dll", EntryPoint = "PostMessageW")]
     [return: MarshalAs(UnmanagedType.Bool)]

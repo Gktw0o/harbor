@@ -34,9 +34,34 @@ public partial class App : Application
                   (_options.TestMode ? ", test mode" : ""));
         var host = new ShellHost(_options, _log, Path.Combine(AppContext.BaseDirectory, "harbor-dock.exe"));
         _window = new MainWindow(host);
-        // The Shell ends with its main window, whatever other windows it has (the island, M4): no Shell runs on
-        // without anyone seeing it is there.
-        _window.Closed += (_, _) => Exit();
+        IslandController? island = null;
+        try
+        {
+            island = new IslandController(host, _window.DispatcherQueue);
+        }
+        catch (Exception exception)
+        {
+            // The watchdog matters more than the island: the Shell goes on without it (the Start button then opens
+            // Windows' Start).
+            _log.Error($"island: couldn't be created: {exception}");
+        }
+        // The Shell ends with its main window, whatever other windows it has (the island): no Shell runs on without
+        // anyone seeing it is there.
+        _window.Closed += (_, _) =>
+        {
+            try
+            {
+                island?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                _log.Error($"island: closing it failed: {exception}");
+            }
+            finally
+            {
+                Exit();
+            }
+        };
         if (_options.TestMode)
         {
             // A test Shell never takes the user's focus, and keeps out of sight.

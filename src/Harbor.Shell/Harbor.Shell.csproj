@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Harbor.Core\Harbor.Core.csproj" />
+    <ProjectReference Include="..\Harbor.Platform\Harbor.Platform.csproj" />
   </ItemGroup>
 
   <!-- The dock Harbor Shell starts and supervises, from the CMake build of the same architecture and

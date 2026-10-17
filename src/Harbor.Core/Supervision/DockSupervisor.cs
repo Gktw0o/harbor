@@ -86,6 +86,9 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     /// <summary>The dock asked to pin or unpin an app (pinRequest).</summary>
     public event Action<PinRequest>? PinRequestReceived;
 
+    /// <summary>Where the dock is and what is happening on its monitor (dockState), for the island.</summary>
+    public event Action<DockStateMessage>? DockStateReceived;
+
     /// <summary>
     /// Whether hiding the taskbar is requested. It turns off by itself after the panic hotkey, when Explorer
     /// keeps showing the taskbar, and when the dock ends or hangs: the user turns it back on.
@@ -254,6 +257,10 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         else if (message is PinRequest request)
         {
             PinRequestReceived?.Invoke(request);
+        }
+        else if (message is DockStateMessage dock)
+        {
+            DockStateReceived?.Invoke(dock);
         }
         else if (message is TaskbarState state)
         {

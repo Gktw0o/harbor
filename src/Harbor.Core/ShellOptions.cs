@@ -23,6 +23,12 @@ public sealed record ShellOptions
     /// <summary>The fake taskbar's id (see <see cref="TaskbarTarget.Test"/>); null: the real taskbar.</summary>
     public string? TestTaskbarId { get; init; }
 
+    /// <summary>
+    /// <c>--test-foreground</c>: the test dock may do what takes the foreground (press the island's hotkey, open
+    /// Windows' Start). Tests pass it only where they may take the focus. Only in test mode.
+    /// </summary>
+    public bool TestForeground { get; init; }
+
     public bool TestMode => TestTaskbarId is not null;
 
     public string DataDirOrDefault => DataDir ?? HarborPaths.DefaultDataDir;
@@ -30,9 +36,9 @@ public sealed record ShellOptions
     public TaskbarTarget Taskbar => TestTaskbarId is { } id ? TaskbarTarget.Test(id, DataDirOrDefault) : TaskbarTarget.Real;
 
     /// <summary>What the dock the Shell starts must be told: the same pipe, data dir and test taskbar.</summary>
-    public IReadOnlyList<string> DockArguments => TestMode
-        ? ["--pipe-name", PipeName!, "--data-dir", DataDir!, "--test-taskbar", TestTaskbarId!]
-        : [];
+    public IReadOnlyList<string> DockArguments => !TestMode ? []
+        : TestForeground ? ["--pipe-name", PipeName!, "--data-dir", DataDir!, "--test-taskbar", TestTaskbarId!, "--test-foreground"]
+        : ["--pipe-name", PipeName!, "--data-dir", DataDir!, "--test-taskbar", TestTaskbarId!];
 
     /// <summary>Parses the arguments after the program name: the options, or a message for the log.</summary>
     public static (ShellOptions? Options, string? Error) Parse(IReadOnlyList<string> arguments)
@@ -42,6 +48,16 @@ public sealed record ShellOptions
         for (var i = 0; i < arguments.Count; i++)
         {
             var name = arguments[i];
+            if (name == "--test-foreground")
+            {
+                // The one option without a value.
+                if (options.TestForeground)
+                {
+                    return (null, "--test-foreground is given more than once");
+                }
+                options = options with { TestForeground = true };
+                continue;
+            }
             if (name is not ("--pipe-name" or "--data-dir" or "--test-taskbar"))
             {
                 return (null, $"unknown argument: {name}");
@@ -75,9 +91,13 @@ public sealed record ShellOptions
             }
         }
         var given = (options.PipeName is null ? 0 : 1) + (options.DataDir is null ? 0 : 1) + (options.TestTaskbarId is null ? 0 : 1);
-        return given is 0 or 3
-            ? (options, null)
-            : (null, "--pipe-name, --data-dir and --test-taskbar must be given together");
+        if (given is not (0 or 3))
+        {
+            return (null, "--pipe-name, --data-dir and --test-taskbar must be given together");
+        }
+        return options.TestForeground && given == 0
+            ? (null, "--test-foreground needs --pipe-name, --data-dir and --test-taskbar")
+            : (options, null);
     }
 
     /// <summary>The absolute <c>--data-dir</c> a command line names, even one <see cref="Parse"/> refuses; else null.</summary>

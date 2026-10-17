@@ -45,6 +45,9 @@ internal static partial class IslandWindow
     /// <summary>The name label of the dock with this process id, or 0.</summary>
     public static nint FindLabel(int processId) => Find(processId, LabelClassName);
 
+    /// <summary>Harbor Shell's island (the top one, docs/adr/0013) in the Shell with this process id, or 0.</summary>
+    public static nint FindShellIsland(int processId) => Find(processId, "Harbor.Island");
+
     private static nint Find(int processId, string className)
     {
         nint window = 0;

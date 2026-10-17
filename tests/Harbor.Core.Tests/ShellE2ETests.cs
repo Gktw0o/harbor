@@ -228,6 +228,53 @@ public sealed partial class ShellE2ETests
         }
     }
 
+    // For real (CI only: it takes the focus): the open island shows the machine's stats, read while it is open,
+    // and offers the power actions. None is pressed: a test never risks locking or shutting down its machine.
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task TheOpenIslandShowsStatsAndOffersPower()
+    {
+        TestDock.RequireForegroundTests();
+        var exe = ShellExe();
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var shell = StartShell(exe, dataDir.Path, taskbar, foreground: true);
+        int? dockId = null;
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: ready", Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            dockId = ProcessIdIn(await TestDock.ReadLogAsync(dataDir.Path));
+            var dock = IslandWindow.Find(dockId!.Value);
+            var island = IslandWindow.FindShellIsland(shell.Id);
+            Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(dock, "invoke", "Start")).ExitCode);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(IslandWindow.GetForegroundWindow() == island), Timeout),
+                "the island didn't get the focus: " + await ShellLogAsync(dataDir.Path));
+
+            const int Text = 50020;
+            const int Button = 50000;
+            var tree = "";
+            Assert.IsTrue(await TestDock.WaitUntilAsync(async () =>
+            {
+                tree = (await TestDock.RunUiaClientAsync(island, "tree")).Output;
+                return tree.Split(['\r', '\n']).Any(line => line.StartsWith($"{Text}\tCPU ", StringComparison.Ordinal) && line.Contains('%', StringComparison.Ordinal));
+            }, Timeout), "no CPU reading in the open island:\n" + tree);
+            StringAssert.Contains(tree, $"{Text}\tMemory ");
+            foreach (var action in new[] { "Lock", "Sign out", "Sleep", "Restart", "Shut down" })
+            {
+                StringAssert.Contains(tree, $"{Button}\t{action}", tree);
+            }
+
+            IslandWindow.PressEscape();
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: closed", Timeout), await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsFalse((await ShellLogAsync(dataDir.Path)).Contains("power: ", StringComparison.Ordinal), "a power action ran");
+        }
+        finally
+        {
+            await StopShellAsync(shell, dockId);
+        }
+    }
+
     private static Process StartShell(string exe, string dataDir, FakeTaskbar taskbar, bool foreground = false)
     {
         var startInfo = new ProcessStartInfo(exe) { UseShellExecute = false };

@@ -2,6 +2,8 @@
 //
 // harbor_test_uia_client <island window> list
 //     Prints "<control type id>\t<name>" for the island, then a line for each child (UTF-8).
+// harbor_test_uia_client <window> tree
+//     The same for every element under the window, not only its children (Harbor Shell's island: its XAML).
 // harbor_test_uia_client <island window> invoke <name>
 //     Invokes the child button with that name.
 // harbor_test_uia_client <island window> hold <name>
@@ -158,7 +160,8 @@ int Hold(IUIAutomationElement& element)
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc < 3 || (std::wstring(argv[2]) != L"list" && std::wstring(argv[2]) != L"menu" && argc < 4))
+    if (argc < 3 || (std::wstring(argv[2]) != L"list" && std::wstring(argv[2]) != L"tree" &&
+                     std::wstring(argv[2]) != L"menu" && argc < 4))
     {
         return 1;
     }
@@ -182,12 +185,14 @@ int wmain(int argc, wchar_t** argv)
                                 IID_PPV_ARGS(&automation))) ||
         FAILED(automation->ElementFromHandle(island, &root)) || !root ||
         FAILED(automation->CreateTrueCondition(&all)) ||
-        FAILED(root->FindAll(TreeScope_Children, all.get(), &children)) || !children)
+        FAILED(root->FindAll(command == L"tree" ? TreeScope_Descendants : TreeScope_Children, all.get(),
+                             &children)) ||
+        !children)
     {
         return 2;
     }
 
-    if (command == L"list")
+    if (command == L"list" || command == L"tree")
     {
         CONTROLTYPEID type = 0;
         wil::unique_bstr name;
@@ -208,7 +213,7 @@ int wmain(int argc, wchar_t** argv)
         {
             return 2;
         }
-        if (command == L"list")
+        if (command == L"list" || command == L"tree")
         {
             PrintLine(type, name.get());
         }
@@ -236,5 +241,5 @@ int wmain(int argc, wchar_t** argv)
             return SUCCEEDED(invoke->Invoke()) ? 0 : 4;
         }
     }
-    return command == L"list" ? 0 : 3;
+    return command == L"list" || command == L"tree" ? 0 : 3;
 }

@@ -1,6 +1,8 @@
 using Harbor.Core;
 using Harbor.Core.Ipc;
 using Harbor.Core.Island;
+using Harbor.Core.Power;
+using Harbor.Core.Stats;
 using Harbor.Platform.Island;
 using Microsoft.UI.Dispatching;
 
@@ -15,6 +17,8 @@ internal sealed partial class IslandController : IDisposable
     private readonly IslandModel _model = new();
     private readonly IslandWindow _window;
     private readonly IslandPanel _panel;
+    private readonly IPowerActions _power;
+    private readonly StatsSampler _stats;
     private IslandState? _sent;
     private bool _connected;
 
@@ -24,7 +28,17 @@ internal sealed partial class IslandController : IDisposable
         _queue = queue;
         _window = new IslandWindow(host.Log);
         _window.RegisterHotkey();
-        _panel = new IslandPanel(host.Apps);
+        // A test Shell's power actions only record what was asked (docs/adr/0016).
+        _power = ShellHost.PowerActionsFor(host.Options, host.Log, () => new WindowsPowerActions(host.Log, () => _window.Handle));
+        // Read only while the island is open; a test Shell reads the real stats too (reading changes nothing).
+        _stats = new StatsSampler(() => new WindowsStatsSource(), host.Log);
+        _panel = new IslandPanel(host.Apps, _power.Capabilities);
+        _panel.PowerRequested += action =>
+        {
+            // Closed first: locking or sleeping with the island open would leave it open on return.
+            Change(_model.OnDismiss);
+            _power.Run(action);
+        };
         _window.SetPanel(_panel.Root, _panel.Search);
         // Starting an app or Windows' Start closes the island first, so the app comes up in front of nothing of
         // Harbor's.
@@ -70,9 +84,14 @@ internal sealed partial class IslandController : IDisposable
         change();
         if (_model.Open && !wasOpen)
         {
-            // A fresh search, over a list read again if it is old (apps come and go).
+            // A fresh search, over a list read again if it is old (apps come and go); the stats read while it shows.
             _panel.Reset();
             _ = _host.Apps.RefreshAsync();
+            _stats.Start(reading => _queue.TryEnqueue(() => _panel.ShowStats(reading)));
+        }
+        else if (!_model.Open && wasOpen)
+        {
+            _stats.Stop();
         }
         var (monitor, dpi) = _model.Dock is { } dock ? (dock.Monitor, dock.Dpi) : IslandWindow.PrimaryMonitor();
         _window.Apply(_model.Shape, monitor, dpi);
@@ -84,5 +103,9 @@ internal sealed partial class IslandController : IDisposable
         }
     }
 
-    public void Dispose() => _window.Dispose();
+    public void Dispose()
+    {
+        _stats.Dispose();
+        _window.Dispose();
+    }
 }

@@ -1,5 +1,8 @@
+using System.Globalization;
 using Harbor.Core.Apps;
 using Harbor.Core.Ipc;
+using Harbor.Core.Power;
+using Harbor.Core.Stats;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -16,8 +19,13 @@ internal sealed partial class IslandPanel
     private readonly AppIndex _apps;
     private readonly ListView _results;
     private readonly StackPanel _sections;
+    private readonly StackPanel _stats;
+    private StackPanel? _confirmRow;
+    private TextBlock? _confirmText;
+    private Button? _confirmButton;
+    private PowerAction? _confirming;
 
-    public IslandPanel(AppIndex apps)
+    public IslandPanel(AppIndex apps, PowerCapabilities power)
     {
         _apps = apps;
         Search = new TextBox { PlaceholderText = "Search apps", Width = 420, HorizontalAlignment = HorizontalAlignment.Center };
@@ -35,20 +43,14 @@ internal sealed partial class IslandPanel
             }
         };
 
-        // The sections come with M4 steps 13-15.
         _sections = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, HorizontalAlignment = HorizontalAlignment.Center };
-        foreach (var name in new[] { "Stats", "Power", "Media", "Controls" })
+        _stats = new StackPanel { Spacing = 6 };
+        _sections.Children.Add(Card("Stats", _stats));
+        _sections.Children.Add(Card("Power", PowerSection(power)));
+        // The Media and Controls sections come with M4 steps 14-15.
+        foreach (var name in new[] { "Media", "Controls" })
         {
-            var card = new Border
-            {
-                Width = 200,
-                Height = 250,
-                CornerRadius = new CornerRadius(16),
-                Background = new SolidColorBrush(Windows.UI.Color.FromArgb(40, 128, 128, 128)),
-                Child = new TextBlock { Text = name, Margin = new Thickness(14), FontSize = 15 },
-            };
-            AutomationProperties.SetName(card, name);
-            _sections.Children.Add(card);
+            _sections.Children.Add(Card(name, new StackPanel()));
         }
 
         var windowsStart = new HyperlinkButton { Content = "Windows Start", HorizontalAlignment = HorizontalAlignment.Center };
@@ -73,10 +75,118 @@ internal sealed partial class IslandPanel
     /// <summary>"Windows Start" was chosen.</summary>
     public event Action? WindowsStartRequested;
 
-    /// <summary>The island opened: a fresh search.</summary>
+    /// <summary>A power action was chosen (and confirmed, where it asks).</summary>
+    public event Action<PowerAction>? PowerRequested;
+
+    /// <summary>The latest stats (docs/adr/0016); parts that aren't available aren't shown.</summary>
+    public void ShowStats(StatsReading reading)
+    {
+        ArgumentNullException.ThrowIfNull(reading);
+        var culture = CultureInfo.CurrentCulture;
+        var lines = new List<string>();
+        if (reading.Cpu is { } cpu)
+        {
+            lines.Add(reading.Cores.Count > 0
+                ? string.Format(culture, "CPU {0:0} % · {1} cores", cpu, reading.Cores.Count)
+                : string.Format(culture, "CPU {0:0} %", cpu));
+        }
+        if (reading is { MemoryUsed: { } used, MemoryTotal: { } total })
+        {
+            lines.Add($"Memory {StatsMath.Size(used, culture)} of {StatsMath.Size(total, culture)}");
+        }
+        if (reading.Gpu is { } gpu)
+        {
+            lines.Add(string.Format(culture, "GPU {0:0} %", gpu));
+        }
+        if (reading.Battery is { } battery)
+        {
+            lines.Add(battery switch
+            {
+                { Charging: true } => string.Format(culture, "Battery {0} %, charging", battery.Percent),
+                { TimeLeft: { } left } => string.Format(culture, "Battery {0} %, {1} left", battery.Percent, StatsMath.Duration(left)),
+                _ => string.Format(culture, "Battery {0} %", battery.Percent),
+            });
+        }
+        foreach (var drive in reading.Drives.Take(3))
+        {
+            lines.Add($"{drive.Name} {StatsMath.Size(drive.Free, culture)} free of {StatsMath.Size(drive.Total, culture)}");
+        }
+        _stats.Children.Clear();
+        foreach (var line in lines)
+        {
+            _stats.Children.Add(new TextBlock { Text = line, TextWrapping = TextWrapping.Wrap });
+        }
+    }
+
+    // Lock, sign out, sleep, hibernate (if enabled), restart, shut down. Those that end the session or the PC ask
+    // first, in the section itself: a second button names what will happen.
+    private StackPanel PowerSection(PowerCapabilities power)
+    {
+        var section = new StackPanel { Spacing = 4 };
+        foreach (var action in PowerPolicy.Offered(power))
+        {
+            var button = new Button { Content = PowerPolicy.Label(action), HorizontalAlignment = HorizontalAlignment.Stretch };
+            button.Click += (_, _) => Choose(action);
+            section.Children.Add(button);
+        }
+        _confirmText = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        _confirmButton = new Button();
+        _confirmButton.Click += (_, _) =>
+        {
+            if (_confirming is { } action)
+            {
+                HideConfirmation();
+                PowerRequested?.Invoke(action);
+            }
+        };
+        var cancel = new Button { Content = "Cancel" };
+        cancel.Click += (_, _) => HideConfirmation();
+        _confirmRow = new StackPanel { Spacing = 4, Visibility = Visibility.Collapsed, Children = { _confirmText, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Children = { _confirmButton, cancel } } } };
+        section.Children.Add(_confirmRow);
+        return section;
+    }
+
+    private void Choose(PowerAction action)
+    {
+        if (!PowerPolicy.NeedsConfirmation(action))
+        {
+            PowerRequested?.Invoke(action);
+            return;
+        }
+        _confirming = action;
+        _confirmText!.Text = $"{PowerPolicy.Label(action)} now? Unsaved work may be lost.";
+        _confirmButton!.Content = PowerPolicy.Label(action);
+        AutomationProperties.SetName(_confirmButton, $"{PowerPolicy.Label(action)} now");
+        _confirmRow!.Visibility = Visibility.Visible;
+        _confirmButton.Focus(FocusState.Programmatic);
+    }
+
+    private void HideConfirmation()
+    {
+        _confirming = null;
+        _confirmRow!.Visibility = Visibility.Collapsed;
+    }
+
+    private static Border Card(string name, UIElement content)
+    {
+        var card = new Border
+        {
+            Width = 200,
+            MinHeight = 250,
+            CornerRadius = new CornerRadius(16),
+            Padding = new Thickness(14),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(40, 128, 128, 128)),
+            Child = new StackPanel { Spacing = 10, Children = { new TextBlock { Text = name, FontSize = 15 }, content } },
+        };
+        AutomationProperties.SetName(card, name);
+        return card;
+    }
+
+    /// <summary>The island opened: a fresh search, and nothing left waiting for confirmation.</summary>
     public void Reset()
     {
         Search.Text = "";
+        HideConfirmation();
         ShowResults();
     }
 

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Harbor.Core.Apps;
 using Harbor.Core.Ipc;
 using Harbor.Core.Logging;
+using Harbor.Core.Power;
 using Harbor.Core.Settings;
 using Harbor.Core.Supervision;
 using Harbor.Core.Taskbar;
@@ -69,6 +70,17 @@ public sealed class ShellHost
 
     /// <summary>The installed apps the island searches.</summary>
     public AppIndex Apps { get; }
+
+    /// <summary>
+    /// The power actions for a Shell: a test Shell only ever gets <see cref="RecordingPowerActions"/>, and the real
+    /// ones are not even made for it.
+    /// </summary>
+    public static IPowerActions PowerActionsFor(ShellOptions options, ILog log, Func<IPowerActions> real)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(real);
+        return options.TestMode ? new RecordingPowerActions(log) : real();
+    }
 
     /// <summary>
     /// Starts an app chosen in the island: through the dock (Explorer's route, so it isn't the Shell's child), or,

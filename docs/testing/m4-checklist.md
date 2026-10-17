@@ -24,7 +24,7 @@ does.
 `tuck-panic`, `tuck-kill`, `tuck-close-shell`, `tuck-stuck`, `tuck-edge` and `island-kill`: a black window
 covers the primary monitor for a few seconds in each tuck scenario, and `tuck-edge` moves the mouse. The
 `appbar-*` and `stop-dock` scenarios now check that the work area never shrinks (no strip). Then
-`-Scenario island-budget` (about 90 s: Harbor Shell's CPU and memory with the island collapsed, open and
+`-Scenario island-budget` (about 2.5 min: Harbor Shell's CPU and memory with the island collapsed, open and
 closed again, and how fast Start brings it in front). Paste the result tables below.
 
 ## 2. The overlay dock
@@ -97,3 +97,5 @@ closed again, and how fast Start brings it in front). Paste the result tables be
 
 | Date | PC (arch, Windows build) | Section | Result | Notes |
 |---|---|---|---|---|
+| 2026-10-17 | dev PC, ARM64, Windows 11 10.0.28000, one monitor, Release | 1 (23 scenarios) | 22 PASS, 1 SKIP | island-move SKIP (one monitor). panic, peek-kill and menu-panic first failed in the script itself (UI Automation missed the hide toggle once right after the Shell opened; hiding never came on); fixed (Enable-Hide waits for it) and rerun: panic restored in 81 ms, peek-kill 292 ms, menu-panic 236 ms. tuck-*: tucked 2.8-3.5 s after a full-screen window came, the taskbar stayed hidden while tucked; panic restored in 74 ms, dock killed 231 ms, Shell closed 238 ms; full screen ending unannounced: on top again in 240 ms; the bottom edge brought it back in 517 ms, tucked again 1.7 s after the mouse left. island-kill: island in front 330 ms after Start, restored 285 ms after the Shell was killed. The overlay keeps no strip (work area 0 px short). Idle dock: 0.009 % CPU, 31.3 MB working set, 8.6 MB private. |
+| 2026-10-17 | same | 1 (island-budget) | PASS, then fixed | Open: +13.6 MB private, +11.3 MB 35 s after closing; Start -> island in front 282 ms cold, 11 ms warm. Collapsed: 0.289 % of all CPUs (about 3.5 % of one core) — not "about 0": background JIT in the first minute (the scenario measured from 10 s) and the main window redrawing "pong N" every second since M0. Now the text changes only when the link comes or goes and the scenario waits 60 s: an idle test Shell's threads went from ~43 to ~10 M cycles a second. Rerun pending. |

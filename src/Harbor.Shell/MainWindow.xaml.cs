@@ -17,6 +17,7 @@ public sealed partial class MainWindow : Window
     private readonly DockSupervisor _supervisor;
     private readonly SettingsFile _settingsFile;
     private bool _updatingToggle;
+    private bool? _shownConnected;
 
     public MainWindow(ShellHost host)
     {
@@ -31,7 +32,7 @@ public sealed partial class MainWindow : Window
         }
         StatusText.Text = $"Waiting for the dock on {host.PipeName}";
 
-        _supervisor.LinkStatusChanged += status => DispatcherQueue.TryEnqueue(() => StatusText.Text = Describe(status));
+        _supervisor.LinkStatusChanged += status => DispatcherQueue.TryEnqueue(() => ShowLink(status));
         _supervisor.DockStatusChanged += status => DispatcherQueue.TryEnqueue(() => ShowDockStatus(status));
         _supervisor.TaskbarRestored += restore => DispatcherQueue.TryEnqueue(() => TaskbarText.Text = Describe(restore));
         _supervisor.TaskbarStateChanged += state => DispatcherQueue.TryEnqueue(() => TaskbarText.Text = Describe(state, HideToggle.IsOn));
@@ -181,10 +182,15 @@ public sealed partial class MainWindow : Window
         _ => "The taskbar is already visible.",
     };
 
-    private string Describe(ControlLinkStatus status) => status switch
+    // Only when the link comes or goes. The text used to show every pong (1 Hz), and redrawing it kept an idle Shell
+    // busy: about 13 ms of CPU a second between its UI and composition threads (M4 island-budget).
+    private void ShowLink(ControlLinkStatus status)
     {
-        { Connected: false } => $"Waiting for the dock on {_host.PipeName}",
-        { LastPongSeq: { } seq, RoundTrip: { } roundTrip } => $"Dock connected · pong {seq} · {roundTrip.TotalMilliseconds:0.0} ms",
-        _ => "Dock connected",
-    };
+        if (_shownConnected == status.Connected)
+        {
+            return;
+        }
+        _shownConnected = status.Connected;
+        StatusText.Text = status.Connected ? "Dock connected" : $"Waiting for the dock on {_host.PipeName}";
+    }
 }

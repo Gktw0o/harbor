@@ -48,7 +48,7 @@
       tuck-edge        tucked; resting on the bottom edge brings it back, leaving tucks it again.
       island-kill      Harbor Shell's island opened with the dock's Start button, then the Shell killed: the
                        dock restores.
-      island-budget    (only when named) Harbor Shell's CPU and memory with the island collapsed, open and 35 s
+      island-budget    (only when named, ~2.5 min) Harbor Shell's CPU and memory with the island collapsed, open and 35 s
                        after closing; how fast Start brings the island in front.
 
 .PARAMETER ExerciseAutoHide
@@ -258,8 +258,12 @@ function Start-Harbor {
 }
 
 function Enable-Hide {
-    $toggle = Get-HideToggle
-    $pattern = $toggle.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+    # UI Automation may not find the toggle on one try right after the Shell opened (M4 run: 3 scenarios).
+    $script:toggle = $null
+    if ((Wait-Until { $script:toggle = Get-HideToggle; $null -ne $script:toggle } 10000) -lt 0) {
+        throw 'Harbor Shell shows no "Hide the Windows taskbar" toggle.'
+    }
+    $pattern = $script:toggle.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
     if ($pattern.Current.ToggleState -ne 'On') { $pattern.Toggle() }
     if ((Wait-Until { [HarborSafety.Native]::PrimaryHidden() } 20000) -lt 0) {
         throw 'The taskbar did not hide after turning hiding on (see %LOCALAPPDATA%\Harbor\logs).'
@@ -762,7 +766,9 @@ try {
                     # Harbor Shell with the island collapsed, open (Apps, Stats, Media, Controls read) and 35 s after
                     # it closed (docs/adr/0013 budgets; the app list stays warm).
                     $shell = Get-Process Harbor.Shell
-                    Start-Sleep -Seconds 10
+                    # .NET compiles hot code again in the background for about a minute after start (tiered JIT):
+                    # measured from 10 s, that alone was most of the "idle" CPU.
+                    Start-Sleep -Seconds 60
                     $shell.Refresh(); $cpuBefore = $shell.TotalProcessorTime
                     Start-Sleep -Seconds 30
                     $shell.Refresh()
@@ -840,7 +846,7 @@ try {
             }
         }
         catch {
-            Add-Result $name $false "error: $($_.Exception.Message)"
+            Add-Result $name $false "error at line $($_.InvocationInfo.ScriptLineNumber): $($_.Exception.Message)"
         }
         finally {
             Stop-Harbor

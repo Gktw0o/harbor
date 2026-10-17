@@ -64,8 +64,11 @@ public partial class App : Application
         };
         if (_options.TestMode)
         {
-            // A test Shell never takes the user's focus, and keeps out of sight.
+            // A test Shell never takes the user's focus, and keeps out of sight: not in Alt+Tab or the taskbar,
+            // and not a window Windows can hand the focus to.
             _window.AppWindow.Move(new Windows.Graphics.PointInt32(-32000, -32000));
+            _window.AppWindow.IsShownInSwitchers = false;
+            Harbor.Platform.Island.TestShellWindow.NeverActivate(WinRT.Interop.WindowNative.GetWindowHandle(_window));
             _window.AppWindow.Show(activateWindow: false);
         }
         else

@@ -54,6 +54,8 @@ public sealed partial class ShellE2ETests
             var window = await MainWindowOfAsync(shell);
             Assert.AreNotEqual((nint)0, window, "the test Shell has no window");
             Assert.AreNotEqual(window, IslandWindow.GetForegroundWindow(), "the test Shell took the focus");
+            // Nor can Windows hand it the focus (the user's Alt+Tab once landed on it during a local run).
+            Assert.AreEqual(IslandWindow.ExNoActivate, IslandWindow.ExStyle(window) & IslandWindow.ExNoActivate, "the test Shell's window can be activated");
 
             // Closing the island changes nothing (it closes to its notch); closing the main window ends the Shell.
             var island = IslandWindow.FindShellIsland(shell.Id);
@@ -282,6 +284,7 @@ public sealed partial class ShellE2ETests
     }
 
     [TestMethod]
+    [DoNotParallelize]
     public async Task ATestShellsControlsAreMadeUpAndTouchNothing()
     {
         TestDock.RequireForegroundTests();

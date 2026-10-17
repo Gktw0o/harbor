@@ -99,22 +99,7 @@ public sealed partial class DockIslandE2ETests
         }
     }
 
-    // Windows' Start, if a test (in CI) opened it.
-    private static async Task CloseStartAsync()
-    {
-        static bool StartIsOpen() => IslandWindow.ForegroundProcessName() is "StartMenuExperienceHost" or "SearchHost";
-        if (!TestDock.ForegroundTestsAllowed)
-        {
-            return;
-        }
-        // It may still be on its way.
-        await TestDock.WaitUntilAsync(() => Task.FromResult(StartIsOpen()), TimeSpan.FromSeconds(3));
-        if (StartIsOpen())
-        {
-            IslandWindow.PressEscape();
-            await TestDock.WaitUntilAsync(() => Task.FromResult(!StartIsOpen()), TimeSpan.FromSeconds(5));
-        }
-    }
+    private static Task CloseStartAsync() => TestDock.CloseWindowsStartAsync();
 
     // While the island is open the Start button says so (a dot, and its status for screen readers), and another
     // press is for closing it: no fallback then.

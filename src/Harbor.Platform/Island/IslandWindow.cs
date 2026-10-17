@@ -47,7 +47,7 @@ public sealed unsafe partial class IslandWindow : IDisposable
     private readonly DesktopWindowXamlSource _xaml;
     private readonly Grid _root;
     private readonly Grid _panel;
-    private readonly TextBox _search;
+    private Control? _focusOnOpen;
     private nint _energySaverNotification;
     private bool _energySaver;
     private IslandShape _shape = IslandShape.Hidden;
@@ -84,24 +84,8 @@ public sealed unsafe partial class IslandWindow : IDisposable
         _notch.Clip = _clip;
         root.Children.InsertAtTop(_notch);
 
-        // The panel's sections come with M4 steps 12-15; the search box is where the Windows key lands.
-        _search = new TextBox { PlaceholderText = "Search apps", Width = 420, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 24, 0, 0) };
-        AutomationProperties.SetName(_search, "Search apps");
-        var sections = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 76, 0, 0) };
-        foreach (var name in new[] { "Apps", "Stats", "Power", "Media", "Controls" })
-        {
-            var card = new Border
-            {
-                Width = 170,
-                Height = 290,
-                CornerRadius = new CornerRadius(16),
-                Background = new SolidColorBrush(Windows.UI.Color.FromArgb(40, 128, 128, 128)),
-                Child = new TextBlock { Text = name, Margin = new Thickness(14), FontSize = 15 },
-            };
-            AutomationProperties.SetName(card, name);
-            sections.Children.Add(card);
-        }
-        _panel = new Grid { Visibility = Visibility.Collapsed, Children = { _search, sections } };
+        // What the open island shows comes from Harbor Shell (SetPanel).
+        _panel = new Grid { Visibility = Visibility.Collapsed };
         // A transparent (not null) background: the notch takes the mouse everywhere, even where nothing is drawn.
         _root = new Grid { Background = new SolidColorBrush(Colors.Transparent), Children = { _panel } };
         AutomationProperties.SetName(_root, "Harbor island");
@@ -147,6 +131,17 @@ public sealed unsafe partial class IslandWindow : IDisposable
 
     /// <summary>The virtual-key code of the hotkey it registered, or null.</summary>
     public uint? Hotkey { get; private set; }
+
+    /// <summary>What the open island shows, and the control that gets the keyboard focus when it opens.</summary>
+    public void SetPanel(UIElement panel, Control? focusOnOpen)
+    {
+        _panel.Children.Clear();
+        _panel.Children.Add(panel);
+        _focusOnOpen = focusOnOpen;
+    }
+
+    /// <summary>Windows' own Start, as the Start button would open it (WM_SYSCOMMAND/SC_TASKLIST: docs/adr/0015).</summary>
+    public void OpenWindowsStart() => IslandNative.PostMessage(_hwnd, IslandNative.WmSysCommand, IslandNative.ScTaskList, 0);
 
     /// <summary>Registers the first free key of F22, F21 and F23 as the island's hotkey (docs/adr/0015).</summary>
     public uint? RegisterHotkey()
@@ -235,7 +230,7 @@ public sealed unsafe partial class IslandWindow : IDisposable
         _panel.Visibility = Visibility.Visible;
         SetActivatable(true);
         var front = IslandNative.SetForegroundWindow(_hwnd);
-        _search.Focus(FocusState.Programmatic);
+        _focusOnOpen?.Focus(FocusState.Programmatic);
         _log.Info(front ? "island: open, with the focus" : "island: open; Windows didn't give it the focus");
     }
 

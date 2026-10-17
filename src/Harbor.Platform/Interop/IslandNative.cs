@@ -29,6 +29,12 @@ internal static unsafe partial class IslandNative
     public const uint SwpNoMove = 0x2;
     public const uint SwpNoActivate = 0x10;
     public const uint WmActivate = 0x0006;
+    public const uint WmSysCommand = 0x0112;
+    public const nint ScTaskList = 0xF130;
+
+    [LibraryImport("user32.dll", EntryPoint = "PostMessageW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static partial bool PostMessage(nint window, uint message, nint wParam, nint lParam);
     public const uint WmClose = 0x0010;
     public const uint WmMouseActivate = 0x0021;
     public const uint WmHotkey = 0x0312;

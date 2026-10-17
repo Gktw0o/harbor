@@ -14,6 +14,7 @@ internal sealed partial class IslandController : IDisposable
     private readonly DispatcherQueue _queue;
     private readonly IslandModel _model = new();
     private readonly IslandWindow _window;
+    private readonly IslandPanel _panel;
     private IslandState? _sent;
     private bool _connected;
 
@@ -23,6 +24,21 @@ internal sealed partial class IslandController : IDisposable
         _queue = queue;
         _window = new IslandWindow(host.Log);
         _window.RegisterHotkey();
+        _panel = new IslandPanel(host.Apps);
+        _window.SetPanel(_panel.Root, _panel.Search);
+        // Starting an app or Windows' Start closes the island first, so the app comes up in front of nothing of
+        // Harbor's.
+        _panel.LaunchRequested += target => Change(() =>
+        {
+            _model.OnDismiss();
+            host.Launch(target);
+        });
+        _panel.WindowsStartRequested += () =>
+        {
+            Change(_model.OnDismiss);
+            _window.OpenWindowsStart();
+        };
+        host.Apps.Changed += () => _queue.TryEnqueue(_panel.Refresh);
         _window.PointerChanged += over => Change(() => _model.OnPointer(over));
         _window.Clicked += () => Change(_model.OnClick);
         _window.Dismissed += () => Change(_model.OnDismiss);
@@ -50,7 +66,14 @@ internal sealed partial class IslandController : IDisposable
 
     private void Change(Action change)
     {
+        var wasOpen = _model.Open;
         change();
+        if (_model.Open && !wasOpen)
+        {
+            // A fresh search, over a list read again if it is old (apps come and go).
+            _panel.Reset();
+            _ = _host.Apps.RefreshAsync();
+        }
         var (monitor, dpi) = _model.Dock is { } dock ? (dock.Monitor, dock.Dpi) : IslandWindow.PrimaryMonitor();
         _window.Apply(_model.Shape, monitor, dpi);
         var state = new IslandState(Ready: true, Open: _model.Open, Hotkey: (int?)_window.Hotkey);

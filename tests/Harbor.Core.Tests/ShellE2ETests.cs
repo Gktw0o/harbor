@@ -176,11 +176,54 @@ public sealed partial class ShellE2ETests
         }
         finally
         {
-            await Task.Delay(500);
-            if (IslandWindow.ForegroundProcessName() is "StartMenuExperienceHost" or "SearchHost")
-            {
-                IslandWindow.PressEscape();
-            }
+            await TestDock.CloseWindowsStartAsync();
+            await StopShellAsync(shell, dockId);
+        }
+    }
+
+    // For real (CI only: it takes the focus): the Windows key's path minus the key itself. The Start button opens
+    // the island, the user types, Enter starts the app through the dock, and the island closes. The test Shell
+    // searches only its test list, which names the marker app.
+    [TestMethod]
+    [DoNotParallelize]
+    public async Task TheIslandFindsAnAppAndStartsItThroughTheDock()
+    {
+        TestDock.RequireForegroundTests();
+        var exe = ShellExe();
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        var app = TestDock.CopyMarkerApp(dataDir.Path);
+        await File.WriteAllTextAsync(Path.Combine(dataDir.Path, "test-apps.json"),
+            System.Text.Json.JsonSerializer.Serialize(new[] { new { name = "Harbor Marker", id = app }, new { name = "Something Else", id = @"C:\nothing.exe" } }));
+        using var shell = StartShell(exe, dataDir.Path, taskbar, foreground: true);
+        int? dockId = null;
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: ready", Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            dockId = ProcessIdIn(await TestDock.ReadLogAsync(dataDir.Path));
+            var dock = IslandWindow.Find(dockId!.Value);
+            var island = IslandWindow.FindShellIsland(shell.Id);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(async () => (await ShellLogAsync(dataDir.Path)).Contains("apps: 2 in the island's list", StringComparison.Ordinal), Timeout),
+                await ShellLogAsync(dataDir.Path));
+
+            Assert.AreEqual(0, (await TestDock.RunUiaClientAsync(dock, "invoke", "Start")).ExitCode);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(IslandWindow.GetForegroundWindow() == island), Timeout),
+                "the island didn't get the focus: " + await ShellLogAsync(dataDir.Path));
+            await Task.Delay(300);
+            IslandWindow.Type("marker");
+            await Task.Delay(300);
+            IslandWindow.PressEnter();
+
+            var marker = app + ".launched";
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(File.Exists(marker)), Timeout),
+                await ShellLogAsync(dataDir.Path) + await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "launch: from the island started via", Timeout), await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: closed", Timeout), await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsFalse((await ShellLogAsync(dataDir.Path)).Contains("Harbor Marker", StringComparison.OrdinalIgnoreCase), "the Shell's log names an app");
+        }
+        finally
+        {
             await StopShellAsync(shell, dockId);
         }
     }

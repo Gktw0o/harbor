@@ -48,6 +48,34 @@ internal static partial class TestDock
         {
             Assert.Inconclusive("Changes the foreground: runs in CI, or set HARBOR_FOREGROUND_TESTS=1.");
         }
+        // A Windows Start an earlier test left open would keep the foreground from this one.
+        var deadline = Stopwatch.StartNew();
+        while (WindowsStartIsOpen() && deadline.Elapsed < TimeSpan.FromSeconds(5))
+        {
+            IslandWindow.PressEscape();
+            Thread.Sleep(500);
+        }
+    }
+
+    /// <summary>Windows' Start (or its search) is in front.</summary>
+    public static bool WindowsStartIsOpen() => IslandWindow.ForegroundProcessName() is "StartMenuExperienceHost" or "SearchHost";
+
+    /// <summary>
+    /// Closes Windows' Start if a test opened it, waiting a moment for one that is still on its way: left open, it
+    /// holds the foreground and every later test that moves the focus fails.
+    /// </summary>
+    public static async Task CloseWindowsStartAsync()
+    {
+        if (!ForegroundTestsAllowed)
+        {
+            return;
+        }
+        await WaitUntilAsync(() => Task.FromResult(WindowsStartIsOpen()), TimeSpan.FromSeconds(3));
+        for (var attempt = 0; attempt < 3 && WindowsStartIsOpen(); attempt++)
+        {
+            IslandWindow.PressEscape();
+            await WaitUntilAsync(() => Task.FromResult(!WindowsStartIsOpen()), TimeSpan.FromSeconds(3));
+        }
     }
 
     public static bool ForegroundTestsAllowed =>

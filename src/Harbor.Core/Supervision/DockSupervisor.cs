@@ -240,6 +240,21 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         });
     }
 
+    /// <summary>Sends message to the dock, or, if none is connected (or it can't be sent), runs otherwise instead.</summary>
+    public void SendToDockOr(Message message, Action otherwise)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(otherwise);
+        Post(_ =>
+        {
+            if (!server.IsConnected || !server.TrySend(message))
+            {
+                otherwise();
+            }
+            return Task.CompletedTask;
+        });
+    }
+
     private void Post(Func<Session, Task> command) => _commands.Writer.TryWrite(command);
 
     private void OnLinkStatus(ControlLinkStatus status)

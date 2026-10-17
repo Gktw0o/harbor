@@ -62,6 +62,35 @@ public sealed class ShellHost
         _apps.Answered += Supervisor.SendToDock;
         // Pin and unpin from the dock's menu: settings.json changes, and the settings watcher sends the new list.
         Supervisor.PinRequestReceived += request => _ = ApplyPinRequestAsync(request);
+
+        // The island's apps (docs/adr/0016). A test Shell reads only its test list, never the machine's apps.
+        Apps = new AppIndex(options.TestMode ? new FileAppSource(Path.Combine(dataDir, FileAppSource.FileName)) : new AppsFolderSource(), log);
+    }
+
+    /// <summary>The installed apps the island searches.</summary>
+    public AppIndex Apps { get; }
+
+    /// <summary>
+    /// Starts an app chosen in the island: through the dock (Explorer's route, so it isn't the Shell's child), or,
+    /// with no dock connected, the shell's own way.
+    /// </summary>
+    public void Launch(AppTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        Supervisor.SendToDockOr(new Launch(target), () =>
+        {
+            var file = target.Kind == DockItemKind.App ? @"shell:AppsFolder\" + target.Target : target.Target;
+            try
+            {
+                using var process = Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+                Log.Info("launch: from the island, without a dock");
+            }
+            catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                // Which app is the user's business.
+                Log.Warn($"launch: from the island, without a dock, failed: {exception.GetType().Name}");
+            }
+        });
     }
 
     public ShellOptions Options { get; }
@@ -90,6 +119,7 @@ public sealed class ShellHost
     /// </summary>
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        _ = Apps.RefreshAsync(force: true);
         var loops = new[]
         {
             RunQuietlyAsync("settings", _settings.RunAsync, cancellationToken),

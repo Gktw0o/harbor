@@ -137,12 +137,24 @@ internal static partial class IslandWindow
     }
 
     // Presses and releases Esc (CI and foreground tests only: it goes to whatever is in front).
-    public static void PressEscape()
+    public static void PressEscape() => Press(0x1B);
+
+    public static void PressEnter() => Press(0x0D);
+
+    // Types lowercase letters and spaces (their virtual keys without Shift), into whatever is in front.
+    public static void Type(string text)
     {
-        const byte Escape = 0x1B;
+        foreach (var c in text)
+        {
+            Press(c == ' ' ? (byte)0x20 : (byte)char.ToUpperInvariant(c));
+        }
+    }
+
+    private static void Press(byte key)
+    {
         const uint KeyUp = 0x2;
-        KeybdEvent(Escape, 0, 0, 0);
-        KeybdEvent(Escape, 0, KeyUp, 0);
+        KeybdEvent(key, 0, 0, 0);
+        KeybdEvent(key, 0, KeyUp, 0);
     }
 
     [LibraryImport("user32.dll", EntryPoint = "keybd_event")]

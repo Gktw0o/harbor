@@ -141,7 +141,7 @@ public sealed class DockE2ETests
         using var taskbar = new FakeTaskbar(dataDir.Path);
         using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
         var timeout = TimeSpan.FromSeconds(15);
-        static bool StartIsOpen() => IslandWindow.ForegroundProcessName() is "StartMenuExperienceHost" or "SearchHost";
+        static bool StartIsOpen() => TestDock.WindowsStartIsOpen();
         try
         {
             Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", timeout),
@@ -160,11 +160,7 @@ public sealed class DockE2ETests
         }
         finally
         {
-            if (StartIsOpen())
-            {
-                IslandWindow.PressEscape();
-                await TestDock.WaitUntilAsync(() => Task.FromResult(!StartIsOpen()), TimeSpan.FromSeconds(5));
-            }
+            await TestDock.CloseWindowsStartAsync();
             await StopAsync(dock);
         }
     }

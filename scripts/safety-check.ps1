@@ -39,6 +39,17 @@
                    there and back; the taskbar stays hidden throughout. SKIP with one monitor.
       budget       (only when named) the dock's memory and GUI handles with 0 and 30 running apps, after a
                    label and a menu, after 50 monitor moves, after 10,000 windows came and went.
+      M4 (a black window covers the primary monitor for a few seconds; tuck-edge moves the mouse):
+      tuck-panic       the dock tucked behind a full-screen app: the taskbar stays hidden (the edge trigger is
+                       armed, rule 7) and Ctrl+Alt+Shift+H restores.
+      tuck-kill        tucked, then the dock killed: the watchdog restores.
+      tuck-close-shell tucked, then Harbor Shell closes: the dock restores by itself.
+      tuck-stuck       tucked, then the window leaves full screen: the island comes back on top by itself.
+      tuck-edge        tucked; resting on the bottom edge brings it back, leaving tucks it again.
+      island-kill      Harbor Shell's island opened with the dock's Start button, then the Shell killed: the
+                       dock restores.
+      island-budget    (only when named) Harbor Shell's CPU and memory with the island collapsed, open and 35 s
+                       after closing; how fast Start brings the island in front.
 
 .PARAMETER ExerciseAutoHide
     If your taskbar's auto-hide is on, turn it off for the run, so Harbor has to turn it on and restore it
@@ -55,7 +66,8 @@ param(
 
     # Checked below: with -File, "-Scenario a,b" arrives as one string.
     [string[]] $Scenario = @('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle',
-        'appbar-kill', 'appbar-restart', 'stop-dock', 'peek', 'peek-panic', 'peek-kill', 'attention', 'menu-panic', 'island-move'),
+        'appbar-kill', 'appbar-restart', 'stop-dock', 'peek', 'peek-panic', 'peek-kill', 'attention', 'menu-panic', 'island-move',
+        'tuck-panic', 'tuck-kill', 'tuck-close-shell', 'tuck-stuck', 'tuck-edge', 'island-kill'),
 
     [switch] $ExerciseAutoHide,
 
@@ -71,7 +83,8 @@ if ($env:CI) {
     throw 'safety-check.ps1 works on the real taskbar and never runs in CI.'
 }
 $knownScenarios = @('panic', 'kill-dock', 'freeze-dock', 'close-shell', 'kill-shell', 'kill-both', 'start-menu', 'idle', 'explorer',
-    'appbar-kill', 'appbar-restart', 'stop-dock', 'peek', 'peek-panic', 'peek-kill', 'attention', 'menu-panic', 'island-move', 'budget')
+    'appbar-kill', 'appbar-restart', 'stop-dock', 'peek', 'peek-panic', 'peek-kill', 'attention', 'menu-panic', 'island-move', 'budget',
+    'tuck-panic', 'tuck-kill', 'tuck-close-shell', 'tuck-stuck', 'tuck-edge', 'island-kill', 'island-budget')
 $Scenario = @($Scenario | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 foreach ($name in $Scenario) {
     if ($knownScenarios -notcontains $name) { throw "Unknown scenario '$name'. Known: $($knownScenarios -join ', ')" }
@@ -188,6 +201,8 @@ public static bool PrimarySlidIn() {
     return 2 * visible >= r.Bottom - r.Top;
 }
 // The process owning the top-level window under the point.
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+public static IntPtr Foreground() { return GetForegroundWindow(); }
 public static uint ProcessAt(int x, int y) {
     var root = GetAncestor(WindowFromPoint(((long)y << 32) | (uint)x), 2);
     uint process; GetWindowThreadProcessId(root, out process); return process;
@@ -419,6 +434,54 @@ function Stop-TestWindows {
     if (-not $Helper.WaitForExit(5000)) { $Helper.Kill() }
 }
 
+# M4 (docs/testing/m4-checklist.md): the overlay dock tucks behind a full-screen app (docs/adr/0014), and the
+# island lives in Harbor Shell (docs/adr/0013).
+
+# A black window covers the primary monitor and comes in front, and the dock tucks behind it (about 2.5 s).
+# Returns the helper (for Stop-TestWindows) and how long the tuck took.
+function Start-FullScreen {
+    $helper = Start-TestWindows
+    try {
+        Send-TestWindows $helper 'new 1 Harbor.Safety.FullScreen'
+        $before = Get-DockLogCount 'island: tucked behind a full-screen app'
+        $helper.StandardInput.WriteLine('fullscreen 1')
+        $answer = $helper.StandardOutput.ReadLine()
+        if ($answer -ne 'ok 1') { throw "The full-screen window did not come in front ($answer)." }
+        $ms = Wait-Until { (Get-DockLogCount 'island: tucked behind a full-screen app') -gt $before } 8000
+        if ($ms -lt 0) { throw 'The dock did not tuck behind the full-screen window.' }
+        return @{ Helper = $helper; Ms = $ms }
+    }
+    catch {
+        Stop-TestWindows $helper
+        throw
+    }
+}
+
+# Through UI Automation, like a screen reader: one of the island's buttons by name.
+function Invoke-DockButton {
+    param($Dock, [string] $Name)
+    $byName = New-Object Windows.Automation.PropertyCondition([Windows.Automation.AutomationElement]::NameProperty, $Name)
+    $island = [Windows.Automation.AutomationElement]::FromHandle((Get-Island $Dock))
+    $script:button = $null
+    Wait-Until { $script:button = $island.FindFirst([Windows.Automation.TreeScope]::Descendants, $byName); $null -ne $script:button } 5000 | Out-Null
+    if ($null -eq $script:button) { throw "The island has no '$Name' button." }
+    $script:button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+
+# The dock's Start button opens Harbor Shell's island (once the Shell said it is ready). Returns the ms until
+# the island was in front.
+function Open-ShellIsland {
+    param($Dock)
+    if ((Wait-Until { (Get-DockLogCount 'island: ready') -gt $script:readyBefore } 10000) -lt 0) { throw 'Harbor Shell never said its island is ready.' }
+    $shell = Get-Process Harbor.Shell
+    $island = [HarborSafety.Native]::WindowOf([uint32]$shell.Id, 'Harbor.Island')
+    if ($island -eq [IntPtr]::Zero) { throw 'Harbor Shell shows no island.' }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    Invoke-DockButton $Dock 'Start'
+    if ((Wait-Until { [HarborSafety.Native]::Foreground() -eq $island } 3000) -lt 0) { throw 'The island did not come in front.' }
+    return [int]$watch.ElapsedMilliseconds
+}
+
 $userAutoHide = [HarborSafety.Native]::AutoHide()
 if (-not [HarborSafety.Native]::PrimaryVisible()) {
     throw 'The taskbar is not visible right now; refusing to start from an unknown state.'
@@ -438,6 +501,9 @@ try {
     foreach ($name in $Scenario) {
         Write-Host "--- $name" -ForegroundColor Cyan
         try {
+            # This run's lines only: the dock's log keeps the earlier scenarios'.
+            $script:readyBefore = Get-DockLogCount 'island: ready'
+            $script:restoresBefore = Get-DockLogCount 'restoring because'
             Start-Harbor
             Enable-Hide
             $dock = Get-Process harbor-dock
@@ -616,6 +682,105 @@ try {
                     $restores = (Get-DockLogCount 'restoring because') - $restoresBefore
                     $hidden = [HarborSafety.Native]::PrimaryHidden()
                     Add-Result $name ($there -ge 0 -and $back -ge 0 -and $restores -eq 0 -and $hidden) "there in $there ms, back in $back ms ($moves moves); taskbar restores meanwhile: $restores; still hidden: $hidden"
+                }
+                'tuck-panic' {
+                    $full = Start-FullScreen
+                    try {
+                        Start-Sleep -Seconds 1
+                        # Rule 7 (docs/adr/0014): tucked with its trigger armed still counts as on screen.
+                        $hidden = [HarborSafety.Native]::PrimaryHidden()
+                        [HarborSafety.Native]::PressKeys(0x11, 0x12, 0x10, 0x48) # Ctrl, Alt, Shift, H
+                        $ms = Wait-Until { Test-Restored } 5000
+                        $record = Get-RecordNote
+                        Add-Result $name ($hidden -and $ms -ge 0 -and $record.Gone) "tucked $($full.Ms) ms after the full-screen window came; taskbar still hidden while tucked: $hidden; restored in $ms ms$($record.Text)"
+                    }
+                    finally { Stop-TestWindows $full.Helper }
+                }
+                'tuck-kill' {
+                    $full = Start-FullScreen
+                    try {
+                        Stop-Process -Id $dock.Id -Force
+                        $ms = Wait-Until { Test-Restored } 8000
+                        $record = Get-RecordNote
+                        Add-Result $name ($ms -ge 0 -and $record.Gone) "tucked in $($full.Ms) ms; restored $ms ms after the kill$($record.Text)"
+                    }
+                    finally { Stop-TestWindows $full.Helper }
+                }
+                'tuck-close-shell' {
+                    $full = Start-FullScreen
+                    try {
+                        $window = Get-ShellWindow
+                        $window.GetCurrentPattern([Windows.Automation.WindowPattern]::Pattern).Close()
+                        $ms = Wait-Until { Test-Restored } 5000
+                        $record = Get-RecordNote
+                        Add-Result $name ($ms -ge 0 -and $record.Gone) "tucked in $($full.Ms) ms; restored by the dock $ms ms after Harbor Shell closed$($record.Text)"
+                    }
+                    finally { Stop-TestWindows $full.Helper }
+                }
+                'tuck-stuck' {
+                    # Full screen ends without Explorer necessarily saying so (its "closed" is unreliable): the
+                    # dock's own look at the window in front brings the island back.
+                    $full = Start-FullScreen
+                    try {
+                        $before = Get-DockLogCount 'island: on top again'
+                        Send-TestWindows $full.Helper 'windowed 1'
+                        $ms = Wait-Until { (Get-DockLogCount 'island: on top again') -gt $before } 5000
+                        $restores = (Get-DockLogCount 'restoring because') - $script:restoresBefore
+                        $hidden = [HarborSafety.Native]::PrimaryHidden()
+                        Add-Result $name ($ms -ge 0 -and $hidden) "tucked in $($full.Ms) ms; on top again $ms ms after the window left full screen; taskbar still hidden: $hidden (restores logged: $restores)"
+                    }
+                    finally { Stop-TestWindows $full.Helper }
+                }
+                'tuck-edge' {
+                    # Moves the mouse: resting on the bottom edge brings the tucked island back; leaving tucks it.
+                    $full = Start-FullScreen
+                    try {
+                        $primary = Get-MonitorOf ([HarborSafety.Native]::RectOf((Get-Island $dock)))
+                        $before = Get-DockLogCount 'island: on top again'
+                        $tucksBefore = Get-DockLogCount 'island: tucked behind a full-screen app'
+                        Invoke-EdgeTrigger $primary
+                        $up = Wait-Until { (Get-DockLogCount 'island: on top again') -gt $before } 3000
+                        [void][HarborSafety.Native]::SetCursorPos([int](($primary[0] + $primary[2]) / 2), [int](($primary[1] + $primary[3]) / 2))
+                        $down = Wait-Until { (Get-DockLogCount 'island: tucked behind a full-screen app') -gt $tucksBefore } 5000
+                        $hidden = [HarborSafety.Native]::PrimaryHidden()
+                        Add-Result $name ($up -ge 0 -and $down -ge 0 -and $hidden) "tucked in $($full.Ms) ms; the edge brought it back in $up ms; tucked again $down ms after the mouse left; taskbar still hidden: $hidden"
+                    }
+                    finally { Stop-TestWindows $full.Helper }
+                }
+                'island-kill' {
+                    # The top island never takes part in rule 1: Harbor Shell killed with it open, and the dock
+                    # restores the taskbar like any Shell loss.
+                    $inFront = Open-ShellIsland $dock
+                    $letGoBefore = Get-DockLogCount 'island: not ready|island: closed'
+                    Get-Process Harbor.Shell | Stop-Process -Force
+                    $ms = Wait-Until { Test-Restored } 5000
+                    $notReady = (Wait-Until { (Get-DockLogCount 'island: not ready|island: closed') -gt $letGoBefore } 3000) -ge 0
+                    $record = Get-RecordNote
+                    Add-Result $name ($ms -ge 0 -and $record.Gone) "island in front $inFront ms after Start; restored by the dock $ms ms after the kill; the dock let the island go: $notReady$($record.Text)"
+                }
+                'island-budget' {
+                    # Harbor Shell with the island collapsed, open (Apps, Stats, Media, Controls read) and 35 s after
+                    # it closed (docs/adr/0013 budgets; the app list stays warm).
+                    $shell = Get-Process Harbor.Shell
+                    Start-Sleep -Seconds 10
+                    $shell.Refresh(); $cpuBefore = $shell.TotalProcessorTime
+                    Start-Sleep -Seconds 30
+                    $shell.Refresh()
+                    $cpu = ($shell.TotalProcessorTime - $cpuBefore).TotalMilliseconds / (30 * 1000 * [Environment]::ProcessorCount) * 100
+                    $collapsed = $shell.PrivateMemorySize64 / 1MB
+                    $cold = Open-ShellIsland $dock
+                    Start-Sleep -Seconds 5
+                    $shell.Refresh(); $open = $shell.PrivateMemorySize64 / 1MB
+                    $closedBefore = Get-DockLogCount 'island: closed'
+                    [HarborSafety.Native]::PressKeys(0x1B) # Esc
+                    if ((Wait-Until { (Get-DockLogCount 'island: closed') -gt $closedBefore } 3000) -lt 0) { throw 'The island did not close on Esc.' }
+                    Start-Sleep -Seconds 2
+                    $warm = Open-ShellIsland $dock
+                    [HarborSafety.Native]::PressKeys(0x1B) # Esc
+                    Start-Sleep -Seconds 35
+                    $shell.Refresh(); $after = $shell.PrivateMemorySize64 / 1MB
+                    $passed = $cpu -lt 0.5 -and ($open - $collapsed) -lt 60 -and ($after - $collapsed) -lt 20 -and $cold -lt 400 -and $warm -lt 150
+                    Add-Result $name $passed ("collapsed: {0:N3} % CPU over 30 s, {1:N1} MB private; open: {2:N1} MB (+{3:N1}); 35 s after closing: {4:N1} MB (+{5:N1}); Start -> island in front: {6} ms first, {7} ms again" -f $cpu, $collapsed, $open, ($open - $collapsed), $after, ($after - $collapsed), $cold, $warm)
                 }
                 'budget' {
                     Start-Sleep -Seconds 5

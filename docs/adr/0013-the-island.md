@@ -111,5 +111,7 @@ The M4 spike (2026-10-16, ARM64, 200 % and 100 % monitors) tried three designs:
 - Collapsed, the Shell first measured 0.29 % of all CPUs: background JIT in its first minute, and its main window
   redrawing a status line on every 1 Hz ping since M0. The line now changes only when the link does; an idle test
   Shell's threads went from about 43 to 10 million cycles a second (roughly 0.3 % of one core, mostly the ping).
+  Measured again on the real desktop (2026-10-18, two monitors): 0.020 % of all CPUs collapsed; open +18.8 MB,
+  +10.6 MB after closing; Start → the island in front in 384 ms the first time, 5 ms after.
 - Energy saver: the dock's log showed it turning solid (step 3); the island uses the same gating, not yet checked
   by eye (docs/testing/m4-checklist.md 2.6).

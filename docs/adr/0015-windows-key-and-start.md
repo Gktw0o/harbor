@@ -1,6 +1,6 @@
 # 15. The Windows key and the Start button open the island
 
-- Status: Accepted
+- Status: Accepted; in M4 only the Start button was built (see the note at the end)
 - Date: 2026-10-16
 - Amends: ADR 0012 (injected input)
 
@@ -97,3 +97,10 @@ Start closed.
   until Windows drops the hook or the watchdog ends the dock (about 7 s): accepted and documented.
 - With an elevated app in front, the Windows key opens Windows' Start as usual.
 - A keyboard without the Windows key can still use the dock's Start button.
+
+## Note (end of M4, 2026-10-18)
+
+M4 shipped the **Start button** part of this decision: it opens the island, and Windows' Start when the island
+can't (Harbor Shell not ready, or no answer within 500 ms). The **Windows key** part was not built in M4, by the
+user's decision: the Windows key keeps opening Windows' own Start, and the dock installs no keyboard hook. It
+stays an open decision for a later milestone.

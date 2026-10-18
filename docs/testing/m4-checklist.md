@@ -7,8 +7,8 @@ the made-up controls. `scripts\safety-check.ps1` adds the real taskbar and a rea
 This checklist covers what needs the real system: real apps and games, volume, brightness, radios, the theme,
 the Settings app, power, a second monitor and a screen reader.
 
-The Windows key does not open the island yet (that part of M4 waits for a decision); the dock's Start button
-does.
+The dock's Start button opens the island; the Windows key keeps opening Windows' own Start (not part of M4, see
+ADR 0015's note).
 
 **Before you start**
 - Build Release: `scripts\build.ps1 -Arch <x64|arm64> -Config Release`, then start `Harbor.Shell.exe` from the
@@ -98,4 +98,5 @@ closed again, and how fast Start brings it in front). Paste the result tables be
 | Date | PC (arch, Windows build) | Section | Result | Notes |
 |---|---|---|---|---|
 | 2026-10-17 | dev PC, ARM64, Windows 11 10.0.28000, one monitor, Release | 1 (23 scenarios) | 22 PASS, 1 SKIP | island-move SKIP (one monitor). panic, peek-kill and menu-panic first failed in the script itself (UI Automation missed the hide toggle once right after the Shell opened; hiding never came on); fixed (Enable-Hide waits for it) and rerun: panic restored in 81 ms, peek-kill 292 ms, menu-panic 236 ms. tuck-*: tucked 2.8-3.5 s after a full-screen window came, the taskbar stayed hidden while tucked; panic restored in 74 ms, dock killed 231 ms, Shell closed 238 ms; full screen ending unannounced: on top again in 240 ms; the bottom edge brought it back in 517 ms, tucked again 1.7 s after the mouse left. island-kill: island in front 330 ms after Start, restored 285 ms after the Shell was killed. The overlay keeps no strip (work area 0 px short). Idle dock: 0.009 % CPU, 31.3 MB working set, 8.6 MB private. |
-| 2026-10-17 | same | 1 (island-budget) | PASS, then fixed | Open: +13.6 MB private, +11.3 MB 35 s after closing; Start -> island in front 282 ms cold, 11 ms warm. Collapsed: 0.289 % of all CPUs (about 3.5 % of one core) — not "about 0": background JIT in the first minute (the scenario measured from 10 s) and the main window redrawing "pong N" every second since M0. Now the text changes only when the link comes or goes and the scenario waits 60 s: an idle test Shell's threads went from ~43 to ~10 M cycles a second. Rerun pending. |
+| 2026-10-17 | same | 1 (island-budget) | PASS, then fixed | Open: +13.6 MB private, +11.3 MB 35 s after closing; Start -> island in front 282 ms cold, 11 ms warm. Collapsed: 0.289 % of all CPUs (about 3.5 % of one core) — not "about 0": background JIT in the first minute (the scenario measured from 10 s) and the main window redrawing "pong N" every second since M0. Now the text changes only when the link comes or goes and the scenario waits 60 s: an idle test Shell's threads went from ~43 to ~10 M cycles a second. |
+| 2026-10-18 | same, docked: two monitors (1440x900 at 192 dpi + 1920x1080) | 1 (island-move, island-budget) | 2 PASS | island-move: there in 60 ms, back in 78 ms, the taskbar stayed hidden. island-budget after the fix: collapsed 0.020 % of all CPUs over 30 s; open +18.8 MB private, +10.6 MB 35 s after closing; Start -> island in front 384 ms first, 5 ms again. |

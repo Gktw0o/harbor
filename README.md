@@ -2,11 +2,11 @@
 
 A macOS-style dock and a top-of-screen island for Windows 11, native on **x64 and ARM64**.
 
-> **Status: M4 (overlay dock and the island), in progress.** The dock floats at the bottom of the screen with
+> **Status: M4 (overlay dock and the island).** The dock floats at the bottom of the screen with
 > your pinned and running apps, a Start button and the tray; it keeps no strip of the screen and goes behind
 > full-screen apps. The island at the top of the screen opens into app search, stats, power, media and quick
 > controls. Harbor can hide the Windows taskbar and gives it back on exit, crash, hang, sign-out, or
-> **Ctrl+Alt+Shift+H**. The Windows key doesn't open the island yet.
+> **Ctrl+Alt+Shift+H**. The Windows key still opens Windows' own Start; the dock's Start button opens the island.
 
 ## If your taskbar is ever missing
 

@@ -66,6 +66,72 @@ public sealed class HeartbeatTests
         Assert.IsFalse(heartbeat.IsHung);
     }
 
+    // A dock that just connected may still be setting up on its UI thread, which answers the pings.
+    [TestMethod]
+    public void ADockStillStartingGetsItsStartupAllowance()
+    {
+        var heartbeat = new Heartbeat(missedLimit: 2, firstAnswerLimit: 5);
+        for (var seq = 1u; seq <= 5; seq++)
+        {
+            heartbeat.Sent(seq);
+        }
+        Assert.AreEqual(4, heartbeat.Missed);
+        Assert.IsFalse(heartbeat.IsHung);
+        heartbeat.Sent(6);
+        Assert.IsTrue(heartbeat.IsHung);
+    }
+
+    [TestMethod]
+    public void AfterItsFirstAnswerTheUsualLimitCounts()
+    {
+        var heartbeat = new Heartbeat(missedLimit: 2, firstAnswerLimit: 5);
+        heartbeat.Sent(1);
+        heartbeat.Answered(1);
+        heartbeat.Sent(2);
+        heartbeat.Sent(3);
+        Assert.IsFalse(heartbeat.IsHung);
+        heartbeat.Sent(4);
+        Assert.IsTrue(heartbeat.IsHung);
+    }
+
+    [TestMethod]
+    public void ANewConnectionGetsTheAllowanceAgain()
+    {
+        var heartbeat = new Heartbeat(missedLimit: 2, firstAnswerLimit: 5);
+        heartbeat.Sent(1);
+        heartbeat.Answered(1);
+        heartbeat.Reset();
+        for (var seq = 2u; seq <= 5; seq++)
+        {
+            heartbeat.Sent(seq);
+        }
+        Assert.AreEqual(3, heartbeat.Missed);
+        Assert.IsFalse(heartbeat.IsHung);
+    }
+
+    [TestMethod]
+    public void TheAllowanceIsNeverShorterThanTheUsualLimit()
+    {
+        var heartbeat = new Heartbeat(missedLimit: 3, firstAnswerLimit: 1);
+        heartbeat.Sent(1);
+        heartbeat.Sent(2);
+        heartbeat.Sent(3);
+        Assert.IsFalse(heartbeat.IsHung);
+        heartbeat.Sent(4);
+        Assert.IsTrue(heartbeat.IsHung);
+    }
+
+    // The real watchdog (1 s pings) is unchanged: 5 pings before the first answer as after it. Test supervisors
+    // (100 ms pings) give a starting dock the same 5 s.
+    [TestMethod]
+    public void TheWatchdogsStartupAllowanceIsFiveSeconds()
+    {
+        var real = new DockSupervisorOptions();
+        Assert.AreEqual(real.MissedPongLimit, real.FirstAnswerLimit);
+        Assert.AreEqual(5, real.FirstAnswerLimit);
+        Assert.AreEqual(50, new DockSupervisorOptions { PingInterval = TimeSpan.FromMilliseconds(100) }.FirstAnswerLimit);
+    }
+
     [TestMethod]
     public void ResetForgetsTheOutstandingPing()
     {

@@ -182,7 +182,14 @@ public sealed class DockE2ETests
                 await TestDock.ReadLogAsync(dataDir.Path));
             var island = IslandWindow.Find(dock.Id);
             var (monitor, _) = IslandWindow.PrimaryMonitor();
-            nint Trigger() => DockWindows.FindAppBars((uint)dock.Id).FirstOrDefault(IslandWindow.IsWindowVisible);
+            // The trigger on the dock's own monitor: another monitor's is always there (it moves the dock over). By its
+            // top-left corner: in this process's DPI-scaled coordinates the 2 px row can round past the bottom edge.
+            nint Trigger() => DockWindows.FindAppBars((uint)dock.Id).FirstOrDefault(window =>
+            {
+                var bounds = IslandWindow.Bounds(window);
+                return IslandWindow.IsWindowVisible(window) && bounds.Left >= monitor.Left && bounds.Left < monitor.Right &&
+                    bounds.Top >= monitor.Top && bounds.Top < monitor.Bottom;
+            });
             Assert.AreEqual((nint)0, Trigger(), "a trigger on the dock's own monitor without a full-screen app");
 
             var watch = System.Diagnostics.Stopwatch.StartNew();
@@ -195,7 +202,9 @@ public sealed class DockE2ETests
             Assert.AreEqual(0L, IslandWindow.ExStyle(island) & IslandWindow.ExTopmost, "tucked, yet still topmost");
             Assert.IsTrue(IslandWindow.IsWindowVisible(island), "the island hid instead of stepping behind");
             var trigger = Trigger();
-            Assert.AreNotEqual((nint)0, trigger, "no trigger to bring the tucked island back");
+            Assert.AreNotEqual((nint)0, trigger, $"no trigger to bring the tucked island back on {monitor}; the dock's: " +
+                string.Join(", ", DockWindows.FindAppBars((uint)dock.Id).Select(w => $"{IslandWindow.Bounds(w)} visible {IslandWindow.IsWindowVisible(w)}")) +
+                $"; island {IslandWindow.Bounds(island)}\n" + await TestDock.ReadLogAsync(dataDir.Path));
             // In this process's DPI-scaled coordinates: a pixel off either way after rounding.
             var row = IslandWindow.Bounds(trigger);
             Assert.IsLessThanOrEqualTo(1, Math.Abs(monitor.Bottom - row.Bottom), $"trigger {row} not at the bottom of {monitor}");

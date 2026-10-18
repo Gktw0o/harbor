@@ -29,7 +29,7 @@ struct Metrics
     int icon = 0;
     int padding = 0;
     int gap = 0;
-    // Between the island and the screen's bottom edge, and above the island inside the reserved strip.
+    // Between the island and the bottom of its strip, and above the island inside the strip.
     int margin = 0;
     int cornerRadius = 0;
     // The space a divider takes between two items (instead of a gap); 0: no divider.
@@ -37,8 +37,8 @@ struct Metrics
     // Items that fit; the rest aren't shown.
     std::size_t visibleCount = 0;
 
-    // The strip the dock reserves at the bottom of the monitor (its AppBar): the island plus a margin
-    // above and below it.
+    // The strip at the bottom of the work area that the island sits in: the island plus a margin above and
+    // below it. Nothing reserves it: the dock is an overlay (docs/adr/0014).
     int StripHeight() const noexcept
     {
         return 2 * margin + 2 * padding + icon;
@@ -60,9 +60,9 @@ struct Layout
     std::optional<geometry::Rect> divider;
 };
 
-// Places the island and its items in the strip the AppBar got, with a divider after the first dividerAfter
-// items if metrics has room for one and items are visible on both sides. With no items, the island is one
-// empty slot wide, so the dock never disappears.
+// Places the island and its items in its strip, with a divider after the first dividerAfter items if metrics
+// has room for one and items are visible on both sides. With no items, the island is one empty slot wide, so
+// the dock never disappears.
 Layout Arrange(const geometry::Rect& strip, const Metrics& metrics, std::size_t dividerAfter = 0);
 
 // The item under a point. Every point of the island belongs to the nearest item, gaps, padding and the

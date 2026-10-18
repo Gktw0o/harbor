@@ -206,6 +206,28 @@ struct CompositionRenderer::Impl
         });
     }
 
+    // The Start button: four rounded panes, like Windows' own Start glyph, in the theme's color.
+    wuc::CompositionSurfaceBrush StartBrush(int size, island::Color color)
+    {
+        return DrawSurface(size, [&](ID2D1DeviceContext& context, const D2D1_RECT_F& area) {
+            winrt::com_ptr<ID2D1SolidColorBrush> brush;
+            winrt::check_hresult(context.CreateSolidColorBrush(ToD2D(color), brush.put()));
+            const float extent = area.right - area.left;
+            const float pane = extent * 0.17f;
+            const float gap = extent * 0.03f;
+            const float radius = extent * 0.02f;
+            const float left = area.left + (extent - 2 * pane - gap) / 2;
+            const float top = area.top + (extent - 2 * pane - gap) / 2;
+            for (const float x : {left, left + pane + gap})
+            {
+                for (const float y : {top, top + pane + gap})
+                {
+                    context.FillRoundedRectangle({{x, y, x + pane, y + pane}, radius, radius}, brush.get());
+                }
+            }
+        });
+    }
+
     // The tray button: an upward chevron, as on the taskbar's "show hidden icons" button.
     wuc::CompositionSurfaceBrush TrayBrush(int size, island::Color color)
     {
@@ -408,8 +430,8 @@ catch (...)
 
 bool CompositionRenderer::Render(const island::Layout& layout, const island::IslandStyle& style,
                                  const IconSource& icons, std::span<const island::ItemMarks> marks,
-                                 std::optional<std::size_t> hovered, std::optional<std::size_t> overflow,
-                                 std::optional<std::size_t> tray, UINT committedMessage, WPARAM tag) noexcept
+                                 std::optional<std::size_t> hovered, const island::SlotMap& places,
+                                 UINT committedMessage, WPARAM tag) noexcept
 try
 {
     auto& impl = *m_impl;
@@ -483,11 +505,16 @@ try
         auto visual = impl.compositor.CreateSpriteVisual();
         visual.Size(Size(local));
         visual.Offset({static_cast<float>(local.left), static_cast<float>(local.top), 0});
-        if (overflow == i)
+        const auto kind = i < places.entries.size() ? places.entries[i].kind : island::SlotMap::Kind::Slot;
+        if (kind == island::SlotMap::Kind::Start)
+        {
+            visual.Brush(impl.StartBrush(metrics.icon, style.dot));
+        }
+        else if (kind == island::SlotMap::Kind::Overflow)
         {
             visual.Brush(impl.OverflowBrush(metrics.icon, style.dot));
         }
-        else if (tray == i)
+        else if (kind == island::SlotMap::Kind::Tray)
         {
             visual.Brush(impl.TrayBrush(metrics.icon, style.dot));
         }

@@ -363,6 +363,120 @@ public sealed partial class DockSupervisorTests
         harness.AssertFullyRestored();
     }
 
+    // The restore paths while the island is tucked behind a full-screen app (docs/adr/0014): it counts as on
+    // screen only while its monitor's edge trigger can bring it back, and every restore still works.
+    [TestMethod]
+    public async Task WhileTuckedThePanicHotkeyRestoresTheTaskbar()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenTuckAsync(harness);
+
+        TestDock.PressPanicHotkey(harness.PipeName);
+
+        await harness.WaitForStateAsync(s => s.Blocked == TaskbarBlock.PanicHotkey);
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    public async Task WhileTuckedLosingHarborShellRestoresTheTaskbar()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenTuckAsync(harness);
+
+        await harness.StopSupervisorAsync();
+
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    public async Task WhileTuckedAKilledDockGetsTheTaskbarFullyRestored()
+    {
+        await using var harness = new Harness(launch: true);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenTuckAsync(harness);
+
+        TestDock.KillQuietly((int)running.ProcessId!);
+
+        await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        harness.AssertFullyRestored();
+    }
+
+    [TestMethod]
+    public async Task WhileTuckedAHungDockGetsTheTaskbarBack()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenTuckAsync(harness);
+
+        TestDock.HangUi(harness.Taskbar);
+
+        await harness.WaitForHideRequestAsync(false);
+        var stopped = await harness.WaitForDockAsync(s => s.State == DockState.Stopped);
+        Assert.AreEqual(DockExitCodes.KilledByWatchdog, stopped.ExitCode);
+        harness.AssertFullyRestored();
+    }
+
+    // Without its trigger, nothing would bring a tucked island back: the taskbar comes back until the island is on
+    // top again, then goes again by itself (hiding is still on).
+    [TestMethod]
+    public async Task WhileTuckedABrokenTriggerBringsTheTaskbarBack()
+    {
+        await using var harness = new Harness(launch: true);
+        await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        await HideThenTuckAsync(harness);
+
+        TestDock.BreakTrigger(harness.Taskbar);
+
+        await harness.WaitForStateAsync(s => !s.Hidden);
+        Assert.IsTrue(FakeTaskbar.WaitUntilVisible(harness.Taskbar.Primary, visible: true, Timeout));
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "island: not shown", Timeout),
+            await TestDock.ReadLogAsync(harness.DataDir));
+
+        TestDock.SetFullScreen(harness.Taskbar, fullScreen: false);
+        await harness.WaitForStateAsync(s => s.Hidden);
+        harness.AssertHidden();
+        StringAssert.Contains(await TestDock.ReadLogAsync(harness.DataDir), "island: on top again");
+    }
+
+    // Explorer's "closed" is unreliable (docs/adr/0014): another window coming to the front ends the full screen,
+    // and the island comes back on top by itself. Moves the focus, so CI only.
+    [TestMethod]
+    public async Task WhileTuckedAFullScreenAppThatEndsUnannouncedBringsTheIslandBack()
+    {
+        TestDock.RequireForegroundTests();
+        await using var harness = new Harness(launch: true);
+        var running = await harness.WaitForDockAsync(s => s.State == DockState.Running);
+        using var windows = new TestWindows(harness.Taskbar.Id);
+        await HideThenTuckAsync(harness);
+        var island = IslandWindow.Find((int)running.ProcessId!);
+        Assert.AreEqual(0L, IslandWindow.ExStyle(island) & IslandWindow.ExTopmost, "tucked, yet still topmost");
+
+        await windows.SendAsync("new 1");
+        Assert.AreEqual("ok 1", await windows.SendAsync("activate 1"), "the test window didn't come to the front");
+
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "island: on top again", Timeout),
+            await TestDock.ReadLogAsync(harness.DataDir));
+        StringAssert.Contains(await TestDock.ReadLogAsync(harness.DataDir), "the full-screen app ended (Explorer didn't say)");
+        Assert.AreEqual(IslandWindow.ExTopmost, IslandWindow.ExStyle(island) & IslandWindow.ExTopmost);
+        harness.AssertHidden();
+    }
+
+    // Hiding on, then a full-screen app on the dock's monitor: the island tucks behind it after a moment and the
+    // taskbar stays hidden (its trigger is armed). Returns once it is tucked.
+    private static async Task HideThenTuckAsync(Harness harness)
+    {
+        await harness.WaitForPongAsync();
+        harness.Supervisor.SetTaskbarHidden(true);
+        await harness.WaitForStateAsync(s => s.Hidden);
+
+        TestDock.SetFullScreen(harness.Taskbar, fullScreen: true);
+        Assert.IsTrue(await TestDock.WaitForLogAsync(harness.DataDir, "island: tucked behind a full-screen app", Timeout),
+            await TestDock.ReadLogAsync(harness.DataDir));
+        harness.AssertHidden();
+    }
+
     // Hiding on, then the user's tray button: the dock shows the taskbar for Explorer to slide in. Returns once it
     // leaves it shown for the peek.
     private static async Task HideThenPeekAsync(Harness harness, DockStatus running)

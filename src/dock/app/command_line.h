@@ -28,6 +28,10 @@ struct DockOptions
     // --test-orphan-timeout-ms <100-600000>: how long a test dock waits without a control connection before
     // it exits (default 30 s; a normal dock waits forever). Only together with the three above.
     std::optional<std::uint32_t> testOrphanTimeoutMs;
+    // --test-foreground: this test dock may do what changes the foreground on the desktop (open Windows'
+    // Start); tests pass it only where they may take the focus (CI, or HARBOR_FOREGROUND_TESTS=1). No value.
+    // Only together with the three above.
+    bool testForeground = false;
 };
 
 // Parses the arguments that follow the program name. Anything unknown, repeated, missing its value or

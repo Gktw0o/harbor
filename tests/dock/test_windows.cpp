@@ -12,6 +12,10 @@
 //     activate <n>       SetForegroundWindow; answers "ok 1" if it took
 //     minimized <n>      answers "ok 1" if it is minimized, "ok 0" if not
 //     foreground         answers "ok <n>" for the window in front, "ok 0" if it isn't one of these
+//     fullscreen <n>     window n covers the primary monitor (borderless, black, like a game) and comes in
+//                        front; answers "ok 1" if it took the foreground (safety-check.ps1's tuck scenarios)
+//     windowed <n>       back off screen with its frame, still in front: full screen ends without Explorer
+//                        necessarily noticing
 //     hang <ms>          the windows' thread sleeps (a hung app)
 //     quit
 
@@ -93,6 +97,7 @@ class Windows
         windowClass.lpfnWndProc = DefWindowProcW;
         windowClass.hInstance = GetModuleHandleW(nullptr);
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hbrBackground = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
         windowClass.lpszClassName = m_className.c_str();
         RegisterClassExW(&windowClass);
     }
@@ -188,6 +193,27 @@ class Windows
         if (command == "activate")
         {
             return SetForegroundWindow(window) ? "ok 1" : "ok 0";
+        }
+        if (command == "fullscreen")
+        {
+            MONITORINFO monitor{};
+            monitor.cbSize = sizeof(monitor);
+            if (!GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor))
+            {
+                return "error monitor";
+            }
+            const RECT& bounds = monitor.rcMonitor;
+            SetWindowLongPtrW(window, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+            SetWindowPos(window, HWND_TOP, bounds.left, bounds.top, bounds.right - bounds.left,
+                         bounds.bottom - bounds.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            return SetForegroundWindow(window) ? "ok 1" : "ok 0";
+        }
+        if (command == "windowed")
+        {
+            SetWindowLongPtrW(window, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+            SetWindowPos(window, nullptr, -20000, -20000, 200, 120,
+                         SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+            return "ok";
         }
         if (command == "minimized")
         {

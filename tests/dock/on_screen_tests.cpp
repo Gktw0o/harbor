@@ -73,5 +73,31 @@ TEST(OnScreen, AnEmptyWindowIsNot)
     EXPECT_FALSE(IsOnScreen(Shown({960, 1040, 960, 1040}), kMonitors));
 }
 
+// Tucked behind a full-screen app (docs/adr/0014): only while the mouse at the bottom can bring it back.
+TEST(OnScreen, TuckedCountsOnlyWithItsTriggerArmed)
+{
+    auto facts = Shown({847, 1008, 1073, 1072});
+    facts.tucked = true;
+    facts.triggerArmed = true;
+    EXPECT_TRUE(IsOnScreen(facts, kMonitors));
+    facts.triggerArmed = false;
+    EXPECT_FALSE(IsOnScreen(facts, kMonitors));
+    // Not tucked, the trigger doesn't matter.
+    facts.tucked = false;
+    EXPECT_TRUE(IsOnScreen(facts, kMonitors));
+}
+
+TEST(OnScreen, AnArmedTriggerDoesntMakeUpForTheRest)
+{
+    auto facts = Shown({847, 1008, 1073, 1072});
+    facts.tucked = true;
+    facts.triggerArmed = true;
+    facts.cloaked = true;
+    EXPECT_FALSE(IsOnScreen(facts, kMonitors));
+    facts.cloaked = false;
+    facts.visible = false;
+    EXPECT_FALSE(IsOnScreen(facts, kMonitors));
+}
+
 } // namespace
 } // namespace harbor::island

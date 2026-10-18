@@ -24,8 +24,11 @@
 #include "app/window_watcher.h"
 #include "core/island/appearance.h"
 #include "core/island/dock_model.h"
+#include "core/island/full_screen.h"
 #include "core/island/layout.h"
 #include "core/island/monitors.h"
+#include "core/island/slot_map.h"
+#include "core/island/tuck.h"
 #include "ports/ipc_channel.h"
 #include "ports/logger.h"
 
@@ -34,9 +37,9 @@ namespace harbor::dock
 
 // The island: a small topmost popup at the bottom of the dock's monitor that never takes focus, drawn by
 // CompositionRenderer. It follows the monitor's DPI, the work area and the Windows appearance settings; it
-// is shown only once its first frame is committed. Until the AppBar arrives it sits at the bottom of the work
-// area. The taskbar itself is the TaskbarGuard's business. Per-monitor-v2 DPI awareness comes from the
-// application manifest.
+// is shown only once its first frame is committed. It sits at the bottom of the work area, over other windows
+// (an overlay), and steps behind a full-screen app a moment after it opens (docs/adr/0014). The taskbar
+// itself is the TaskbarGuard's business. Per-monitor-v2 DPI awareness comes from the application manifest.
 //
 // Owns the control channel's lifetime: starts it once the window exists and stops it when the window is
 // destroyed. Pings are answered from this window's (UI) thread, so a pong also proves the UI thread is
@@ -56,6 +59,9 @@ class DockWindow : private adapters::IIslandAccess
         bool testAppBar = false;
         // Test docks: follow only windows whose class starts with this (WindowTracker); empty: every window.
         std::string windowClassPrefix;
+        // The Start button may do what takes the foreground: open Windows' Start, press the island's hotkey.
+        // Test docks only with --test-foreground: a local test run must never take the user's focus.
+        bool takesForeground = true;
     };
 
     enum class CreateResult
@@ -103,6 +109,12 @@ class DockWindow : private adapters::IIslandAccess
     // would, so tests can check a cloaked island brings the taskbar back.
     static constexpr UINT kTestCloakMessage = WM_APP + 11;
 
+    // Test docks only (their AppBars hear nothing from Explorer): a full-screen app opened (wParam 1) or
+    // closed (0) on the dock's monitor, as ABN_FULLSCREENAPP would say; and the dock's own trigger breaks, so
+    // tests can check a tucked island without one brings the taskbar back (docs/adr/0014).
+    static constexpr UINT kTestFullScreenMessage = WM_APP + 23;
+    static constexpr UINT kTestBreakTriggerMessage = WM_APP + 24;
+
     // Test docks only: opens the right-click menu of item wParam, or closes an open menu, so tests can reach
     // it without moving the user's mouse.
     static constexpr UINT kTestOpenMenuMessage = WM_APP + 13;
@@ -143,11 +155,29 @@ class DockWindow : private adapters::IIslandAccess
     void StopHost(MonitorHost& host) noexcept;
     // Which host's monitor the island is on.
     std::size_t DockHost() const;
-    // A host's granted strip, or until there is one, the bottom height pixels of its work area.
+    // Where the island sits on a host's monitor: the bottom height pixels of its work area, reserved by
+    // nobody (docs/adr/0014).
     geometry::Rect StripOf(const MonitorHost& host, int height) const;
-    // Shows each other monitor's edge trigger (or hides it: the dock's own monitor, a full-screen app,
-    // panic).
+    // Shows each other monitor's edge trigger (or hides it: a full-screen app, panic), and the dock's own
+    // monitor's while a full-screen app is there (docs/adr/0014).
     void PlaceTriggers();
+    // The dock's own monitor's trigger can bring a tucked island back: shown, at that monitor's bottom edge,
+    // triggers on (rule 7, docs/adr/0014).
+    bool DockTriggerArmed() const;
+    // Explorer's ABN_FULLSCREENAPP for host index's monitor (or a test hook's).
+    void OnFullScreenNotice(std::size_t index, bool open);
+    // Whether the full-screen apps are still there: on foreground changes and every second while one is.
+    void LookAgainAtFullScreen();
+    // The window in front, if this dock may judge it (test docks: only their test windows).
+    std::optional<island::Foreground> JudgedForeground() const;
+    // After a host's full screen began or ended, or the island moved: the tuck follows its monitor's.
+    void OnFullScreenChanged();
+    // The mouse on the island, a menu of it, or resting on its trigger (true), or gone from them (false).
+    void ReportPointer(bool over);
+    // The cursor is on the island or on the dock's own trigger.
+    bool PointerOverDock() const;
+    // Puts the island where the tuck says (behind a full-screen app or on top), with its timer and trigger.
+    void ApplyTuck();
     void OnHostMouseMove(std::size_t index);
     void OnEdgeTimer();
     // The island goes to host index's monitor, in one move (docs/adr/0011).
@@ -159,10 +189,25 @@ class DockWindow : private adapters::IIslandAccess
     void OnLaunched(LaunchReport* report);
     void SetHovered(std::optional<std::size_t> hovered);
     std::optional<std::size_t> ItemAtClient(LPARAM position) const;
-    // A click or UI Automation's Invoke (docs/adr/0010): brings a window forward, minimizes one, or starts
-    // the item; the "…" button opens the overflow menu, the tray button peeks at the taskbar. how is for the
-    // log.
+    // A click or UI Automation's Invoke on place index (docs/adr/0010): brings a window forward, minimizes
+    // one, or starts the item; the "…" button opens the overflow menu, the tray button peeks at the taskbar,
+    // the Start button opens Windows' Start. how is for the log.
     bool ClickItem(std::size_t index, std::string_view how);
+    // The dock item (slot) at place index, if one is there.
+    std::optional<std::size_t> SlotAt(std::size_t index) const;
+    // Place index holds that kind of button.
+    bool IsKind(std::size_t index, island::SlotMap::Kind kind) const;
+    // The Start button (docs/adr/0015): the island through its hotkey when Harbor Shell has it ready, else
+    // (or if it doesn't open within kIslandAnswerMs) Windows' Start.
+    void OpenStart(std::string_view how);
+    void OpenWindowsStart(std::string_view how);
+    // Presses the island's private hotkey (F13-F24): Harbor Shell gets the foreground from it.
+    void PressIslandHotkey(std::uint32_t key, std::string_view how);
+    // Harbor Shell's islandState, and a launch it asks for.
+    void OnIslandState(const ipc::IslandState& state);
+    void OnIslandLaunch(const ipc::AppTarget& item);
+    // Tells Harbor Shell where the dock is (dockState), if that changed since it was last told.
+    void SendDockState();
     // The same for dock item index, on the island or behind the "…" button.
     bool ClickSlot(std::size_t index, std::string_view how);
     // The "…" button's menu of the items that didn't fit, with their icons.
@@ -229,16 +274,14 @@ class DockWindow : private adapters::IIslandAccess
     std::uint64_t m_nextItemKey = 1;
     HWND m_hwnd = nullptr;
     // One per connected monitor (docs/adr/0011): a never-activated window that holds the monitor's AppBar
-    // strip (each with its own worker thread) and is its edge trigger.
+    // (each with its own worker thread; notify-only, docs/adr/0014) and is its edge trigger.
     struct MonitorHost
     {
         island::MonitorInfo monitor;
         HWND window = nullptr;
         std::unique_ptr<AppBarWorker> appBar;
-        // The strip Explorer granted; until then, the bottom of the work area.
-        std::optional<geometry::Rect> strip;
-        // A full-screen app covers this monitor.
-        bool fullScreen = false;
+        // A full-screen app covers this monitor (IsOpen).
+        island::FullScreenApp fullScreen;
     };
     std::vector<MonitorHost> m_hosts;
     HINSTANCE m_instance = nullptr;
@@ -248,16 +291,30 @@ class DockWindow : private adapters::IIslandAccess
     bool m_triggersOn = true;
     // The host whose trigger the cursor reached, while the rest before moving runs.
     std::optional<std::size_t> m_triggerHost;
+    // Behind a full-screen app on the dock's monitor (docs/adr/0014), for the monitor with these bounds.
+    island::Tuck m_tuck;
+    bool m_tucked = false;
+    std::optional<geometry::Rect> m_tuckMonitor;
+    // Test docks: the dock's own trigger was broken by the test hook and stays hidden.
+    bool m_testTriggerBroken = false;
     std::optional<Launcher> m_launcher;
     // Follows the app windows on its own thread; its newest snapshot is m_windows.
     std::unique_ptr<WindowWatcher> m_watcher;
     WindowWatcher::Snapshot m_windows;
     std::unique_ptr<adapters::IslandAccessibility> m_accessibility;
     HPOWERNOTIFY m_powerNotification = nullptr;
+    HPOWERNOTIFY m_energySaverNotification = nullptr;
+    // GUID_ENERGY_SAVER_STATUS's last value was on.
+    bool m_energySaver = false;
     // This thread's windows being cloaked or uncloaked.
     wil::unique_hwineventhook m_cloakHook;
     UINT m_taskbarCreatedMessage = 0;
     bool m_connected = false;
+    // What Harbor Shell was last told on this connection (dockState), and what it said of the island; and
+    // when the Start button pressed the island's hotkey, while waiting for it to open.
+    std::optional<ipc::DockState> m_sentDockState;
+    ipc::IslandState m_island;
+    std::optional<std::chrono::milliseconds> m_islandAskedAt;
 
     // What is on screen.
     std::optional<island::Layout> m_layout;
@@ -269,13 +326,13 @@ class DockWindow : private adapters::IIslandAccess
     // A menu's loop is running (one at a time), and whether it is the overflow menu.
     bool m_menuOpen = false;
     bool m_overflowMenuOpen = false;
-    // The "…" button's place, when items don't fit (the items from there on are in its menu), and how many
-    // items there were when that was logged.
-    std::optional<std::size_t> m_overflow;
+    // What each place on the island holds: the Start button, the dock items, the "…" button when they don't
+    // fit (the items from there on are in its menu), the tray button. And how many items there were when an
+    // overflow was logged.
+    island::SlotMap m_places;
     std::size_t m_overflowCount = 0;
-    // The guard hides the taskbar (its last report): the island ends with the tray button, at this place.
+    // The guard hides the taskbar (its last report): the island ends with the tray button.
     bool m_taskbarHidden = false;
-    std::optional<std::size_t> m_tray;
     // The name label's window (null if composition can't draw it), and the item it shows, if shown.
     HWND m_label = nullptr;
     std::optional<std::size_t> m_labelItem;

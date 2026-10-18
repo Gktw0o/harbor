@@ -72,6 +72,46 @@ public enum PinAction
 /// </summary>
 public sealed record PinRequest(PinAction Action, AppTarget Item) : Message;
 
+/// <summary>A screen rectangle in physical pixels, virtual-screen space, right and bottom exclusive.</summary>
+public sealed record ScreenRect(int Left, int Top, int Right, int Bottom)
+{
+    public int Width => Right - Left;
+    public int Height => Bottom - Top;
+}
+
+/// <summary>
+/// Dock to Harbor.Shell: where the dock is and what is happening on its monitor, for the island at the top of the
+/// same monitor (contracts/dockState.schema.json, v1). Sent on every connect and whenever it changes. Named apart
+/// from Supervision.DockState, the dock process's state.
+/// </summary>
+/// <param name="Monitor">The dock's monitor.</param>
+/// <param name="Work">That monitor's work area.</param>
+/// <param name="Dpi">That monitor's DPI (96 = 100 %).</param>
+/// <param name="FullScreen">A full-screen app is in front on that monitor (docs/adr/0014).</param>
+/// <param name="Visible">The dock is shown: false after the panic hotkey, until hiding is turned on again.</param>
+public sealed record DockStateMessage(ScreenRect Monitor, ScreenRect Work, int Dpi, bool FullScreen, bool Visible) : Message
+{
+    public const int MaxCoordinate = 65536;
+    public const int MinDpi = 48;
+    public const int MaxDpi = 960;
+}
+
+/// <summary>Harbor.Shell to dock: the island's state (contracts/islandState.schema.json, v1). Sent on every connect and on change.</summary>
+/// <param name="Ready">The island exists and can open.</param>
+/// <param name="Open">It is expanded now.</param>
+/// <param name="Hotkey">The virtual-key code of its private hotkey (F13 to F24, no modifiers), which opens it; null if none.</param>
+public sealed record IslandState(bool Ready, bool Open, int? Hotkey) : Message
+{
+    public const int MinHotkey = 0x7C;
+    public const int MaxHotkey = 0x87;
+}
+
+/// <summary>
+/// Harbor.Shell to dock: start an app the user chose in the island (contracts/launch.schema.json, v1), through
+/// Explorer as the dock starts its own items.
+/// </summary>
+public sealed record Launch(AppTarget Item) : Message;
+
 /// <summary>One app on the dock.</summary>
 /// <param name="Name">Display name, for people and screen readers.</param>
 /// <param name="Icon">File name of the item's icon in the icons folder (contracts/README.md), or null.</param>

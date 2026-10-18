@@ -135,6 +135,18 @@ public sealed class ContractTests
     // The largest dockItems the schema allows (40 items, every character four bytes) must fit one line, and the
     // encoder must write it byte for byte: .NET's built-in encoders would escape each character in 12 bytes.
     [TestMethod]
+    public void EncodedIslandStateMatchesFixture() =>
+        Assert.IsTrue(JsonNode.DeepEquals(
+            JsonNode.Parse(MessageCodec.Encode(new IslandState(Ready: true, Open: false, Hotkey: 0x85))),
+            JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "island-state-ready.json")))));
+
+    [TestMethod]
+    public void EncodedLaunchMatchesFixture() =>
+        Assert.IsTrue(JsonNode.DeepEquals(
+            JsonNode.Parse(MessageCodec.Encode(new Launch(new AppTarget(DockItemKind.App, "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App")))),
+            JsonNode.Parse(ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "launch-app.json")))));
+
+    [TestMethod]
     public void LargestDockItemsFitsTheLineLimit()
     {
         var line = ReadLine(Path.Combine(ContractsDir, "fixtures", "valid", "dock-items-largest.json"));

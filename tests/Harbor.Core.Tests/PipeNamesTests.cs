@@ -16,4 +16,20 @@ public sealed class PipeNamesTests
     [TestMethod]
     public void MaxSessionId() =>
         Assert.AreEqual("harbor.control.4294967295", PipeNames.For(PipeNames.ControlChannel, uint.MaxValue));
+
+    [TestMethod]
+    public void GeneratedNamesAreValid()
+    {
+        Assert.IsTrue(PipeNames.IsValid(PipeNames.For(PipeNames.ControlChannel, uint.MaxValue)));
+        Assert.IsTrue(PipeNames.IsValid("harbor.e2e.0123456789abcdef0123456789abcdef"));
+    }
+
+    [TestMethod]
+    public void RejectsNamesOutsideHarborNamespace()
+    {
+        foreach (var name in new[] { "", "harbor.", "other.control.1", "harbor.Control.1", @"harbor.control\..\x", "harbor.control 1", "harbor." + new string('a', 201) })
+        {
+            Assert.IsFalse(PipeNames.IsValid(name), name);
+        }
+    }
 }

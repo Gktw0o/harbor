@@ -428,6 +428,141 @@ template <> struct MessageTraits<PinRequest>
     }
 };
 
+ordered_json RectJson(const geometry::Rect& rect)
+{
+    return {{"left", rect.left}, {"top", rect.top}, {"right", rect.right}, {"bottom", rect.bottom}};
+}
+
+// {"left", "top", "right", "bottom"}, each an integer within DockState::kMaxCoordinate; nullopt otherwise.
+std::optional<geometry::Rect> RectFrom(const json& value)
+{
+    if (CheckKeys(value, {"left", "top", "right", "bottom"}))
+    {
+        return std::nullopt;
+    }
+    int sides[4] = {};
+    int* side = sides;
+    for (const char* name : {"left", "top", "right", "bottom"})
+    {
+        const auto& field = value.at(name);
+        if (!field.is_number_integer())
+        {
+            return std::nullopt;
+        }
+        const auto number = field.get<std::int64_t>();
+        if (number < -DockState::kMaxCoordinate || number > DockState::kMaxCoordinate)
+        {
+            return std::nullopt;
+        }
+        *side++ = static_cast<int>(number);
+    }
+    return geometry::Rect{sides[0], sides[1], sides[2], sides[3]};
+}
+
+template <> struct MessageTraits<DockState>
+{
+    static constexpr std::string_view kType = "dockState";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const DockState& message)
+    {
+        return {
+            {"monitor", RectJson(message.monitor)}, {"work", RectJson(message.work)}, {"dpi", message.dpi},
+            {"fullScreen", message.fullScreen},     {"visible", message.visible},
+        };
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"monitor", "work", "dpi", "fullScreen", "visible"}))
+        {
+            return *error;
+        }
+        const auto monitor = RectFrom(payload.at("monitor"));
+        const auto work = RectFrom(payload.at("work"));
+        const auto& dpi = payload.at("dpi");
+        const auto& fullScreen = payload.at("fullScreen");
+        const auto& visible = payload.at("visible");
+        if (!monitor || !work || !dpi.is_number_integer() || !fullScreen.is_boolean() ||
+            !visible.is_boolean())
+        {
+            return DecodeError::InvalidField;
+        }
+        const auto dots = dpi.get<std::int64_t>();
+        if (dots < DockState::kMinDpi || dots > DockState::kMaxDpi)
+        {
+            return DecodeError::InvalidField;
+        }
+        return Message{DockState{
+            .monitor = *monitor,
+            .work = *work,
+            .dpi = static_cast<unsigned>(dots),
+            .fullScreen = fullScreen.get<bool>(),
+            .visible = visible.get<bool>(),
+        }};
+    }
+};
+
+template <> struct MessageTraits<IslandState>
+{
+    static constexpr std::string_view kType = "islandState";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const IslandState& message)
+    {
+        return {
+            {"ready", message.ready},
+            {"open", message.open},
+            {"hotkey", message.hotkey ? ordered_json(*message.hotkey) : ordered_json(nullptr)},
+        };
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"ready", "open", "hotkey"}))
+        {
+            return *error;
+        }
+        const auto& ready = payload.at("ready");
+        const auto& open = payload.at("open");
+        const auto& hotkey = payload.at("hotkey");
+        if (!ready.is_boolean() || !open.is_boolean() || !(hotkey.is_null() || hotkey.is_number_integer()))
+        {
+            return DecodeError::InvalidField;
+        }
+        std::optional<std::uint32_t> key;
+        if (!hotkey.is_null())
+        {
+            const auto code = hotkey.get<std::int64_t>();
+            if (code < IslandState::kMinHotkey || code > IslandState::kMaxHotkey)
+            {
+                return DecodeError::InvalidField;
+            }
+            key = static_cast<std::uint32_t>(code);
+        }
+        return Message{IslandState{.ready = ready.get<bool>(), .open = open.get<bool>(), .hotkey = key}};
+    }
+};
+
+template <> struct MessageTraits<Launch>
+{
+    static constexpr std::string_view kType = "launch";
+    static constexpr std::uint64_t kVersion = 1;
+    static ordered_json Payload(const Launch& message)
+    {
+        return TargetJson(message.item);
+    }
+    static DecodeResult FromPayload(const json& payload)
+    {
+        if (const auto error = CheckKeys(payload, {"kind", "target"}))
+        {
+            return *error;
+        }
+        const auto item = TargetFrom(payload);
+        if (!item)
+        {
+            return DecodeError::InvalidField;
+        }
+        return Message{Launch{*item}};
+    }
+};
+
 template <typename T>
 std::optional<DecodeResult> DecodeIf(std::string_view type, std::uint64_t version, const json& payload)
 {
@@ -468,7 +603,8 @@ DecodeResult DecodeDocument(const json& document)
     const auto versionNumber = version->get<std::uint64_t>();
     for (const auto decode :
          {&DecodeIf<Ping>, &DecodeIf<Pong>, &DecodeIf<SetTaskbar>, &DecodeIf<TaskbarState>,
-          &DecodeIf<DockItems>, &DecodeIf<AppLookup>, &DecodeIf<AppInfo>, &DecodeIf<PinRequest>})
+          &DecodeIf<DockItems>, &DecodeIf<AppLookup>, &DecodeIf<AppInfo>, &DecodeIf<PinRequest>,
+          &DecodeIf<DockState>, &DecodeIf<IslandState>, &DecodeIf<Launch>})
     {
         if (auto result = decode(typeName, versionNumber, *payload))
         {

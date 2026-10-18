@@ -40,31 +40,21 @@ constexpr UINT kControlPing = WM_APP + 2;              // wParam: seq
 constexpr UINT kControlMessages = WM_APP + 4;          // dockItems and appInfo wait in m_received
 // Posted by the renderer once a frame is on its way to the screen.
 constexpr UINT kRenderCommitted = WM_APP + 5;
-// Posted by the AppBar worker with the strip Explorer granted: wParam = left, top; lParam = right, bottom.
-constexpr UINT kAppBarStrip = WM_APP + 8;
+// Posted to the island's window by a host when Explorer says AppBars may have to move: the work areas may
+// have changed.
+constexpr UINT kWorkAreaMayHaveChanged = WM_APP + 8;
+// Posted by the AppBar worker to its host if Explorer granted a strip, which the dock never asks for.
+constexpr UINT kAppBarGranted = WM_APP + 19;
 // Explorer's AppBar notifications (ABN_*): wParam = notification.
 constexpr UINT kAppBarCallback = WM_APP + 9;
 // Posted by the window watcher: a new snapshot waits.
 constexpr UINT kWindowsChanged = WM_APP + 12;
 // Posted by UI Automation's Invoke or Expand on the "…" button: open the overflow menu outside that call.
 constexpr UINT kOpenOverflowMessage = WM_APP + 17;
-// The "…" button's UI Automation key: no item has it.
+// The UI Automation keys of the "…", tray and Start buttons: no item has them.
 constexpr std::uint64_t kOverflowKey = std::numeric_limits<std::uint64_t>::max();
 constexpr std::uint64_t kTrayKey = kOverflowKey - 1;
-
-static_assert(sizeof(WPARAM) == 8 && sizeof(LPARAM) == 8, "two 32-bit coordinates go in each");
-
-std::uint64_t PackPair(int high, int low) noexcept
-{
-    return static_cast<std::uint64_t>(static_cast<std::uint32_t>(high)) << 32 |
-           static_cast<std::uint32_t>(low);
-}
-
-std::pair<int, int> UnpackPair(std::uint64_t packed) noexcept
-{
-    return {static_cast<int>(static_cast<std::uint32_t>(packed >> 32)),
-            static_cast<int>(static_cast<std::uint32_t>(packed))};
-}
+constexpr std::uint64_t kStartKey = kOverflowKey - 2;
 
 constexpr UINT_PTR kOrphanTimer = 1;
 constexpr UINT_PTR kDeviceRetryTimer = 2;
@@ -77,13 +67,24 @@ constexpr UINT kLabelDelayMs = 400;
 constexpr UINT_PTR kLabelReleaseTimer = 5;
 constexpr UINT kLabelReleaseMs = 60'000;
 constexpr wchar_t kLabelClass[] = L"Harbor.Dock.Label";
-// A monitor's host (its AppBar strip and edge trigger), and the trigger's rest before the dock moves there
+// A monitor's host (its AppBar and edge trigger), and the trigger's rest before the dock moves there
 // (docs/adr/0011).
 constexpr wchar_t kHostClass[] = L"Harbor.Dock.Host";
 constexpr UINT_PTR kEdgeTimer = 6;
 constexpr UINT kEdgeRestMs = 400;
 // Explorer's auto-hidden taskbar keeps a monitor's last 2 px: the trigger row sits above them.
 constexpr int kTriggerRaise = 2;
+// The tuck's own timer (island::Tuck::WakeAt), and the look at full-screen apps every second while one is
+// open (docs/adr/0014): Explorer's "closed" is unreliable.
+constexpr UINT_PTR kTuckTimer = 7;
+constexpr UINT_PTR kFullScreenTimer = 8;
+constexpr UINT kFullScreenLookMs = 1000;
+// The Start button pressed the island's hotkey: if the island isn't open this much later, Windows' Start
+// opens instead (docs/adr/0015).
+constexpr UINT_PTR kIslandTimer = 9;
+constexpr UINT kIslandAnswerMs = 500;
+// A launch the island asked for, not one of the dock's items (Launcher's index).
+constexpr std::size_t kIslandLaunch = std::numeric_limits<std::size_t>::max();
 // Posted to look at the island's place again after a display change was handled (see UpdatePresentable).
 constexpr UINT kRecheckPresentable = WM_APP + 18;
 constexpr UINT kDeviceRetryMs = 2000;
@@ -258,7 +259,7 @@ void DockWindow::Shutdown() noexcept
 {
     // Its callbacks use this object.
     m_controlChannel.Stop();
-    // The strips go before their windows do, waiting for Explorer a moment at most.
+    // The AppBars go before their windows do, waiting for Explorer a moment at most.
     for (auto& host : m_hosts)
     {
         StopHost(host);
@@ -317,9 +318,17 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
     }
 
     m_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
-    // Energy saver turning on or off changes the island's look.
+    // Energy saver turning on or off changes the island's look: the old battery saver flag, and Windows 11's
+    // energy saver status, which turns the host backdrop black (docs/adr/0013). The second sends its value
+    // right away.
     m_powerNotification =
         RegisterPowerSettingNotification(m_hwnd, &GUID_POWER_SAVING_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    m_energySaverNotification =
+        RegisterPowerSettingNotification(m_hwnd, &GUID_ENERGY_SAVER_STATUS, DEVICE_NOTIFY_WINDOW_HANDLE);
+    if (m_energySaverNotification == nullptr)
+    {
+        m_log.Warn(std::format("island: no energy saver notifications ({})", GetLastError()));
+    }
     // A cloaked island isn't on screen (docs/adr/0011). Only this thread's windows: the hook costs nothing
     // while nothing here is cloaked.
     m_cloakHook.reset(SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, &OnCloakChanged,
@@ -329,7 +338,8 @@ DockWindow::CreateResult DockWindow::Create(HINSTANCE instance)
         m_log.Warn(std::format("island: no cloak notifications ({})", GetLastError()));
     }
 
-    // A host per monitor holds its strip, so the island can move without the strips moving (docs/adr/0011).
+    // A host per monitor: its AppBar hears of full-screen apps there, and its edge trigger moves the island
+    // there (docs/adr/0011, 0014).
     WNDCLASSEXW hostClass{};
     hostClass.cbSize = sizeof(hostClass);
     hostClass.lpfnWndProc = &DockWindow::HostProc;
@@ -376,7 +386,9 @@ void DockWindow::StartControlChannel()
                     guard.PostRequest(setTaskbar->hidden);
                 }
                 else if (std::holds_alternative<ipc::DockItems>(message) ||
-                         std::holds_alternative<ipc::AppInfo>(message))
+                         std::holds_alternative<ipc::AppInfo>(message) ||
+                         std::holds_alternative<ipc::IslandState>(message) ||
+                         std::holds_alternative<ipc::Launch>(message))
                 {
                     // In one queue, in order: an appInfo may name a pin from the dockItems before it.
                     switch (received.Push(message))
@@ -428,6 +440,13 @@ void DockWindow::OnConnectionChanged(bool connected)
     m_lookedUp.clear();
     m_lookupsInFlight.clear();
     SendLookups();
+    // Nor where the dock is. Its island is gone with it until it says otherwise.
+    m_sentDockState.reset();
+    SendDockState();
+    if (!connected)
+    {
+        OnIslandState({});
+    }
 }
 
 void DockWindow::OnControlMessages()
@@ -449,6 +468,14 @@ void DockWindow::OnControlMessages()
             auto& known = m_appInfo[info->id];
             appsChanged = appsChanged || known != *info;
             known = std::move(*info);
+        }
+        else if (const auto* islandState = std::get_if<ipc::IslandState>(&message))
+        {
+            OnIslandState(*islandState);
+        }
+        else if (const auto* launch = std::get_if<ipc::Launch>(&message))
+        {
+            OnIslandLaunch(launch->item);
         }
     }
     if (itemsChanged || appsChanged)
@@ -516,6 +543,8 @@ void DockWindow::OnWindowsChanged()
             SendLookups();
         }
     }
+    // The foreground may have changed: a full-screen app may have ended without Explorer saying so.
+    LookAgainAtFullScreen();
 }
 
 void DockWindow::RebuildModel(bool force)
@@ -584,24 +613,32 @@ void DockWindow::RebuildModel(bool force)
 std::vector<island::ItemMarks> DockWindow::VisibleMarks() const
 {
     std::vector<island::ItemMarks> marks;
-    const auto visible = m_layout ? std::min(m_layout->items.size(), m_model.slots.size()) : 0;
+    const auto visible = m_layout ? std::min(m_layout->items.size(), m_places.entries.size()) : 0;
     for (std::size_t i = 0; i < visible; ++i)
     {
-        if (i == m_tray)
-        {
-            marks.push_back({});
-            continue;
-        }
-        if (i == m_overflow)
+        const auto& place = m_places.entries[i];
+        if (place.kind == island::SlotMap::Kind::Overflow && place.slot <= m_model.slots.size())
         {
             // The "…" button: highlighted while one of the apps behind it needs attention.
             const bool attention =
-                std::any_of(m_model.slots.begin() + static_cast<std::ptrdiff_t>(i), m_model.slots.end(),
-                            [](const auto& slot) { return slot.marks.attention; });
+                std::any_of(m_model.slots.begin() + static_cast<std::ptrdiff_t>(place.slot),
+                            m_model.slots.end(), [](const auto& slot) { return slot.marks.attention; });
             marks.push_back({.attention = attention});
             continue;
         }
-        marks.push_back(m_model.slots[i].marks);
+        if (place.kind == island::SlotMap::Kind::Start)
+        {
+            // A dot while the island is open, as under a running app.
+            marks.push_back({.running = m_island.open});
+            continue;
+        }
+        if (place.kind != island::SlotMap::Kind::Slot || place.slot >= m_model.slots.size())
+        {
+            // The tray button.
+            marks.push_back({});
+            continue;
+        }
+        marks.push_back(m_model.slots[place.slot].marks);
     }
     return marks;
 }
@@ -632,49 +669,39 @@ void DockWindow::Refresh(bool force)
     }
     const auto& host = m_hosts[DockHost()];
     const auto& monitor = host.monitor;
-    const auto appearance = adapters::ReadSystemAppearance();
+    const auto appearance = adapters::ReadSystemAppearance(m_energySaver);
     const auto style = island::StyleFor(appearance);
     const auto slots = m_model.slots.size();
-    // A divider when running apps follow pinned items; the tray button last while the taskbar is hidden.
+    // The Start button first (docs/adr/0015); a divider when running apps follow pinned items; the tray
+    // button last while the taskbar is hidden.
     const bool divider = m_model.pinned > 0 && slots > m_model.pinned;
-    const auto count = slots + (m_taskbarHidden ? 1 : 0);
+    const auto count = 1 + slots + (m_taskbarHidden ? 1 : 0);
     const auto metrics = island::MeasureFor(monitor.bounds.Width(), monitor.dpi, count, divider);
-    // Every monitor keeps a strip as tall as the island would be there, so moving it reflows nothing. The
-    // AppBars ask Explorer (it answers on kAppBarStrip); the same request again does nothing.
-    for (auto& each : m_hosts)
-    {
-        const auto there = island::MeasureFor(each.monitor.bounds.Width(), each.monitor.dpi, count, divider);
-        each.appBar->SetWant({each.monitor.bounds, there.StripHeight()});
-    }
     const geometry::Rect strip = StripOf(host, metrics.StripHeight());
-    auto layout = island::Arrange(strip, metrics, m_model.pinned);
+    auto layout = island::Arrange(strip, metrics, 1 + m_model.pinned);
+    // What doesn't fit goes behind a "…" button before the tray button.
+    auto places = island::ArrangeSlots(/*start=*/true, slots, m_taskbarHidden, metrics.visibleCount);
     PlaceTriggers();
 
     if (!force && m_layout && layout.island == m_layout->island && layout.items == m_layout->items &&
-        layout.divider == m_layout->divider && style == m_style && monitor.dpi == m_dpi)
+        layout.divider == m_layout->divider && places == m_places && style == m_style && monitor.dpi == m_dpi)
     {
         return;
     }
-    // The tray button keeps the last place; what doesn't fit before it goes behind a "…" button.
-    const std::optional<std::size_t> tray =
-        m_taskbarHidden && metrics.visibleCount > 0 ? std::optional(metrics.visibleCount - 1) : std::nullopt;
-    const auto room = metrics.visibleCount - (tray ? 1 : 0);
-    const std::optional<std::size_t> overflow =
-        room < slots && room > 0 ? std::optional(room - 1) : std::nullopt;
-    if (overflow && (overflow != m_overflow || slots != m_overflowCount))
+    if (const auto overflow = places.IndexOf(island::SlotMap::Kind::Overflow);
+        overflow && (places != m_places || slots != m_overflowCount))
     {
-        m_log.Info(
-            std::format("island: {} of {} items fit; the rest are in the overflow menu", *overflow, slots));
+        m_log.Info(std::format("island: {} of {} items fit; the rest are in the overflow menu",
+                               places.entries[*overflow].slot, slots));
     }
-    m_overflow = overflow;
+    m_places = std::move(places);
     m_overflowCount = slots;
-    m_tray = tray;
 
     const auto& island = layout.island;
-    // Behind a full-screen app, above everything else.
+    // Tucked behind a full-screen app, else above everything.
     // One call, never a hide and a show: the island must stay on screen while it moves (docs/adr/0011).
-    SetWindowPos(m_hwnd, host.fullScreen ? HWND_BOTTOM : HWND_TOPMOST, island.left, island.top,
-                 island.Width(), island.Height(), SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    SetWindowPos(m_hwnd, m_tucked ? HWND_BOTTOM : HWND_TOPMOST, island.left, island.top, island.Width(),
+                 island.Height(), SWP_NOACTIVATE | SWP_NOOWNERZORDER);
     // Clicks on the transparent corners go to the window below.
     const int diameter = 2 * metrics.cornerRadius;
     SetWindowRgn(m_hwnd,
@@ -703,23 +730,25 @@ void DockWindow::Refresh(bool force)
     const auto& iconsDir = m_options.iconsDir;
     const adapters::CompositionRenderer::IconSource icons =
         [&](std::size_t index, std::vector<std::uint8_t>& file) -> std::optional<island::IconView> {
-        if (index >= items.size())
+        const auto slot = SlotAt(index);
+        if (!slot || *slot >= items.size())
         {
             return std::nullopt;
         }
-        const auto& icon = items[index].icon;
+        const auto& icon = items[*slot].icon;
         file = icon ? adapters::ReadIconFile(iconsDir, *icon) : std::vector<std::uint8_t>{};
         auto view = island::ParseIconFile(file);
         drawn += view.has_value() ? 1 : 0;
         return view;
     };
 
-    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, m_overflow, m_tray,
-                          kRenderCommitted, ++m_renderGeneration))
+    if (m_renderer.Render(*m_layout, m_style, icons, VisibleMarks(), m_hovered, m_places, kRenderCommitted,
+                          ++m_renderGeneration))
     {
-        m_log.Info(std::format("island: {} items ({} icons), {}x{} at {},{} ({} dpi, {})",
-                               m_layout->items.size(), drawn, island.Width(), island.Height(), island.left,
-                               island.top, m_dpi, m_style.backdrop ? "backdrop" : "solid"));
+        // The items after the Start button: the dock's slots, the "…" and tray buttons.
+        m_log.Info(std::format("island: {} items ({} icons) after Start, {}x{} at {},{} ({} dpi, {})",
+                               m_layout->items.size() - 1, drawn, island.Width(), island.Height(),
+                               island.left, island.top, m_dpi, m_style.backdrop ? "backdrop" : "solid"));
     }
     UpdatePresentable();
 }
@@ -774,6 +803,9 @@ void DockWindow::UpdatePresentable(bool recheck)
     // On screen: drawn, visible, not cloaked, and inside one connected monitor (docs/adr/0011).
     island::WindowFacts facts{.committed = m_committed && m_layout.has_value(),
                               .visible = IsWindowVisible(m_hwnd) != FALSE};
+    // Tucked behind a full-screen app, it counts only while its trigger can bring it back (docs/adr/0014).
+    facts.tucked = m_tucked;
+    facts.triggerArmed = DockTriggerArmed();
     DWORD cloaked = 0;
     facts.cloaked =
         SUCCEEDED(DwmGetWindowAttribute(m_hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0;
@@ -785,8 +817,8 @@ void DockWindow::UpdatePresentable(bool recheck)
     if (!presentable && m_presentable && !recheck && facts.committed && facts.visible && !facts.cloaked)
     {
         // Only its place is off: a monitor came or went, and Windows moved the island before this thread
-        // heard of it. Look again once the display change (sent, so ahead of this post) has put it back on
-        // its strip, rather than showing the taskbar for that moment.
+        // heard of it. Look again once the display change (sent, so ahead of this post) has put it back in
+        // its place, rather than showing the taskbar for that moment.
         PostMessageW(m_hwnd, kRecheckPresentable, 0, 0);
         return;
     }
@@ -797,6 +829,8 @@ void DockWindow::UpdatePresentable(bool recheck)
         // The taskbar may only be hidden while the island is on screen.
         m_guard.PostPresentable(presentable);
     }
+    // Whatever moved, tucked, showed or hid the dock went through here: Harbor Shell's island follows.
+    SendDockState();
 }
 
 std::optional<std::size_t> DockWindow::ItemAtClient(LPARAM position) const
@@ -861,7 +895,12 @@ void DockWindow::ShowLabel(std::size_t index)
     {
         m_labelItem = index;
         // Which item, never what it says.
-        m_log.Info(std::format("label: shown for item {}", index));
+        const auto slot = SlotAt(index);
+        const char* button = IsKind(index, island::SlotMap::Kind::Start)  ? "Start"
+                             : IsKind(index, island::SlotMap::Kind::Tray) ? "tray"
+                                                                          : "overflow";
+        m_log.Info(slot ? std::format("label: shown for item {}", *slot)
+                        : std::format("label: shown for the {} button", button));
     }
 }
 
@@ -885,6 +924,7 @@ void DockWindow::OnMouseMove(LPARAM position)
         TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, m_hwnd, 0};
         m_trackingMouse = TrackMouseEvent(&track) != FALSE;
     }
+    ReportPointer(true);
     SetHovered(ItemAtClient(position));
 }
 
@@ -899,25 +939,166 @@ void DockWindow::OnClick(LPARAM position)
 
 bool DockWindow::ClickItem(std::size_t index, std::string_view how)
 {
-    if (!m_layout || index >= m_layout->items.size())
+    if (!m_layout || index >= m_layout->items.size() || index >= m_places.entries.size())
     {
         return false;
     }
-    if (index == m_tray)
+    const auto& place = m_places.entries[index];
+    switch (place.kind)
     {
+    case island::SlotMap::Kind::Start:
+        OpenStart(how);
+        return true;
+    case island::SlotMap::Kind::Tray:
         PeekTaskbar(how);
         return true;
-    }
-    if (index >= m_model.slots.size())
-    {
-        return false;
-    }
-    if (index == m_overflow)
-    {
+    case island::SlotMap::Kind::Overflow:
         OpenOverflowMenu(how);
         return true;
+    case island::SlotMap::Kind::Slot:
+        return ClickSlot(place.slot, how);
     }
-    return ClickSlot(index, how);
+    return false;
+}
+
+std::optional<std::size_t> DockWindow::SlotAt(std::size_t index) const
+{
+    if (index >= m_places.entries.size() || m_places.entries[index].kind != island::SlotMap::Kind::Slot)
+    {
+        return std::nullopt;
+    }
+    return m_places.entries[index].slot;
+}
+
+bool DockWindow::IsKind(std::size_t index, island::SlotMap::Kind kind) const
+{
+    return index < m_places.entries.size() && m_places.entries[index].kind == kind;
+}
+
+void DockWindow::OpenWindowsStart(std::string_view how)
+{
+    // Until the island opens instead (docs/adr/0015): Windows' Start, as the Windows key would. Windows
+    // documents SC_TASKLIST as "activates the Start menu"; no keys are injected, so a held Shift can't make
+    // it Ctrl+Shift+Esc, and an elevated window in front doesn't stop it.
+    if (!m_options.takesForeground)
+    {
+        m_log.Info(std::format("click: Start ({}): Windows Start (a test dock: not opened)", how));
+        return;
+    }
+    PostMessageW(m_hwnd, WM_SYSCOMMAND, SC_TASKLIST, 0);
+    m_log.Info(std::format("click: Start ({}): Windows Start", how));
+}
+
+void DockWindow::OpenStart(std::string_view how)
+{
+    if (!m_island.ready || !m_island.hotkey)
+    {
+        OpenWindowsStart(how);
+        return;
+    }
+    PressIslandHotkey(*m_island.hotkey, how);
+    KillTimer(m_hwnd, kIslandTimer);
+    m_islandAskedAt.reset();
+    // Open already: the same key closes it, nothing to wait for.
+    if (!m_island.open)
+    {
+        m_islandAskedAt = SteadyNow();
+        SetTimer(m_hwnd, kIslandTimer, kIslandAnswerMs, nullptr);
+    }
+}
+
+void DockWindow::PressIslandHotkey(std::uint32_t key, std::string_view how)
+{
+    if (!m_options.takesForeground)
+    {
+        m_log.Info(std::format("click: Start ({}): the island's hotkey (a test dock: not pressed)", how));
+        return;
+    }
+    // Pressed and released at once, in one SendInput: nothing else can come between them. The hotkey's owner,
+    // Harbor Shell, may take the foreground for it (M4 spike).
+    INPUT keys[2]{};
+    for (auto& input : keys)
+    {
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = static_cast<WORD>(key);
+    }
+    keys[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    const UINT sent = SendInput(2, keys, sizeof(INPUT));
+    m_log.Info(sent == 2 ? std::format("click: Start ({}): the island's hotkey", how)
+                         : std::format("click: Start ({}): the island's hotkey wasn't pressed ({})", how,
+                                       GetLastError()));
+}
+
+void DockWindow::OnIslandState(const ipc::IslandState& state)
+{
+    if (state == m_island)
+    {
+        return;
+    }
+    const bool openChanged = state.open != m_island.open;
+    if (state.ready != m_island.ready)
+    {
+        m_log.Info(state.ready ? "island: ready" : "island: not ready");
+    }
+    if (openChanged)
+    {
+        m_log.Info(state.open ? "island: open" : "island: closed");
+    }
+    m_island = state;
+    if (state.open && m_islandAskedAt)
+    {
+        m_log.Info(std::format("island: opened {} ms after the Start button",
+                               (SteadyNow() - *m_islandAskedAt).count()));
+        m_islandAskedAt.reset();
+        KillTimer(m_hwnd, kIslandTimer);
+    }
+    if (openChanged)
+    {
+        // The Start button's dot shows the island is open.
+        m_renderer.SetMarks(VisibleMarks());
+    }
+}
+
+void DockWindow::OnIslandLaunch(const ipc::AppTarget& item)
+{
+    if (!m_launcher)
+    {
+        return;
+    }
+    // The user asked, in the island: whatever starts may take the foreground. Which app is the user's
+    // business.
+    AllowSetForegroundWindow(ASFW_ANY);
+    m_log.Info("launch: from the island");
+    m_launcher->Launch(kIslandLaunch, ipc::DockItem{item.kind, item.target, {}, std::nullopt});
+}
+
+void DockWindow::SendDockState()
+{
+    if (!m_connected || m_hosts.empty())
+    {
+        return;
+    }
+    const auto& host = m_hosts[DockHost()];
+    // Within the contract's bounds, whatever Windows says.
+    const auto clamp = [](const geometry::Rect& rect) {
+        const auto side = [](int value) {
+            return std::clamp(value, -ipc::DockState::kMaxCoordinate, ipc::DockState::kMaxCoordinate);
+        };
+        return geometry::Rect{side(rect.left), side(rect.top), side(rect.right), side(rect.bottom)};
+    };
+    const ipc::DockState state{
+        .monitor = clamp(host.monitor.bounds),
+        .work = clamp(host.monitor.work),
+        .dpi = std::clamp(host.monitor.dpi, ipc::DockState::kMinDpi, ipc::DockState::kMaxDpi),
+        .fullScreen = host.fullScreen.IsOpen(),
+        .visible = m_shown && IsWindowVisible(m_hwnd) != FALSE,
+    };
+    if (state == m_sentDockState)
+    {
+        return;
+    }
+    m_sentDockState = state;
+    m_controlChannel.Send(state);
 }
 
 bool DockWindow::ClickSlot(std::size_t index, std::string_view how)
@@ -998,12 +1179,13 @@ void DockWindow::OnRightClick(LPARAM position)
 
 void DockWindow::OpenOverflowMenu(std::string_view how)
 {
-    if (!m_layout || !m_overflow || *m_overflow >= m_layout->items.size() || m_menuOpen)
+    const auto at = m_places.IndexOf(island::SlotMap::Kind::Overflow);
+    if (!m_layout || !at || *at >= m_layout->items.size() || m_menuOpen)
     {
         return;
     }
-    // Copies, as for OpenMenu.
-    const auto first = *m_overflow;
+    // Copies, as for OpenMenu. The slots from first on are behind the button.
+    const auto first = m_places.entries[*at].slot;
     std::vector<std::string> names;
     std::vector<std::vector<std::uint8_t>> icons;
     const auto side = static_cast<std::uint32_t>(island::Scale(16, m_dpi));
@@ -1018,9 +1200,11 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
         icons.push_back(icon ? island::Downscale(*icon, side) : std::vector<std::uint8_t>{});
     }
     const auto menu = island::BuildOverflowMenu(names, first);
-    const auto& button = m_layout->items[first];
+    const auto& button = m_layout->items[*at];
     const auto& island = m_layout->island;
     HideLabel();
+    // An open menu keeps the island on top over a full-screen app.
+    ReportPointer(true);
     m_menuOpen = true;
     m_overflowMenuOpen = true;
     const auto chosen = adapters::PopupMenu::Show(
@@ -1029,6 +1213,7 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
         {.style = m_style, .dpi = m_dpi, .highContrast = m_highContrast}, icons, static_cast<int>(side));
     m_overflowMenuOpen = false;
     m_menuOpen = false;
+    ReportPointer(PointerOverDock());
     m_log.Info(std::format("menu: the overflow menu ({}, {} items){}", how, names.size(),
                            chosen ? std::format(": item {} chosen", menu[*chosen].item) : ""));
     if (chosen)
@@ -1039,19 +1224,20 @@ void DockWindow::OpenOverflowMenu(std::string_view how)
 
 void DockWindow::OpenMenu(std::size_t index, std::string_view how)
 {
-    // The tray button has no menu.
-    if (!m_layout || index >= m_layout->items.size() || index >= m_model.slots.size() || m_menuOpen ||
-        index == m_tray)
-    {
-        return;
-    }
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         OpenOverflowMenu(how);
         return;
     }
+    // The Start and tray buttons have no menu.
+    const auto slotIndex = SlotAt(index);
+    if (!m_layout || index >= m_layout->items.size() || !slotIndex || *slotIndex >= m_model.slots.size() ||
+        m_menuOpen)
+    {
+        return;
+    }
     // Copies: the model can change while the menu is open (its loop keeps handling this window's messages).
-    const auto slot = m_model.slots[index];
+    const auto slot = m_model.slots[*slotIndex];
     auto windows = WindowsOf(slot);
     std::sort(windows.begin(), windows.end(), [](const auto& a, const auto& b) { return a.seen < b.seen; });
     std::optional<ipc::DockItem> pin;
@@ -1083,12 +1269,14 @@ void DockWindow::OpenMenu(std::size_t index, std::string_view how)
     const auto& item = m_layout->items[index];
     const auto& island = m_layout->island;
     HideLabel();
+    ReportPointer(true);
     m_menuOpen = true;
     const auto chosen =
         adapters::PopupMenu::Show(m_hwnd, menu, {(item.left + item.right) / 2, island.top},
                                   {island.left, island.top, island.right, island.bottom},
                                   {.style = m_style, .dpi = m_dpi, .highContrast = m_highContrast});
     m_menuOpen = false;
+    ReportPointer(PointerOverDock());
     if (!chosen)
     {
         return;
@@ -1096,7 +1284,7 @@ void DockWindow::OpenMenu(std::size_t index, std::string_view how)
 
     const auto& command = menu[*chosen];
     // Which item and what was done, never which app or window.
-    m_log.Info(std::format("menu: item {} ({}): {}", index, how, Describe(command.command)));
+    m_log.Info(std::format("menu: item {} ({}): {}", *slotIndex, how, Describe(command.command)));
     switch (command.command)
     {
     case island::MenuCommand::Title:
@@ -1114,8 +1302,9 @@ void DockWindow::OpenMenu(std::size_t index, std::string_view how)
         if (m_launcher)
         {
             AllowSetForegroundWindow(ASFW_ANY);
-            m_launcher->Launch(
-                index, pin ? *pin : ipc::DockItem{launch->kind, launch->target, slot.name, std::nullopt});
+            m_launcher->Launch(*slotIndex,
+                               pin ? *pin
+                                   : ipc::DockItem{launch->kind, launch->target, slot.name, std::nullopt});
         }
         break;
     case island::MenuCommand::Pin:
@@ -1185,35 +1374,43 @@ std::size_t DockWindow::ItemCount() const
 
 std::uint64_t DockWindow::ItemKey(std::size_t index) const
 {
-    if (index == m_tray)
+    if (IsKind(index, island::SlotMap::Kind::Start))
+    {
+        return kStartKey;
+    }
+    if (IsKind(index, island::SlotMap::Kind::Tray))
     {
         return kTrayKey;
     }
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         return kOverflowKey;
     }
-    return index < m_itemKeys.size() ? m_itemKeys[index] : 0;
+    const auto slot = SlotAt(index);
+    return slot && *slot < m_itemKeys.size() ? m_itemKeys[*slot] : 0;
 }
 
 std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
 {
+    if (key == kStartKey)
+    {
+        return m_places.IndexOf(island::SlotMap::Kind::Start);
+    }
     if (key == kOverflowKey)
     {
-        return m_overflow;
+        return m_places.IndexOf(island::SlotMap::Kind::Overflow);
     }
     if (key == kTrayKey)
     {
-        return m_tray;
+        return m_places.IndexOf(island::SlotMap::Kind::Tray);
     }
-    // Items behind the "…" button aren't on the island, nor is anything from the tray button on.
-    const auto visible =
-        std::min({m_overflow.value_or(ItemCount()), m_tray.value_or(ItemCount()), m_itemKeys.size()});
-    for (std::size_t i = 0; i < visible; ++i)
+    // Items behind the "…" button aren't on the island.
+    for (std::size_t slot = 0; slot < m_itemKeys.size(); ++slot)
     {
-        if (m_itemKeys[i] == key)
+        if (m_itemKeys[slot] == key)
         {
-            return i;
+            const auto place = m_places.IndexOfSlot(slot);
+            return place && *place < ItemCount() ? place : std::nullopt;
         }
     }
     return std::nullopt;
@@ -1221,7 +1418,7 @@ std::optional<std::size_t> DockWindow::IndexOfKey(std::uint64_t key) const
 
 bool DockWindow::IsOverflow(std::size_t index) const
 {
-    return index == m_overflow;
+    return IsKind(index, island::SlotMap::Kind::Overflow);
 }
 
 bool DockWindow::IsOverflowMenuOpen() const
@@ -1236,19 +1433,24 @@ void DockWindow::CloseMenu()
 
 std::wstring DockWindow::ItemName(std::size_t index) const
 {
-    if (index == m_tray)
+    if (IsKind(index, island::SlotMap::Kind::Start))
+    {
+        return L"Start";
+    }
+    if (IsKind(index, island::SlotMap::Kind::Tray))
     {
         return L"Show taskbar";
     }
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         return L"More apps";
     }
-    if (index >= m_model.slots.size())
+    const auto slot = SlotAt(index);
+    if (!slot || *slot >= m_model.slots.size())
     {
         return {};
     }
-    const auto& name = m_model.slots[index].name;
+    const auto& name = m_model.slots[*slot].name;
     const int length =
         MultiByteToWideChar(CP_UTF8, 0, name.data(), static_cast<int>(name.size()), nullptr, 0);
     std::wstring wide(static_cast<std::size_t>(std::max(length, 0)), L'\0');
@@ -1258,25 +1460,28 @@ std::wstring DockWindow::ItemName(std::size_t index) const
 
 std::wstring DockWindow::ItemStatus(std::size_t index) const
 {
-    if (index == m_tray)
+    if (IsKind(index, island::SlotMap::Kind::Start))
     {
+        return m_island.open ? L"island open" : L"";
+    }
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
+    {
+        const auto first = m_places.entries[index].slot;
+        return std::format(L"{} more apps", m_model.slots.size() - std::min(first, m_model.slots.size()));
+    }
+    const auto slot = SlotAt(index);
+    if (!slot || *slot >= m_model.slots.size())
+    {
+        // The Start and tray buttons.
         return {};
     }
-    if (index == m_overflow)
-    {
-        return std::format(L"{} more apps", m_model.slots.size() - index);
-    }
-    if (index >= m_model.slots.size())
-    {
-        return {};
-    }
-    const auto windows = WindowsOf(m_model.slots[index]).size();
+    const auto windows = WindowsOf(m_model.slots[*slot]).size();
     if (windows == 0)
     {
         return {};
     }
     std::wstring status = windows == 1 ? L"running, 1 window" : std::format(L"running, {} windows", windows);
-    if (m_model.slots[index].marks.attention)
+    if (m_model.slots[*slot].marks.attention)
     {
         status += L", needs attention";
     }
@@ -1300,7 +1505,7 @@ std::optional<std::size_t> DockWindow::ItemAt(POINT screenPoint) const
 
 bool DockWindow::InvokeItem(std::size_t index)
 {
-    if (index == m_overflow)
+    if (IsKind(index, island::SlotMap::Kind::Overflow))
     {
         // Posted: a menu's loop mustn't run inside the screen reader's call.
         return PostMessageW(m_hwnd, kOpenOverflowMessage, 0, 0) != FALSE;
@@ -1311,7 +1516,9 @@ bool DockWindow::InvokeItem(std::size_t index)
 void DockWindow::SyncHosts()
 {
     const auto monitors = ReadMonitors();
-    // A host whose monitor went, or changed size, goes (with its strip).
+    const auto before = m_hosts.size();
+    bool changed = false;
+    // A host whose monitor went, or changed size, goes (with its AppBar).
     for (auto it = m_hosts.begin(); it != m_hosts.end();)
     {
         if (std::none_of(monitors.begin(), monitors.end(), [&](const island::MonitorInfo& monitor) {
@@ -1320,6 +1527,7 @@ void DockWindow::SyncHosts()
         {
             StopHost(*it);
             it = m_hosts.erase(it);
+            changed = true;
         }
         else
         {
@@ -1358,15 +1566,23 @@ void DockWindow::SyncHosts()
         {
             appBar = std::make_unique<adapters::Win32AppBar>(host.window, kAppBarCallback);
         }
+        // Registered only to hear of full-screen apps (ABN_FULLSCREENAPP): it asks for no strip, so Explorer
+        // grants none (docs/adr/0014).
         const HWND window = host.window;
-        host.appBar =
-            std::make_unique<AppBarWorker>(std::move(appBar), [window](const geometry::Rect& strip) {
-                PostMessageW(window, kAppBarStrip, PackPair(strip.left, strip.top),
-                             static_cast<LPARAM>(PackPair(strip.right, strip.bottom)));
-            });
+        host.appBar = std::make_unique<AppBarWorker>(std::move(appBar), [window](const geometry::Rect&) {
+            PostMessageW(window, kAppBarGranted, 0, 0);
+        });
+        host.appBar->SetWant({monitor.bounds, /*height=*/0});
         m_hosts.push_back(std::move(host));
+        changed = true;
     }
-    m_log.Info(std::format("appbar: {} monitors, a strip on each", m_hosts.size()));
+    if (changed)
+    {
+        m_log.Info(std::format("appbar: {} monitors (was {}), notify-only on each: no strip", m_hosts.size(),
+                               before));
+        // The island's monitor may have gone with its full-screen app.
+        OnFullScreenChanged();
+    }
 }
 
 void DockWindow::StopHost(MonitorHost& host) noexcept
@@ -1395,10 +1611,10 @@ std::size_t DockWindow::DockHost() const
 
 geometry::Rect DockWindow::StripOf(const MonitorHost& host, int height) const
 {
-    // Until Explorer answers (or if it never does): the bottom of the work area, above a visible taskbar.
-    // That is usually where the strip goes too.
-    return host.strip.value_or(geometry::Rect{host.monitor.bounds.left, host.monitor.work.bottom - height,
-                                              host.monitor.bounds.right, host.monitor.work.bottom});
+    // Above a visible taskbar; at the monitor's bottom edge while Harbor hides it (auto-hide gives the work
+    // area back). Over maximized windows: nothing reserves it.
+    return {host.monitor.bounds.left, host.monitor.work.bottom - height, host.monitor.bounds.right,
+            host.monitor.work.bottom};
 }
 
 void DockWindow::PlaceTriggers()
@@ -1412,13 +1628,22 @@ void DockWindow::PlaceTriggers()
     for (std::size_t i = 0; i < m_hosts.size(); ++i)
     {
         auto& host = m_hosts[i];
-        // Not on the dock's own monitor, not while off (panic), not over a full-screen app.
+        // Not while off (panic). Elsewhere, not over a full-screen app (a game, say); on the dock's own
+        // monitor, only over one: there it brings the tucked island back (docs/adr/0014).
+        const bool wanted =
+            i == dock ? host.fullScreen.IsOpen() && !m_testTriggerBroken : !host.fullScreen.IsOpen();
         std::vector<geometry::Rect> triggers;
-        if (i != dock && m_triggersOn && !host.fullScreen && m_shown)
+        if (wanted && m_triggersOn && m_shown)
         {
             const auto height = static_cast<int>(island::Scale(
                 island::kIconDip + 2 * island::kPaddingDip + 2 * island::kMarginDip, host.monitor.dpi));
-            triggers = island::EdgeTriggers(monitors, i, StripOf(host, height), kTriggerRaise);
+            // Over a full-screen app the monitor's bottom edge is the app's, even with a taskbar under it:
+            // the trigger sits there, never over that taskbar.
+            const auto& bounds = host.monitor.bounds;
+            const auto strip =
+                i == dock ? geometry::Rect{bounds.left, bounds.bottom - height, bounds.right, bounds.bottom}
+                          : StripOf(host, height);
+            triggers = island::EdgeTriggers(monitors, i, strip, kTriggerRaise);
         }
         if (triggers.empty())
         {
@@ -1437,10 +1662,17 @@ void DockWindow::PlaceTriggers()
 
 void DockWindow::OnHostMouseMove(std::size_t index)
 {
-    if (!m_triggersOn || index == DockHost() || m_windows.movingOrSizing || m_menuOpen ||
+    const bool here = index == DockHost();
+    if (!m_triggersOn || (here && !m_tuck.FullScreen()) || m_windows.movingOrSizing || m_menuOpen ||
         (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0)
     {
         return;
+    }
+    if (here)
+    {
+        // Leaving it may let the island tuck again.
+        TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, m_hosts[index].window, 0};
+        TrackMouseEvent(&track);
     }
     if (m_triggerHost != index)
     {
@@ -1467,6 +1699,12 @@ void DockWindow::OnEdgeTimer()
     {
         return;
     }
+    if (*index == DockHost())
+    {
+        // The dock's own monitor: the island comes back over the full-screen app.
+        ReportPointer(true);
+        return;
+    }
     MoveDock(*index);
 }
 
@@ -1478,34 +1716,20 @@ void DockWindow::MoveDock(std::size_t index)
     m_log.Info(std::format("island: moves to monitor {} of {}", index + 1, m_hosts.size()));
     m_hovered.reset();
     Refresh(/*force=*/true);
+    OnFullScreenChanged();
 }
 
 void DockWindow::OnAppBarNotification(std::size_t index, WPARAM notification, LPARAM lParam)
 {
-    auto& host = m_hosts[index];
     switch (notification)
     {
     case ABN_POSCHANGED:
-        // Explorer sends these in bursts; the worker coalesces them.
-        host.appBar->PositionMayHaveChanged();
+        // The taskbar or another AppBar changed, so may the work areas. Explorer sends these in bursts; the
+        // hosts are looked at outside this host's window procedure (a monitor may have gone with its host).
+        PostMessageW(m_hwnd, kWorkAreaMayHaveChanged, 0, 0);
         break;
     case ABN_FULLSCREENAPP:
-        if (host.fullScreen == (lParam != 0))
-        {
-            break;
-        }
-        host.fullScreen = lParam != 0;
-        if (index == DockHost())
-        {
-            // On the island's monitor: step behind it, like the taskbar does. The island stays on screen in
-            // GuardPolicy's sense, as the hidden taskbar would have been covered too.
-            m_log.Info(host.fullScreen ? "appbar: a full-screen app opened; the island steps behind it"
-                                       : "appbar: the full-screen app closed; the island is on top again");
-            SetWindowPos(m_hwnd, host.fullScreen ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-        // Elsewhere: that monitor's trigger goes rather than cover the app (a game, say).
-        PlaceTriggers();
+        OnFullScreenNotice(index, lParam != 0);
         break;
     case ABN_STATECHANGE:
         // The taskbar's auto-hide or always-on-top changed. Harbor sets auto-hide itself while it hides the
@@ -1515,6 +1739,170 @@ void DockWindow::OnAppBarNotification(std::size_t index, WPARAM notification, LP
     default:
         break;
     }
+}
+
+void DockWindow::OnFullScreenNotice(std::size_t index, bool open)
+{
+    auto& host = m_hosts[index];
+    if (host.fullScreen.IsOpen() == open)
+    {
+        return;
+    }
+    if (open)
+    {
+        // The window in front is the app, if it covers the monitor (docs/adr/0014).
+        host.fullScreen.Open(host.monitor.bounds, JudgedForeground());
+    }
+    else
+    {
+        host.fullScreen.Close();
+    }
+    // Which monitor, never which app.
+    m_log.Info(
+        std::format("appbar: monitor {}: a full-screen app {}", index + 1, open ? "opened" : "closed"));
+    OnFullScreenChanged();
+}
+
+void DockWindow::LookAgainAtFullScreen()
+{
+    if (std::none_of(m_hosts.begin(), m_hosts.end(),
+                     [](const MonitorHost& host) { return host.fullScreen.IsOpen(); }))
+    {
+        return;
+    }
+    const auto foreground = JudgedForeground();
+    bool ended = false;
+    for (std::size_t i = 0; i < m_hosts.size(); ++i)
+    {
+        auto& host = m_hosts[i];
+        if (host.fullScreen.IsOpen() && !host.fullScreen.LookAgain(host.monitor.bounds, foreground))
+        {
+            m_log.Info(
+                std::format("appbar: monitor {}: the full-screen app ended (Explorer didn't say)", i + 1));
+            ended = true;
+        }
+    }
+    if (ended)
+    {
+        OnFullScreenChanged();
+    }
+}
+
+std::optional<island::Foreground> DockWindow::JudgedForeground() const
+{
+    const HWND foreground = GetForegroundWindow();
+    RECT bounds{};
+    if (foreground == nullptr || !GetWindowRect(foreground, &bounds))
+    {
+        return std::nullopt;
+    }
+    if (!m_options.windowClassPrefix.empty())
+    {
+        // Test docks judge only their own test windows: the user's never end a test's full screen.
+        std::wstring name(256, L'\0');
+        name.resize(static_cast<std::size_t>(std::max(GetClassNameW(foreground, name.data(), 256), 0)));
+        const std::wstring prefix(m_options.windowClassPrefix.begin(), m_options.windowClassPrefix.end());
+        if (!name.starts_with(prefix))
+        {
+            return std::nullopt;
+        }
+    }
+    return island::Foreground{ToId(foreground), FromRect(bounds)};
+}
+
+void DockWindow::OnFullScreenChanged()
+{
+    if (m_hosts.empty())
+    {
+        return;
+    }
+    const auto& host = m_hosts[DockHost()];
+    if (m_tuckMonitor != host.monitor.bounds)
+    {
+        // What was full screen on the old monitor doesn't apply here.
+        m_tuck.OnMonitorChanged();
+        m_tuckMonitor = host.monitor.bounds;
+    }
+    m_tuck.OnFullScreen(host.fullScreen.IsOpen(), SteadyNow());
+    // Looked at again every second while any monitor has one: no timer otherwise.
+    if (std::any_of(m_hosts.begin(), m_hosts.end(),
+                    [](const MonitorHost& each) { return each.fullScreen.IsOpen(); }))
+    {
+        SetTimer(m_hwnd, kFullScreenTimer, kFullScreenLookMs, nullptr);
+    }
+    else
+    {
+        KillTimer(m_hwnd, kFullScreenTimer);
+    }
+    ApplyTuck();
+}
+
+void DockWindow::ReportPointer(bool over)
+{
+    const auto wakeAt = m_tuck.WakeAt();
+    const bool tucked = m_tuck.Tucked();
+    m_tuck.OnPointer(over, SteadyNow());
+    if (m_tuck.WakeAt() != wakeAt || m_tuck.Tucked() != tucked)
+    {
+        ApplyTuck();
+    }
+}
+
+bool DockWindow::PointerOverDock() const
+{
+    POINT cursor{};
+    if (!GetCursorPos(&cursor))
+    {
+        return false;
+    }
+    const geometry::Point point{cursor.x, cursor.y};
+    // Behind a full-screen app, the island's place is the app's: only its trigger brings it back.
+    RECT island{};
+    if (!m_tucked && GetWindowRect(m_hwnd, &island) && FromRect(island).Contains(point))
+    {
+        return true;
+    }
+    RECT trigger{};
+    const HWND own = m_hosts.empty() ? nullptr : m_hosts[DockHost()].window;
+    return own != nullptr && IsWindowVisible(own) && GetWindowRect(own, &trigger) &&
+           FromRect(trigger).Contains(point);
+}
+
+bool DockWindow::DockTriggerArmed() const
+{
+    if (m_hosts.empty())
+    {
+        return false;
+    }
+    const auto& host = m_hosts[DockHost()];
+    RECT trigger{};
+    return m_triggersOn && host.window != nullptr && IsWindowVisible(host.window) &&
+           GetWindowRect(host.window, &trigger) && island::TriggerAtEdge(FromRect(trigger), host.monitor);
+}
+
+void DockWindow::ApplyTuck()
+{
+    // Its monitor's trigger first, so a tucked island is never without one (rule 7, docs/adr/0014).
+    PlaceTriggers();
+    if (const bool tucked = m_tuck.Tucked(); tucked != m_tucked)
+    {
+        m_tucked = tucked;
+        if (tucked)
+        {
+            HideLabel();
+        }
+        m_log.Info(tucked ? "island: tucked behind a full-screen app" : "island: on top again");
+        // Behind the app, still shown: the window never hides for it.
+        SetWindowPos(m_hwnd, tucked ? HWND_BOTTOM : HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    KillTimer(m_hwnd, kTuckTimer);
+    if (const auto wakeAt = m_tuck.WakeAt())
+    {
+        const auto delay = std::max<std::int64_t>((*wakeAt - SteadyNow()).count(), 1);
+        SetTimer(m_hwnd, kTuckTimer, static_cast<UINT>(delay), nullptr);
+    }
+    UpdatePresentable();
 }
 
 LRESULT CALLBACK DockWindow::HostProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -1545,17 +1933,25 @@ LRESULT CALLBACK DockWindow::HostProc(HWND hwnd, UINT message, WPARAM wParam, LP
     case WM_MOUSEMOVE:
         self->OnHostMouseMove(index);
         return 0;
-    case kAppBarStrip: {
-        const auto [left, top] = UnpackPair(wParam);
-        const auto [right, bottom] = UnpackPair(static_cast<std::uint64_t>(lParam));
-        host->strip = geometry::Rect{left, top, right, bottom};
-        self->m_log.Info(
-            std::format("appbar: monitor {} strip {},{} to {},{}", index + 1, left, top, right, bottom));
-        self->Refresh(/*force=*/false);
+    case WM_MOUSELEAVE:
+        if (index == self->DockHost())
+        {
+            self->ReportPointer(self->PointerOverDock());
+        }
         return 0;
-    }
+    case WM_WINDOWPOSCHANGED:
+        // The dock's own trigger shown, hidden or moved: a tucked island may depend on it (rule 7).
+        if (index == self->DockHost())
+        {
+            self->UpdatePresentable();
+        }
+        return DefWindowProcW(hwnd, message, wParam, lParam);
     case kAppBarCallback:
         self->OnAppBarNotification(index, wParam, lParam);
+        return 0;
+    case kAppBarGranted:
+        self->m_log.Warn(
+            std::format("appbar: monitor {} was granted a strip, though none was asked for", index + 1));
         return 0;
     default:
         return DefWindowProcW(hwnd, message, wParam, lParam);
@@ -1566,20 +1962,23 @@ void DockWindow::OnLaunched(LaunchReport* report)
 {
     const std::unique_ptr<LaunchReport> owned(report);
     const auto& result = owned->result;
+    // Which item, or that the island asked; never which app.
+    const auto what =
+        owned->index == kIslandLaunch ? std::string("from the island") : std::format("item {}", owned->index);
     if (FAILED(result.result))
     {
-        m_log.Warn(std::format("launch: item {} failed: 0x{:08X} (Explorer: 0x{:08X})", owned->index,
+        m_log.Warn(std::format("launch: {} failed: 0x{:08X} (Explorer: 0x{:08X})", what,
                                static_cast<std::uint32_t>(result.result),
                                static_cast<std::uint32_t>(result.explorerResult)));
     }
     else if (result.route == adapters::LaunchRoute::Explorer)
     {
-        m_log.Info(std::format("launch: item {} started via Explorer", owned->index));
+        m_log.Info(std::format("launch: {} started via Explorer", what));
     }
     else
     {
-        m_log.Info(std::format("launch: item {} started via ShellExecuteEx (Explorer: 0x{:08X})",
-                               owned->index, static_cast<std::uint32_t>(result.explorerResult)));
+        m_log.Info(std::format("launch: {} started via ShellExecuteEx (Explorer: 0x{:08X})", what,
+                               static_cast<std::uint32_t>(result.explorerResult)));
     }
 }
 
@@ -1661,13 +2060,20 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         PlaceTriggers();
         return 0;
     case kTestShowLabelMessage:
-        ShowLabel(wParam);
+        // wParam is a dock item (a slot), wherever it is on the island.
+        if (const auto place = m_places.IndexOfSlot(wParam))
+        {
+            ShowLabel(*place);
+        }
         return 0;
     case kTestHideLabelMessage:
         HideLabel();
         return 0;
     case kTestOpenMenuMessage:
-        OpenMenu(wParam, "test hook");
+        if (const auto place = m_places.IndexOfSlot(wParam))
+        {
+            OpenMenu(*place, "test hook");
+        }
         return 0;
     case kTestCloseMenuMessage:
         EndMenu();
@@ -1699,6 +2105,22 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case kTestHangMessage:
         m_log.Warn("test hook: hanging the UI thread");
         Sleep(INFINITE);
+        return 0;
+    case kTestFullScreenMessage:
+        m_log.Warn(wParam != 0 ? "test hook: full screen on" : "test hook: full screen off");
+        if (!m_hosts.empty())
+        {
+            OnFullScreenNotice(DockHost(), wParam != 0);
+        }
+        return 0;
+    case kTestBreakTriggerMessage:
+        // Only the trigger goes: rule 7 must notice it by itself.
+        m_log.Warn("test hook: breaking the dock's own trigger");
+        m_testTriggerBroken = true;
+        if (!m_hosts.empty())
+        {
+            ShowWindow(m_hosts[DockHost()].window, SW_HIDE);
+        }
         return 0;
     case TaskbarGuard::kStateMessage:
         if (const bool hidden = wParam != 0; hidden != m_taskbarHidden)
@@ -1749,6 +2171,30 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             OnEdgeTimer();
             return 0;
         }
+        if (wParam == kTuckTimer)
+        {
+            KillTimer(m_hwnd, kTuckTimer);
+            m_tuck.OnTimer(SteadyNow());
+            ApplyTuck();
+            return 0;
+        }
+        if (wParam == kFullScreenTimer)
+        {
+            LookAgainAtFullScreen();
+            return 0;
+        }
+        if (wParam == kIslandTimer)
+        {
+            KillTimer(m_hwnd, kIslandTimer);
+            if (m_islandAskedAt && !m_island.open)
+            {
+                m_islandAskedAt.reset();
+                m_log.Warn(std::format("island: not open {} ms after its hotkey; Windows Start instead",
+                                       kIslandAnswerMs));
+                OpenWindowsStart("the island didn't open");
+            }
+            return 0;
+        }
         if (wParam == kLabelTimer)
         {
             KillTimer(m_hwnd, kLabelTimer);
@@ -1779,6 +2225,11 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_MOUSELEAVE:
         m_trackingMouse = false;
         SetHovered(std::nullopt);
+        // A menu's loop takes the mouse: the island stays while it is open.
+        if (!m_menuOpen)
+        {
+            ReportPointer(PointerOverDock());
+        }
         return 0;
     case WM_LBUTTONUP:
         OnClick(lParam);
@@ -1797,22 +2248,19 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
         return 0;
     case WM_DISPLAYCHANGE:
     case WM_SETTINGCHANGE:
-        // Monitors or the work area changed: so may the strips. A monitor that came gets a host, one that
-        // went takes its host along, and the island goes back to the primary if its monitor went.
-        if (message == WM_DISPLAYCHANGE)
-        {
-            SyncHosts();
-        }
+        // Monitors or the work area changed: so may the island's place. A monitor that came gets a host, one
+        // that went takes its host along, and the island goes back to the primary if its monitor went.
         if (message == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA)
         {
-            for (auto& host : m_hosts)
-            {
-                host.appBar->PositionMayHaveChanged();
-            }
+            SyncHosts();
         }
         Refresh(/*force=*/false);
         UpdatePresentable();
         return DefWindowProcW(m_hwnd, message, wParam, lParam);
+    case kWorkAreaMayHaveChanged:
+        SyncHosts();
+        Refresh(/*force=*/false);
+        return 0;
     case WM_THEMECHANGED:
     case WM_SYSCOLORCHANGE:
         Refresh(/*force=*/false);
@@ -1820,6 +2268,13 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
     case WM_POWERBROADCAST:
         if (wParam == PBT_POWERSETTINGCHANGE)
         {
+            if (const auto on =
+                    adapters::EnergySaverIn(*reinterpret_cast<const POWERBROADCAST_SETTING*>(lParam));
+                on && *on != m_energySaver)
+            {
+                m_energySaver = *on;
+                m_log.Info(m_energySaver ? "island: energy saver on" : "island: energy saver off");
+            }
             Refresh(/*force=*/false);
         }
         return TRUE;
@@ -1842,10 +2297,13 @@ LRESULT DockWindow::HandleMessage(UINT message, WPARAM wParam, LPARAM lParam)
             m_accessibility->Disconnect();
         }
         m_controlChannel.Stop();
-        if (m_powerNotification != nullptr)
+        for (auto* notification : {&m_powerNotification, &m_energySaverNotification})
         {
-            UnregisterPowerSettingNotification(m_powerNotification);
-            m_powerNotification = nullptr;
+            if (*notification != nullptr)
+            {
+                UnregisterPowerSettingNotification(*notification);
+                *notification = nullptr;
+            }
         }
         PostQuitMessage(m_exitCode);
         return 0;

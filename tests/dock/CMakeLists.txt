@@ -39,6 +39,7 @@ add_executable(harbor_dock_tests
     environment_tests.cpp
     explorer_worker_tests.cpp
     file_log_tests.cpp
+    full_screen_tests.cpp
     icon_downscale_tests.cpp
     guard_policy_tests.cpp
     latest_value_tests.cpp
@@ -51,7 +52,10 @@ add_executable(harbor_dock_tests
     on_screen_tests.cpp
     pipe_name_tests.cpp
     restore_record_tests.cpp
+    slot_map_tests.cpp
+    system_appearance_tests.cpp
     taskbar_guard_tests.cpp
+    tuck_tests.cpp
     win32_taskbar_tests.cpp
     window_tracker_tests.cpp
 )

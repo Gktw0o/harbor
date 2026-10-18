@@ -15,6 +15,7 @@ constexpr std::wstring_view kDataDir = L"--data-dir";
 constexpr std::wstring_view kTestTaskbar = L"--test-taskbar";
 constexpr std::wstring_view kTestPingTimeout = L"--test-ping-timeout-ms";
 constexpr std::wstring_view kTestOrphanTimeout = L"--test-orphan-timeout-ms";
+constexpr std::wstring_view kTestForeground = L"--test-foreground";
 
 // Arguments echoed into error messages; anything outside printable ASCII becomes '?'.
 std::string Printable(std::wstring_view text)
@@ -79,6 +80,16 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
     for (size_t i = 0; i < args.size(); ++i)
     {
         const std::wstring_view name = args[i];
+        if (name == kTestForeground)
+        {
+            // The one option without a value.
+            if (options.testForeground)
+            {
+                return "--test-foreground is given more than once";
+            }
+            options.testForeground = true;
+            continue;
+        }
         if (name != kPipeName && name != kDataDir && name != kTestTaskbar && name != kTestPingTimeout &&
             name != kTestOrphanTimeout)
         {
@@ -160,6 +171,10 @@ std::variant<DockOptions, std::string> ParseCommandLine(std::span<const std::wst
     if (options.testOrphanTimeoutMs && overrides == 0)
     {
         return "--test-orphan-timeout-ms needs --pipe-name, --data-dir and --test-taskbar";
+    }
+    if (options.testForeground && overrides == 0)
+    {
+        return "--test-foreground needs --pipe-name, --data-dir and --test-taskbar";
     }
     return options;
 }

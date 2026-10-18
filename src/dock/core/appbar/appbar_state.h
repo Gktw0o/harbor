@@ -10,7 +10,8 @@ namespace harbor::appbar
 
 using Milliseconds = std::chrono::milliseconds;
 
-// The strip the dock wants to reserve: height pixels along the bottom of monitor.
+// The strip the dock wants to reserve: height pixels along the bottom of monitor. Height 0: registered only
+// to hear Explorer's notifications (full screen), reserving nothing (docs/adr/0014).
 struct Want
 {
     geometry::Rect monitor;

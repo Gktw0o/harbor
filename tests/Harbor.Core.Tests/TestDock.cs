@@ -44,12 +44,43 @@ internal static partial class TestDock
     // is typing in: they run in CI, and locally only with HARBOR_FOREGROUND_TESTS=1.
     public static void RequireForegroundTests()
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase) &&
-            Environment.GetEnvironmentVariable("HARBOR_FOREGROUND_TESTS") != "1")
+        if (!ForegroundTestsAllowed)
         {
             Assert.Inconclusive("Changes the foreground: runs in CI, or set HARBOR_FOREGROUND_TESTS=1.");
         }
+        // A Windows Start an earlier test left open would keep the foreground from this one.
+        var deadline = Stopwatch.StartNew();
+        while (WindowsStartIsOpen() && deadline.Elapsed < TimeSpan.FromSeconds(5))
+        {
+            IslandWindow.PressEscape();
+            Thread.Sleep(500);
+        }
     }
+
+    /// <summary>Windows' Start (or its search) is in front.</summary>
+    public static bool WindowsStartIsOpen() => IslandWindow.ForegroundProcessName() is "StartMenuExperienceHost" or "SearchHost";
+
+    /// <summary>
+    /// Closes Windows' Start if a test opened it, waiting a moment for one that is still on its way: left open, it
+    /// holds the foreground and every later test that moves the focus fails.
+    /// </summary>
+    public static async Task CloseWindowsStartAsync()
+    {
+        if (!ForegroundTestsAllowed)
+        {
+            return;
+        }
+        await WaitUntilAsync(() => Task.FromResult(WindowsStartIsOpen()), TimeSpan.FromSeconds(3));
+        for (var attempt = 0; attempt < 3 && WindowsStartIsOpen(); attempt++)
+        {
+            IslandWindow.PressEscape();
+            await WaitUntilAsync(() => Task.FromResult(!WindowsStartIsOpen()), TimeSpan.FromSeconds(3));
+        }
+    }
+
+    public static bool ForegroundTestsAllowed =>
+        string.Equals(Environment.GetEnvironmentVariable("CI"), "true", StringComparison.OrdinalIgnoreCase) ||
+        Environment.GetEnvironmentVariable("HARBOR_FOREGROUND_TESTS") == "1";
 
     // Polls until check() holds; false after the timeout.
     public static async Task<bool> WaitUntilAsync(Func<Task<bool>> check, TimeSpan timeout)
@@ -121,9 +152,12 @@ internal static partial class TestDock
         return (process.ExitCode, output);
     }
 
-    // A short ping timeout (the real one is 5 s) keeps the tests that wait for it quick.
+    // A short ping timeout (the real one is 5 s) keeps the tests that wait for it quick. Only where tests may take
+    // the focus does a test dock's Start button open Windows' Start (--test-foreground).
     public static string[] Arguments(string pipeName, string dataDir, FakeTaskbar taskbar) =>
-        ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];
+        ForegroundTestsAllowed
+            ? ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500", "--test-foreground"]
+            : ["--pipe-name", pipeName, "--data-dir", dataDir, "--test-taskbar", taskbar.Id, "--test-ping-timeout-ms", "1500"];
 
     public static Process Start(string pipeName, string dataDir, FakeTaskbar taskbar, params string[] extraArguments)
     {
@@ -195,6 +229,21 @@ internal static partial class TestDock
     public static void ShowLabel(FakeTaskbar taskbar, bool show)
     {
         using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.{(show ? "show-label" : "hide-label")}");
+        hook.Set();
+    }
+
+    // The test hooks that say a full-screen app opened or closed on the dock's monitor, as Explorer's
+    // ABN_FULLSCREENAPP would (test AppBars hear nothing from Explorer), and that break the dock's own edge
+    // trigger (see DockWindow::kTestFullScreenMessage, docs/adr/0014).
+    public static void SetFullScreen(FakeTaskbar taskbar, bool fullScreen)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.{(fullScreen ? "fullscreen-on" : "fullscreen-off")}");
+        hook.Set();
+    }
+
+    public static void BreakTrigger(FakeTaskbar taskbar)
+    {
+        using var hook = EventWaitHandle.OpenExisting($@"Local\Harbor.Test.{taskbar.Id}.break-trigger");
         hook.Set();
     }
 

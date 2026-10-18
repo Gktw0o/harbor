@@ -81,5 +81,16 @@ TEST(Monitors, Resting)
     EXPECT_FALSE(RestsOnTrigger(trigger, monitor, {100, 1800}));
 }
 
+TEST(Monitors, ATriggerAtTheEdge)
+{
+    const auto& monitor = kSideBySide[0];
+    EXPECT_TRUE(TriggerAtEdge({0, 1797, 2880, 1800}, monitor));
+    // Moved off the edge, out of the monitor, or nothing at all: the cursor can't reach it there.
+    EXPECT_FALSE(TriggerAtEdge({0, 1700, 2880, 1790}, monitor));
+    EXPECT_FALSE(TriggerAtEdge({0, 1797, 2880, 1801}, monitor));
+    EXPECT_FALSE(TriggerAtEdge({-10, 1797, 100, 1800}, monitor));
+    EXPECT_FALSE(TriggerAtEdge({0, 1800, 2880, 1800}, monitor));
+}
+
 } // namespace
 } // namespace harbor::island

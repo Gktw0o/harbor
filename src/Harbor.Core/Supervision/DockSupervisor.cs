@@ -21,6 +21,17 @@ public sealed record DockSupervisorOptions
     /// <summary>Pings in a row the dock may leave unanswered before it counts as hung.</summary>
     public int MissedPongLimit { get; init; } = 5;
 
+    /// <summary>
+    /// How long a dock that just connected may take to answer its first ping: it may still be setting up on its UI
+    /// thread, which answers them. Never less than <see cref="MissedPongLimit"/> pings (with the default 1 s pings,
+    /// both are 5 s). Tests ping every 100 ms, where 5 pings once weren't enough for a dock starting on a busy runner.
+    /// </summary>
+    public TimeSpan StartupAllowance { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Pings the dock may miss before its first answer on a connection.</summary>
+    internal int FirstAnswerLimit =>
+        Math.Max(MissedPongLimit, (int)Math.Ceiling(StartupAllowance / PingInterval));
+
     /// <summary>How long to wait at start for a dock that is already running to reconnect.</summary>
     public TimeSpan AdoptWait { get; init; } = TimeSpan.FromSeconds(3);
 
@@ -86,6 +97,9 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     /// <summary>The dock asked to pin or unpin an app (pinRequest).</summary>
     public event Action<PinRequest>? PinRequestReceived;
 
+    /// <summary>Where the dock is and what is happening on its monitor (dockState), for the island.</summary>
+    public event Action<DockStateMessage>? DockStateReceived;
+
     /// <summary>
     /// Whether hiding the taskbar is requested. It turns off by itself after the panic hotkey, when Explorer
     /// keeps showing the taskbar, and when the dock ends or hangs: the user turns it back on.
@@ -110,7 +124,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
             }
 
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            using var session = new Session(options.MissedPongLimit, Stopwatch.GetTimestamp(), new RestartPolicy(options.Restart), stop.Token);
+            using var session = new Session(options.MissedPongLimit, options.FirstAnswerLimit, Stopwatch.GetTimestamp(), new RestartPolicy(options.Restart), stop.Token);
             var ticking = TickAsync(stop.Token);
             var watching = WatchAsync(session, stop.Token);
             try
@@ -237,6 +251,21 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         });
     }
 
+    /// <summary>Sends message to the dock, or, if none is connected (or it can't be sent), runs otherwise instead.</summary>
+    public void SendToDockOr(Message message, Action otherwise)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(otherwise);
+        Post(_ =>
+        {
+            if (!server.IsConnected || !server.TrySend(message))
+            {
+                otherwise();
+            }
+            return Task.CompletedTask;
+        });
+    }
+
     private void Post(Func<Session, Task> command) => _commands.Writer.TryWrite(command);
 
     private void OnLinkStatus(ControlLinkStatus status)
@@ -254,6 +283,10 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         else if (message is PinRequest request)
         {
             PinRequestReceived?.Invoke(request);
+        }
+        else if (message is DockStateMessage dock)
+        {
+            DockStateReceived?.Invoke(dock);
         }
         else if (message is TaskbarState state)
         {
@@ -569,7 +602,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
     }
 
     // The watchdog's state, owned by its loop.
-    private sealed class Session(int missedPongLimit, long startedAt, RestartPolicy restarts, CancellationToken stopping) : IDisposable
+    private sealed class Session(int missedPongLimit, int firstAnswerLimit, long startedAt, RestartPolicy restarts, CancellationToken stopping) : IDisposable
     {
         public long StartedAt { get; } = startedAt;
 
@@ -584,7 +617,7 @@ public sealed class DockSupervisor(DockSupervisorOptions options, ControlPipeSer
         /// <summary>When this watchdog started the dock, until it connects (<see cref="DockSupervisorOptions.ConnectTimeout"/>).</summary>
         public long? LaunchedAt { get; set; }
 
-        public Heartbeat Heartbeat { get; } = new(missedPongLimit);
+        public Heartbeat Heartbeat { get; } = new(missedPongLimit, firstAnswerLimit);
 
         public DockProcess? Dock { get; set; }
 

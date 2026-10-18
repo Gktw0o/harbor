@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstring>
 #include <optional>
 
 namespace harbor::adapters
@@ -31,7 +32,7 @@ island::Color FromSysColor(int index) noexcept
 
 } // namespace
 
-island::SystemAppearance ReadSystemAppearance() noexcept
+island::SystemAppearance ReadSystemAppearance(bool energySaverStatus) noexcept
 {
     island::SystemAppearance appearance;
     if (const auto light = ReadPersonalizeValue(L"SystemUsesLightTheme"))
@@ -43,8 +44,10 @@ island::SystemAppearance ReadSystemAppearance() noexcept
         appearance.transparency = *transparency != 0;
     }
 
+    // Windows 11's energy saver leaves the battery saver flag alone (M4 spike): either one counts.
     SYSTEM_POWER_STATUS power{};
-    appearance.energySaver = GetSystemPowerStatus(&power) && power.SystemStatusFlag == 1;
+    appearance.energySaver =
+        energySaverStatus || (GetSystemPowerStatus(&power) && power.SystemStatusFlag == 1);
 
     HIGHCONTRASTW contrast{sizeof(contrast)};
     if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(contrast), &contrast, 0) &&
@@ -56,6 +59,18 @@ island::SystemAppearance ReadSystemAppearance() noexcept
         appearance.highContrastHighlight = FromSysColor(COLOR_HIGHLIGHT);
     }
     return appearance;
+}
+
+std::optional<bool> EnergySaverIn(const POWERBROADCAST_SETTING& setting) noexcept
+{
+    if (!IsEqualGUID(setting.PowerSetting, GUID_ENERGY_SAVER_STATUS) || setting.DataLength != sizeof(DWORD))
+    {
+        return std::nullopt;
+    }
+    // ENERGY_SAVER_OFF, _STANDARD or _HIGH_SAVINGS: the host backdrop draws black under both of the last two.
+    DWORD status = 0;
+    std::memcpy(&status, setting.Data, sizeof(status));
+    return status != ENERGY_SAVER_OFF;
 }
 
 } // namespace harbor::adapters

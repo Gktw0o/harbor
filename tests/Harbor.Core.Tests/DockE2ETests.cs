@@ -73,7 +73,7 @@ public sealed class DockE2ETests
     }
 
     // The island: a small topmost tool window that never takes focus, at the bottom of the primary monitor's
-    // work area (until the AppBar reserves its own strip), as wide as its items.
+    // work area (an overlay: nothing reserved, docs/adr/0014), as wide as its items.
     [TestMethod]
     public async Task DockShowsItsIslandAtTheBottomOfThePrimaryMonitor()
     {
@@ -115,13 +115,107 @@ public sealed class DockE2ETests
             Assert.AreEqual(empty.Height, three.Height);
             Assert.AreEqual(empty.Bottom, three.Bottom);
 
-            // Its strip came from its monitor's AppBar worker (a test AppBar, which reserves nothing); every monitor
-            // has one (docs/adr/0011).
+            // Every monitor has a host whose AppBar only hears of full-screen apps (docs/adr/0011, 0014). A test
+            // AppBar grants whatever is asked for (reserving nothing): it was asked for no strip.
             var log = await TestDock.ReadLogAsync(dataDir.Path);
-            StringAssert.Contains(log, $" strip {monitor.Left},");
-            StringAssert.Contains(log, "monitors, a strip on each");
-            Assert.IsNotEmpty(DockWindows.FindAppBars((uint)dock.Id), "no host window holds a strip");
+            StringAssert.Contains(log, "notify-only on each: no strip");
+            Assert.DoesNotContain("was granted a strip", log);
+            Assert.IsNotEmpty(DockWindows.FindAppBars((uint)dock.Id), "no host window holds an AppBar");
             Assert.AreEqual(work.Bottom, IslandWindow.PrimaryMonitor().Work.Bottom, "a test dock changed the work area");
+        }
+        finally
+        {
+            await StopAsync(dock);
+        }
+    }
+
+    // The Start button comes first and opens Windows' Start, until the island opens instead (docs/adr/0015).
+    // Start opens on the screen, so CI only; Esc closes it again.
+    [TestMethod]
+    public async Task TheStartButtonOpensWindowsStart()
+    {
+        TestDock.RequireForegroundTests();
+        const int Button = 50000;
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        var timeout = TimeSpan.FromSeconds(15);
+        static bool StartIsOpen() => TestDock.WindowsStartIsOpen();
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+            var (_, tree) = await TestDock.RunUiaClientAsync(island, "list");
+            Assert.AreEqual($"{Button}\tStart", tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[1], tree);
+            Assert.IsFalse(StartIsOpen(), "Start was open before the test");
+
+            var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "Start");
+            Assert.AreEqual(0, code, output);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "click: Start (UI Automation): Windows Start", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(StartIsOpen()), timeout),
+                $"Start didn't open; in front: {IslandWindow.ForegroundProcessName()}");
+        }
+        finally
+        {
+            await TestDock.CloseWindowsStartAsync();
+            await StopAsync(dock);
+        }
+    }
+
+    // A full-screen app on the dock's monitor (docs/adr/0014): a moment later the island steps behind it, still
+    // shown, and that monitor's edge trigger waits at the bottom edge to bring it back; when the app closes, the
+    // island is on top again and the trigger goes.
+    [TestMethod]
+    public async Task AFullScreenAppTucksTheIslandAfterAMoment()
+    {
+        await using var server = new RunningServer($"harbor.e2e.{Guid.NewGuid():N}", TimeSpan.FromMilliseconds(100));
+        using var dataDir = new TempDirectory();
+        using var taskbar = new FakeTaskbar(dataDir.Path);
+        using var dock = TestDock.Start(server.PipeName, dataDir.Path, taskbar);
+        var timeout = TimeSpan.FromSeconds(15);
+        try
+        {
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: shown", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            var island = IslandWindow.Find(dock.Id);
+            var (monitor, _) = IslandWindow.PrimaryMonitor();
+            // The trigger on the dock's own monitor: another monitor's is always there (it moves the dock over). By its
+            // top-left corner: in this process's DPI-scaled coordinates the 2 px row can round past the bottom edge.
+            nint Trigger() => DockWindows.FindAppBars((uint)dock.Id).FirstOrDefault(window =>
+            {
+                var bounds = IslandWindow.Bounds(window);
+                return IslandWindow.IsWindowVisible(window) && bounds.Left >= monitor.Left && bounds.Left < monitor.Right &&
+                    bounds.Top >= monitor.Top && bounds.Top < monitor.Bottom;
+            });
+            Assert.AreEqual((nint)0, Trigger(), "a trigger on the dock's own monitor without a full-screen app");
+
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            TestDock.SetFullScreen(taskbar, fullScreen: true);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: tucked behind a full-screen app", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            // 2.5 s (core/island/tuck has the exact rules); the mouse passing over the island or its trigger meanwhile
+            // tucks it 1 s after it left, so never sooner than that.
+            Assert.IsGreaterThanOrEqualTo(900L, watch.ElapsedMilliseconds, "tucked at once");
+            Assert.AreEqual(0L, IslandWindow.ExStyle(island) & IslandWindow.ExTopmost, "tucked, yet still topmost");
+            Assert.IsTrue(IslandWindow.IsWindowVisible(island), "the island hid instead of stepping behind");
+            var trigger = Trigger();
+            Assert.AreNotEqual((nint)0, trigger, $"no trigger to bring the tucked island back on {monitor}; the dock's: " +
+                string.Join(", ", DockWindows.FindAppBars((uint)dock.Id).Select(w => $"{IslandWindow.Bounds(w)} visible {IslandWindow.IsWindowVisible(w)}")) +
+                $"; island {IslandWindow.Bounds(island)}\n" + await TestDock.ReadLogAsync(dataDir.Path));
+            // In this process's DPI-scaled coordinates: a pixel off either way after rounding.
+            var row = IslandWindow.Bounds(trigger);
+            Assert.IsLessThanOrEqualTo(1, Math.Abs(monitor.Bottom - row.Bottom), $"trigger {row} not at the bottom of {monitor}");
+            Assert.IsTrue(row.Left >= monitor.Left && row.Right <= monitor.Right + 1 && row.Top >= monitor.Bottom - 4,
+                $"trigger {row} not along the bottom of {monitor}");
+
+            TestDock.SetFullScreen(taskbar, fullScreen: false);
+            Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: on top again", timeout),
+                await TestDock.ReadLogAsync(dataDir.Path));
+            Assert.AreEqual(IslandWindow.ExTopmost, IslandWindow.ExStyle(island) & IslandWindow.ExTopmost);
+            Assert.IsTrue(await TestDock.WaitUntilAsync(() => Task.FromResult(Trigger() == 0), timeout), "the trigger stayed");
         }
         finally
         {
@@ -172,9 +266,10 @@ public sealed class DockE2ETests
             Assert.IsTrue(await TestDock.WaitForLogAsync(dataDir.Path, "island: 1 items", TimeSpan.FromSeconds(10)));
             var island = IslandWindow.Find(dock.Id);
 
-            // The only item's middle: the island is as tall as one item plus its padding.
-            var size = IslandWindow.Bounds(island).Height;
-            IslandWindow.Click(island, size / 2, size / 2);
+            // The only item's middle, after the Start button: the island is as tall as one item plus its padding,
+            // and the item is last.
+            var bounds = IslandWindow.Bounds(island);
+            IslandWindow.Click(island, bounds.Width - bounds.Height / 2, bounds.Height / 2);
 
             var marker = app + ".launched";
             var deadline = Stopwatch.StartNew();
@@ -221,7 +316,7 @@ public sealed class DockE2ETests
             var (listed, tree) = await TestDock.RunUiaClientAsync(island, "list");
             Assert.AreEqual(0, listed, tree);
             CollectionAssert.AreEqual(
-                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tÜnïcødé \U0001D538", $"{Button}\tMarker" },
+                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tStart", $"{Button}\tÜnïcødé \U0001D538", $"{Button}\tMarker" },
                 tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), tree);
 
             var (invoked, _) = await TestDock.RunUiaClientAsync(island, "invoke", "Marker");
@@ -369,7 +464,7 @@ public sealed class DockE2ETests
             var (listed, tree) = await TestDock.RunUiaClientAsync(island, "list");
             Assert.AreEqual(0, listed, tree);
             CollectionAssert.AreEqual(
-                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tIdle", $"{Button}\tPinned app", $"{Button}\tharbor_test_windows" },
+                new[] { $"{ToolBar}\tHarbor Dock", $"{Button}\tStart", $"{Button}\tIdle", $"{Button}\tPinned app", $"{Button}\tharbor_test_windows" },
                 tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries), tree);
             async Task<string> StatusAsync(string name) =>
                 (await TestDock.RunUiaClientAsync(island, "status", name)).Output.TrimEnd('\r', '\n');
@@ -574,12 +669,12 @@ public sealed class DockE2ETests
             var island = IslandWindow.Find(dock.Id);
             async Task<string[]> ItemsAsync() =>
                 (await TestDock.RunUiaClientAsync(island, "list")).Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)[1..];
-            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle" }, await ItemsAsync());
+            CollectionAssert.AreEqual(new[] { $"{Button}\tStart", $"{Button}\tIdle" }, await ItemsAsync());
 
             Assert.IsTrue(server.Server.TrySend(new SetTaskbar(Hidden: true)));
             await server.WaitForMessageAsync<TaskbarState>(s => s.Hidden);
             Assert.IsTrue(FakeTaskbar.WaitUntilVisible(taskbar.Primary, visible: false));
-            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle", $"{Button}\tShow taskbar" }, await ItemsAsync());
+            CollectionAssert.AreEqual(new[] { $"{Button}\tStart", $"{Button}\tIdle", $"{Button}\tShow taskbar" }, await ItemsAsync());
 
             var (code, output) = await TestDock.RunUiaClientAsync(island, "invoke", "Show taskbar");
             Assert.AreEqual(0, code, output);
@@ -600,7 +695,7 @@ public sealed class DockE2ETests
             FakeTaskbar.Move(taskbar.Primary, 0, 0);
             Assert.IsTrue(server.Server.TrySend(new SetTaskbar(Hidden: false)));
             await server.WaitForMessageAsync<TaskbarState>(s => !s.Hidden);
-            CollectionAssert.AreEqual(new[] { $"{Button}\tIdle" }, await ItemsAsync());
+            CollectionAssert.AreEqual(new[] { $"{Button}\tStart", $"{Button}\tIdle" }, await ItemsAsync());
         }
         finally
         {
@@ -802,10 +897,11 @@ public sealed class DockE2ETests
             var islandBounds = IslandWindow.Bounds(island);
             Assert.IsTrue(bounds.Bottom < islandBounds.Top, $"label {bounds} island {islandBounds}");
             Assert.IsTrue(bounds.Width > 0 && bounds.Height > 0, bounds.ToString());
-            // One item: centred on the island too (within a pixel of rounding).
+            // Centred on its item, the last one after the Start button, as wide as the island is tall (within a
+            // pixel or two of rounding).
             var labelCentre = (bounds.Left + bounds.Right) / 2;
-            var islandCentre = (islandBounds.Left + islandBounds.Right) / 2;
-            Assert.IsTrue(Math.Abs(labelCentre - islandCentre) <= 1, $"label {bounds} island {islandBounds}");
+            var itemCentre = islandBounds.Right - islandBounds.Height / 2;
+            Assert.IsTrue(Math.Abs(labelCentre - itemCentre) <= 2, $"label {bounds} island {islandBounds}");
             Assert.IsFalse((await TestDock.ReadLogAsync(dataDir.Path)).Contains("A name", StringComparison.Ordinal), "the log names an app");
 
             TestDock.PressPanicHotkey(server.PipeName);
@@ -866,8 +962,8 @@ public sealed class DockE2ETests
             var island = IslandWindow.Find(dock.Id);
             var (_, tree) = await TestDock.RunUiaClientAsync(island, "list");
             var lines = tree.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
-            // The tool bar, the items that fit, and the button.
-            Assert.HasCount(1 + visible + 1, lines, tree);
+            // The tool bar, the Start button, the items that fit, and the "…" button.
+            Assert.HasCount(1 + 1 + visible + 1, lines, tree);
             Assert.AreEqual($"{Button}\tMore apps", lines[^1]);
             Assert.AreEqual($"status\t{total - visible} more apps",
                 (await TestDock.RunUiaClientAsync(island, "status", "More apps")).Output.TrimEnd('\r', '\n'));

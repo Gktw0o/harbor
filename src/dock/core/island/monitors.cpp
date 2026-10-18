@@ -78,4 +78,9 @@ bool RestsOnTrigger(const geometry::Rect& trigger, const MonitorInfo& monitor,
            cursor.y < monitor.bounds.bottom;
 }
 
+bool TriggerAtEdge(const geometry::Rect& window, const MonitorInfo& monitor) noexcept
+{
+    return monitor.bounds.Contains(window) && window.bottom == monitor.bounds.bottom;
+}
+
 } // namespace harbor::island

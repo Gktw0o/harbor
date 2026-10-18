@@ -22,6 +22,18 @@ internal enum ShellItemDisplayName
 {
     /// <summary>SIGDN_NORMALDISPLAY: the name people see in Explorer.</summary>
     NormalDisplay = 0,
+
+    /// <summary>SIGDN_PARENTRELATIVEPARSING: in shell:AppsFolder, the app's id (an AUMID or a known-folder path).</summary>
+    ParentRelativeParsing = unchecked((int)0x80018001),
+}
+
+/// <summary>IEnumShellItems: a folder's items, one Next at a time.</summary>
+[GeneratedComInterface]
+[Guid("70629033-e363-4a28-a567-0db78006e6d7")]
+internal partial interface IEnumShellItems
+{
+    [PreserveSig]
+    int Next(uint count, out IShellItem? item, out uint fetched);
 }
 
 /// <summary>IShellItemImageFactory: an item's icon (or thumbnail) as a bitmap.</summary>
@@ -51,6 +63,57 @@ internal static partial class ShellItems
 
     /// <summary>Lets go of the COM object now rather than when the GC gets to it.</summary>
     public static void Release(IShellItem item) => ((ComObject)(object)item).FinalRelease();
+
+    private static readonly Guid EnumItemsHandler = new("94f60519-2850-4924-aa5a-d15e84868039");
+    private static readonly Guid EnumShellItemsId = new("70629033-e363-4a28-a567-0db78006e6d7");
+
+    /// <summary>The apps Start lists (shell:AppsFolder): each one's name and id. Empty if the folder can't be read.</summary>
+    public static List<(string Name, string Id)> AppsFolder()
+    {
+        var apps = new List<(string Name, string Id)>();
+        var folder = FromParsingName("shell:AppsFolder");
+        if (folder is null)
+        {
+            return apps;
+        }
+        try
+        {
+            if (folder.BindToHandler(0, EnumItemsHandler, EnumShellItemsId, out var raw) < 0 || raw == 0)
+            {
+                return apps;
+            }
+            var items = (IEnumShellItems)new StrategyBasedComWrappers().GetOrCreateObjectForComInstance(raw, CreateObjectFlags.UniqueInstance);
+            Marshal.Release(raw);
+            try
+            {
+                while (items.Next(1, out var item, out var fetched) == 0 && fetched == 1 && item is not null)
+                {
+                    try
+                    {
+                        if (item.GetDisplayName(ShellItemDisplayName.NormalDisplay, out var name) >= 0 &&
+                            item.GetDisplayName(ShellItemDisplayName.ParentRelativeParsing, out var id) >= 0 &&
+                            !string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(id))
+                        {
+                            apps.Add((name, id));
+                        }
+                    }
+                    finally
+                    {
+                        Release(item);
+                    }
+                }
+            }
+            finally
+            {
+                ((ComObject)(object)items).FinalRelease();
+            }
+        }
+        finally
+        {
+            Release(folder);
+        }
+        return apps;
+    }
 
     /// <summary>
     /// The item's icon at up to <paramref name="side"/> pixels a side, as premultiplied BGRA rows top to bottom

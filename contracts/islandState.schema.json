@@ -1,0 +1,26 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "urn:harbor:contract:islandState",
+  "title": "islandState v1",
+  "description": "Harbor.Shell to dock, on the control channel: the island's state (docs/adr/0013, 0015). Sent on every connect and whenever any of it changes. The dock opens the island by pressing its hotkey (Harbor Shell gets the foreground from it), and counts the island as opened when open turns true. Any change to this message bumps v.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": { "const": "islandState" },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ready", "open", "hotkey"],
+      "properties": {
+        "ready": { "description": "The island exists and can open.", "type": "boolean" },
+        "open": { "description": "The island is expanded now.", "type": "boolean" },
+        "hotkey": {
+          "description": "The virtual-key code of the island's private hotkey, F13 to F24 (124-135) without modifiers, which Harbor Shell registered; null if it got none.",
+          "oneOf": [{ "type": "integer", "minimum": 124, "maximum": 135 }, { "type": "null" }]
+        }
+      }
+    }
+  }
+}

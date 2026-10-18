@@ -33,9 +33,11 @@ handlers are best effort. Each one covers what the other can't see.
 5. A taskbar exists.
 6. The dock isn't in a kill-on-close job. Harbor Shell starts the dock with `CREATE_BREAKAWAY_FROM_JOB`
    when its own job allows it.
-7. (Added in M2, ADR 0008; widened in M3, ADR 0011.) The island is on screen: drawn, visible, not cloaked,
-   and inside one connected monitor. Without it the user would have neither taskbar nor dock. Like an
-   unproven watchdog, this is a reason not to hide, not a block the user must clear.
+7. (Added in M2, ADR 0008; widened in M3, ADR 0011; tightened in M4, ADR 0014.) The island is on screen:
+   drawn, visible, not cloaked, and inside one connected monitor. Without it the user would have neither
+   taskbar nor dock. Like an unproven watchdog, this is a reason not to hide, not a block the user must clear.
+   From M4 the island may be tucked behind a full-screen app; a tucked island counts as on screen only while
+   its monitor's edge trigger is armed (the mouse at the bottom brings it back).
 
 The dock also never hides while it is exiting, while the session is ending, or once a crash handler ran.
 
@@ -96,3 +98,12 @@ more than about 4 MiB together. Every restore says why it happened.
   one test it affects skips itself only in that combination.
 - Test runners such as ctest run tests in kill-on-close jobs, so in-process guard tests replace the job
   check; a separate end-to-end test checks the real one.
+
+## Note (M4): a starting dock's first ping
+
+The dock answers pings on its UI thread, which is still setting up for a moment after it connects. Before a
+connection's first pong the watchdog now allows `StartupAllowance` (5 s), never fewer than the usual 5 pings;
+after it, 5 missed pings in a row count as hung as before. With the real watchdog's 1 s pings both are 5 pings,
+so nothing changes for users. Test supervisors ping every 100 ms: there "5 pings" was 0.5 s, and a dock starting
+on a busy CI runner sometimes missed it (the watchdog then gave the taskbar back and ended a healthy dock). A dock
+hung from its start is still caught, after 5 s.

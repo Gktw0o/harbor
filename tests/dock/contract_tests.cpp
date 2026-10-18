@@ -293,6 +293,13 @@ TEST(Contracts, EncodedDockItemsMatchesFixture)
               json::parse(ReadLine(ContractsDir() / "fixtures/valid/dock-items.json")));
 }
 
+TEST(Contracts, EncodedDockStateMatchesFixture)
+{
+    const DockState message{.monitor = {0, 0, 2880, 1800}, .work = {0, 0, 2880, 1800}, .dpi = 192};
+    EXPECT_EQ(json::parse(Encode(message)),
+              json::parse(ReadLine(ContractsDir() / "fixtures/valid/dock-state.json")));
+}
+
 // The largest dockItems the schema allows (40 items, every character four bytes) must fit one line, and the
 // encoder must write it byte for byte: an encoder that escaped non-ASCII text would need far more room.
 TEST(Contracts, LargestDockItemsFitsTheLineLimit)

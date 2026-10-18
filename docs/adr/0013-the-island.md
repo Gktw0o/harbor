@@ -102,3 +102,14 @@ The M4 spike (2026-10-16, ARM64, 200 % and 100 % monitors) tried three designs:
   controls.
 - The notch covers the top centre of maximized windows' title bars (tabs, VS Code's command centre). It is
   small and empty when collapsed.
+
+## Measured (M4, 2026-10-17, ARM64 dev PC, Release)
+
+- Start button → the island in front with its focus: 282 ms the first time, 11 ms after (budget: 400 / 150 ms).
+- Harbor Shell's private memory: +13.6 MB with the island open (search, stats, media, controls read), +11.3 MB
+  35 s after it closed (the app list stays warm; budget: +60 MB, released within 30 s).
+- Collapsed, the Shell first measured 0.29 % of all CPUs: background JIT in its first minute, and its main window
+  redrawing a status line on every 1 Hz ping since M0. The line now changes only when the link does; an idle test
+  Shell's threads went from about 43 to 10 million cycles a second (roughly 0.3 % of one core, mostly the ping).
+- Energy saver: the dock's log showed it turning solid (step 3); the island uses the same gating, not yet checked
+  by eye (docs/testing/m4-checklist.md 2.6).

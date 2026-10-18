@@ -78,3 +78,13 @@ receive `ABN_FULLSCREENAPP`.
   prompt). The user accepted this; hiding over maximized windows could become an option later.
 - Moving the dock between monitors still changes no work area.
 - The safety check's AppBar scenarios become "the work area never shrinks".
+
+## Measured (M4, 2026-10-17, ARM64 dev PC, Release, real taskbar)
+
+- No strip: the work area stayed at the monitor's bottom edge (0 px short) with the dock running.
+- A full-screen window in front: the dock tucked 2.8–3.5 s later (2.5 s plus Explorer's notice), and the hidden
+  taskbar stayed hidden while the edge trigger was armed.
+- From a tuck: the panic hotkey restored the taskbar in 74 ms, a killed dock in 231 ms, a closed Harbor Shell in
+  238 ms. Full screen ending without Explorer saying so: the island was on top again in 240 ms. Resting on the
+  bottom edge brought it back in 517 ms; leaving tucked it again 1.7 s later.
+- Not measured yet: a game in exclusive full screen, two monitors (docs/testing/m4-checklist.md).

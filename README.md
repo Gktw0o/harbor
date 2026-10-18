@@ -1,11 +1,12 @@
 # Harbor
 
-A macOS-style dock and system-stats island for Windows 11, native on **x64 and ARM64**.
+A macOS-style dock and a top-of-screen island for Windows 11, native on **x64 and ARM64**.
 
-> **Status: M3 (running windows).** A rounded island at the bottom of the screen shows your pinned apps and
-> the apps you're running, switches between their windows, and follows the mouse to other monitors. Screen
-> readers see its apps. Harbor can hide the Windows taskbar and gives it back on exit, crash, hang, sign-out,
-> or **Ctrl+Alt+Shift+H**; a button on the dock brings it back for a look at the tray. Stats come next (M4).
+> **Status: M4 (overlay dock and the island), in progress.** The dock floats at the bottom of the screen with
+> your pinned and running apps, a Start button and the tray; it keeps no strip of the screen and goes behind
+> full-screen apps. The island at the top of the screen opens into app search, stats, power, media and quick
+> controls. Harbor can hide the Windows taskbar and gives it back on exit, crash, hang, sign-out, or
+> **Ctrl+Alt+Shift+H**. The Windows key doesn't open the island yet.
 
 ## If your taskbar is ever missing
 
@@ -84,11 +85,13 @@ dotnet test --solution Harbor.slnx -c Debug -p:Platform=x64 --no-build
 Set `HARBOR_DOCK_EXE` to a built `harbor-dock.exe` of the same architecture to include the end-to-end tests,
 and `HARBOR_MARKER_EXE` / `HARBOR_UIA_CLIENT_EXE` / `HARBOR_TEST_WINDOWS_EXE` to `harbor_test_marker.exe` /
 `harbor_test_uia_client.exe` / `harbor_test_windows.exe` from `build\msvc-<arch>\tests\dock\<Config>\` for
-the launch, screen-reader and running-window tests (`build.ps1` sets all four). Tests never touch your real
-taskbar, work area or apps: they use stand-in windows, an AppBar that reserves nothing, and off-screen test
-windows that only their docks follow. Their docks do show a small island at the bottom of the screen for a
-moment. A few tests move the focus between windows; they run in CI, and locally only with
-`HARBOR_FOREGROUND_TESTS=1` (otherwise they are skipped).
+the launch, screen-reader and running-window tests, and `HARBOR_SHELL_EXE` to a built `Harbor.Shell.exe` for
+Harbor Shell's own end-to-end tests (`build.ps1` sets all five). Tests never touch your real taskbar, work area
+or apps: they use stand-in windows, an AppBar that reserves nothing, and off-screen test windows that only
+their docks follow. Test Shells get stand-ins for power, media and the quick controls, so a test never sleeps
+the PC or changes your volume, display, radios or theme; their windows stay off screen and out of Alt+Tab.
+Their docks and islands do show at the edges of the screen for a moment. A few tests move the focus between
+windows; they run in CI, and locally only with `HARBOR_FOREGROUND_TESTS=1` (otherwise they are skipped).
 
 Real-taskbar check (local only, never CI; your taskbar disappears for seconds at a time while it runs):
 
@@ -98,10 +101,12 @@ powershell -ExecutionPolicy Bypass -File scripts\safety-check.ps1 -Arch arm64 -E
 ```
 
 It also checks that the dock reserves no screen strip (its AppBars), "Stop dock", the tray button's peek,
-attention marks, menus and moving between monitors (it moves the mouse for those); `-Scenario budget`
-measures memory with 30 running apps. The rest, by hand: [docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md),
-[docs/testing/m2-checklist.md](docs/testing/m2-checklist.md) and
-[docs/testing/m3-checklist.md](docs/testing/m3-checklist.md).
+attention marks, menus and moving between monitors (it moves the mouse for those), and every way back while
+the dock is tucked behind a full-screen app (a black window covers the primary monitor for a few seconds);
+`-Scenario budget` measures the dock's memory with 30 running apps, `-Scenario island-budget` Harbor Shell's
+with the island. The rest, by hand: [docs/testing/m1-safety-checklist.md](docs/testing/m1-safety-checklist.md),
+[docs/testing/m2-checklist.md](docs/testing/m2-checklist.md), [docs/testing/m3-checklist.md](docs/testing/m3-checklist.md)
+and [docs/testing/m4-checklist.md](docs/testing/m4-checklist.md).
 
 Formatting:
 
@@ -128,13 +133,16 @@ Settings). **Edit pinned apps…** opens the file; Harbor picks up your changes 
 ```
 
 An `app` is an AppUserModelID (`Get-StartApps` in PowerShell lists them), a `path` an absolute path to an
-`.exe` or `.lnk`. Turn on **Hide the Windows taskbar** to hide it. The Shell shows the link to the dock
-(`pong N · <round trip>`) and the taskbar's state, starts the dock again if it fails, and **Stop dock** closes
-it. A dock you start yourself (`build\msvc-x64\src\dock\Debug\harbor-dock.exe`) is adopted when it connects.
+`.exe` or `.lnk`. Turn on **Hide the Windows taskbar** to hide it. The Shell shows whether the dock is
+connected and the taskbar's state, starts the dock again if it fails, and **Stop dock** closes it. A dock you start yourself (`build\msvc-x64\src\dock\Debug\harbor-dock.exe`) is adopted when it connects.
 How the dock works: [ADR 0008](docs/adr/0008-dock-rendering.md), [ADR 0009](docs/adr/0009-pinned-apps-launching-appbar.md).
 
 ### Using the dock
 
+- **Start**, the first button, opens the island on app search (or Windows' Start while Harbor Shell isn't
+  running). **Windows Start** in the island opens Windows' own.
+- **Full screen**: about 2.5 s after a video or a game goes full screen, the dock goes behind it; rest the mouse
+  on the bottom edge to bring it back.
 - **Running apps** have a dot under their icon; those that aren't pinned come after a divider, in the order
   you started them. Click one to bring its most recent window forward, again for its next window; with one
   window in front, a click minimizes it (another restores it).
@@ -148,16 +156,32 @@ How the dock works: [ADR 0008](docs/adr/0008-dock-rendering.md), [ADR 0009](docs
   **Win+A** (quick settings) work too.
 
 Running windows, monitors and the tray: [ADR 0010](docs/adr/0010-running-windows.md),
-[ADR 0011](docs/adr/0011-monitors-and-attention.md), [ADR 0012](docs/adr/0012-tray.md).
+[ADR 0011](docs/adr/0011-monitors-and-attention.md), [ADR 0012](docs/adr/0012-tray.md). The overlay, full
+screen and Start: [ADR 0014](docs/adr/0014-overlay-dock.md), [ADR 0015](docs/adr/0015-windows-key-and-start.md).
+
+### Using the island
+
+Harbor Shell shows a small glass notch at the top centre of the dock's monitor. It grows when the mouse comes
+near; click it (or the dock's Start button) to open it, and press Esc or click elsewhere to close it.
+
+- **Search**: type part of an app's name; Enter starts the first match, a click another.
+- **Stats**: CPU (and each core), memory, GPU, battery and drives, read only while the island is open.
+- **Power**: lock, sign out, sleep, hibernate (where enabled), restart, shut down; the last three ask first.
+- **Media**: what is playing, with previous / play-pause / next.
+- **Controls**: volume and mute, brightness (built-in displays), Wi-Fi, Bluetooth and dark mode, each only where
+  the PC has it, and links to the Focus, Night light, Airplane mode and Power mode settings.
+
+How it works: [ADR 0013](docs/adr/0013-the-island.md), [ADR 0016](docs/adr/0016-system-data-and-search.md).
 
 ## Layout
 
 | Path | Contents |
 |---|---|
 | `src/dock/` | C++ dock: `core/` (portable logic), `ports/` (interfaces), `adapters/` (Win32), `app/` |
-| `src/Harbor.Shell/` | WinUI 3 app: starts and watches the dock, pinned apps; settings UI and onboarding later |
-| `src/Harbor.Core/` | Shared C# code: IPC codec and pipe server, the dock's watchdog, taskbar restore, settings, app lookup and icons, logs |
-| `src/Harbor.Sensors/` | Hardware sensors service (empty until milestone M4) |
+| `src/Harbor.Shell/` | WinUI 3 app: starts and watches the dock, pinned apps, the island; settings UI and onboarding later |
+| `src/Harbor.Core/` | Shared C# code: IPC codec and pipe server, the dock's watchdog, taskbar restore, settings, app lookup and icons, the island's logic (search, stats, power, media, controls) with its Win32 adapters, logs |
+| `src/Harbor.Platform/` | WinRT and composition adapters for Harbor Shell: the island's window, media sessions, radios |
+| `src/Harbor.Sensors/` | Hardware sensors service (empty until temperatures, M6) |
 | `contracts/` | IPC message, state-file and icon-file formats with shared test fixtures, see [contracts/README.md](contracts/README.md) |
 | `tests/` | C++ (`dock/`, with test helpers: stand-in apps, windows and a screen-reader client) and C# (`Harbor.Core.Tests/`) tests |
 | `scripts/` | `build.ps1` (build and test one architecture), `safety-check.ps1` (real-taskbar check) |
